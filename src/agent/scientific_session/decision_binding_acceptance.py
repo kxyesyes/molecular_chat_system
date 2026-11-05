@@ -87,13 +87,34 @@ def _batch_reasons(result, record, group):
 
 def _activity_reasons(result, record, group):
     from src.activity.family_contract import resolve_activity_family
+    from src.activity.request_selection import ActivityModelRequest, request_provenance_matches
+    from src.agent.tools.activity_input import requested_activity_endpoint, requested_activity_species
     from src.target_identifiers import canonical_target_identifier
     from src.agent.validators.domain_validators import ActivityResultValidator
     if ActivityResultValidator().validate(result):
         return ['invalid_activity_evidence']
-    target = record['input_data']['query']['target']
+    payload = record['input_data']['query']
+    target = payload['target']
+    model_request = payload.get('model_request') or {}
+    try:
+        species = requested_activity_species(payload)
+        requested_species = model_request.get('species')
+        if species and requested_species and species != requested_species:
+            return ['activity_species_mismatch']
+        species = species or requested_species
+        expected = None
+        if species:
+            request = {**model_request, 'target': target, 'species': species}
+            endpoint = requested_activity_endpoint(payload)
+            if endpoint is not None:
+                request.setdefault('endpoint', endpoint)
+            expected = ActivityModelRequest.from_mapping(request)
+    except (TypeError, ValueError, AttributeError):
+        return ['activity_species_mismatch']
     targets = [target] + ([group.target] if group is not None and group.target is not None else [])
     for row in result.data:
+        if expected is not None and not request_provenance_matches(row.get('provenance'), expected):
+            return ['activity_species_mismatch']
         if 'family_id' in row:
             try:
                 family = resolve_activity_family(target)
@@ -369,6 +390,10 @@ def _scientific_data(result):
             if family and 'provenance' in row:
                 p = row['provenance']
                 item['provenance'] = _pick(p, ('bundle_id', 'source_sha256'))
+                scope = p.get('scope')
+                species = scope.get('species') if isinstance(scope, dict) else None
+                if species in ('mixed', 'human', 'mouse', 'rat', 'dog', 'pig'):
+                    item['provenance']['scope'] = {'species': species}
                 if 'models' in p:
                     item['provenance']['models'] = {task: _pick(value, ('model_id', 'weights_sha256',
                         'model_card_sha256', 'prepared_dataset_sha256', 'task_type', 'target_id',

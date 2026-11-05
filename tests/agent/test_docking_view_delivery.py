@@ -2,6 +2,7 @@
 import asyncio
 from copy import copy
 import json
+import threading
 
 import pytest
 
@@ -23,6 +24,34 @@ def socket_for(owner='owner-1', *, resistant=False):
         socket.release_send.set()
     socket.release_close.set()
     return socket
+
+
+def test_slow_status_refresh_reports_busy_without_closing_socket(tmp_path, monkeypatch):
+    rig = Rig(tmp_path)
+    async def run():
+        socket = socket_for()
+        runtime, sender = runtime_sender(socket)
+        entered, release = threading.Event(), threading.Event()
+        async with rig.client() as client:
+            coordinator = rig.coordinator(client)
+            await rig.begin(coordinator)
+            original = coordinator._capture_current
+            def slow_capture():
+                entered.set()
+                release.wait(2)
+                return original()
+            coordinator._capture_current = slow_capture
+            monkeypatch.setattr(docking_consent, 'FEEDBACK_SECONDS', .2)
+            try:
+                receipt = await entry(sender)(coordinator, root_id='root-1')
+                assert receipt.delivery == 'delivered'
+                event = json.loads(socket.texts[-1])
+                assert event['view_status'] == 'ACTIVE' and event['segment_complete'] is False
+                assert sender.writable and not socket.close_started.is_set()
+            finally:
+                release.set()
+                await coordinator.close_root(root_id='root-1', owner_session_id='owner-1')
+    asyncio.run(run())
 
 
 def test_event_and_receipt_use_the_same_actual_send_identity_and_generation(tmp_path):

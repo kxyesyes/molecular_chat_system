@@ -50,6 +50,28 @@ def egfr_row():
     return {**bche_row(), "target_id": 2, "gene_symbol": "EGFR", "uniprot_id": "P00533"}
 
 
+@pytest.mark.parametrize('row,success', [(egfr_row(), True), (bche_row(), False)])
+def test_named_accession_with_experimental_method_request_checks_identity(row, success):
+    query = ('请查询人源 EGFR（UniProt P00533）的蛋白信息和已解析的实验结构，'
+             '列出 PDB 编号及结构方法。')
+    result, service = execute(query, [row])
+    assert result['success'] is success
+    assert service.calls == [('P00533', {})]
+    assert service.structure_calls == ([2] if success else [])
+
+
+@pytest.mark.parametrize('gene, succeeds', [('BCHE', True), ('EGFR', False)])
+def test_exact_pdb_named_accession_and_structure_details_keep_identity(gene, succeeds):
+    query = ('请查询人源丁酰胆碱酯酶（UniProt P06276）的实验结构 PDB 1P0I，'
+             '列出结构信息和配体。')
+    result, service = execute(query, [{**bche_row(), 'gene_symbol': gene}])
+    assert result['success'] is succeeds
+    assert service.calls == [('P06276', {'pdb_id': '1P0I'})]
+    if not succeeds:
+        assert result['error']['code'] == 'validation_error'
+        assert not service.structure_calls
+
+
 @pytest.mark.parametrize("query,accessions,target_ids", [
     ("Find EGFR (UniProt P00533) and BCHE (UniProt P06276) for structures.",
      ["P00533", "P06276"], [2, 1]),

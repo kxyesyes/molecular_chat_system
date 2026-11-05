@@ -47,7 +47,7 @@
 }
 
 .chat-composer .fill,
-.chat-composer .fill input {
+.chat-composer .fill textarea {
   min-width: 0;
 }
 
@@ -94,8 +94,8 @@
     max-width: 100%;
   }
 
-  /* Fixed composer: input, tools, decision row, gaps and safe-area clearance. */
+  /* Fixed composer: three-row textarea, tools, decision row, gaps and safe-area clearance. */
   .index_con .right {
-    padding-bottom: calc(208px + env(safe-area-inset-bottom));
+    padding-bottom: calc(244px + env(safe-area-inset-bottom));
   }
 }

@@ -113,6 +113,32 @@ print(encode(dict(ref=ref, raw=encode(dict(success=True, data=dict(**ref, payloa
 }
 
 async function run() {
+  await test("verified ADMET endpoints are directly accessible by molecule", async () => {
+    const container = host();
+    const fixture = {...details, payload: {...payload, status: "completed", tool_result_sequence: [{
+      tool_name: "admet_predictor", status: "succeeded", success: true, error: null,
+      quality: {validated: true, scientific_usable: true}, data: [
+        {smiles: "CCO", status: "succeeded", admet: {endpoints: {hERG: {value: 0.1, unit: "-", task_type: "classification", source: "admet_ai_model"},
+          Half_Life_Obach: {value: -6.2, unit: "hr", task_type: "regression", source: "admet_ai_model", validity: "out_of_range"}}}},
+        {smiles: "CCN", status: "succeeded", admet: {endpoints: {hERG: {value: 0.2, unit: "-", task_type: "classification", source: "admet_ai_model"}}}},
+      ]}]}};
+    api.mount(container, {traceId, reference, load: async () => fixture});
+    await open(container);
+    const sections = container.all().filter(n => n.tagName === "details" && n.children[0]?.textContent.startsWith("ADMET 端点"));
+    assert.equal(sections.length, 2);
+    assert(sections[0].textContent.includes("CCO") && sections[1].textContent.includes("CCN"));
+    for (const section of sections) {section.open = true; await section.dispatch("toggle");}
+    assert(sections[0].textContent.includes("hERG") && sections[0].textContent.includes("0.1"));
+    assert(sections[0].textContent.includes("Half_Life_Obach") && sections[0].textContent.includes("-6.2"));
+    assert(sections[0].textContent.includes("超出物理范围，预测不可用"));
+    assert(sections[1].textContent.includes("hERG") && sections[1].textContent.includes("0.2"));
+    const failedContainer = host();
+    const failed = copy(fixture);
+    failed.payload.tool_result_sequence[0].quality.validated = false;
+    api.mount(failedContainer, {traceId, reference, load: async () => failed});
+    await open(failedContainer);
+    assert(!failedContainer.all().some(n => n.tagName === "summary" && n.textContent.startsWith("ADMET 端点")));
+  });
   await test("401 is an authentication error, never reads diagnostics, and retries only its own GET", async () => {
     const container = host(), calls = [];
     let bodyReads = 0;

@@ -26,6 +26,7 @@ _REF = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _FIELDS = frozenset({"root", "revision", "receptor_ref", "ligand_ref"})
 _CONTROL_SECONDS = 4.9  # Reserve response construction time within the 5s slice.
 _PREPARE_SECONDS = 30.0
+_INVENTORY_SECONDS = 30.0
 _MAX_CONTROL_TASKS = 32
 _PHASES = frozenset({'BUSY', 'PREPARING', 'AWAITING_INPUT', 'READY', 'APPROVING',
     'EXECUTING', 'RESULT_PENDING', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'UNKNOWN',
@@ -317,7 +318,7 @@ async def _input_body(request, deadline, control):
                              max_bytes=65536 if control == 'selection' else _MAX_BODY)
     fields = ({'revision', 'receptor_ref', 'ligand_ref', 'parameters'} if control == 'parameters'
               else {'revision', 'source_sha256', *({'section', 'offset', 'limit'}
-                    if control == 'source-page' else {'selection'})})
+                    if control == 'source-page' else {'selection'} if control == 'selection' else set())})
     if (set(value) != fields or type(value['revision']) is not int
             or not 0 <= value['revision'] <= 2**53 - 1):
         raise HTTPException(422, 'Invalid request')
@@ -337,7 +338,7 @@ async def _input_body(request, deadline, control):
             if control == 'selection':
                 value['selection'], key = _capture_selection(value['selection'])
                 _selection_shape(value['selection'])
-            elif (type(value['section']) is not str or value['section'] not in _SECTIONS
+            elif control == 'source-page' and (type(value['section']) is not str or value['section'] not in _SECTIONS
                     or type(value['offset']) is not int or not 0 <= value['offset'] <= 99999
                     or type(value['limit']) is not int or not 1 <= value['limit'] <= 32):
                 raise ValueError
@@ -354,7 +355,8 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
     # even in isolated apps which installed it before registering these routes.
     app.add_middleware(DockingHTTPMiddleware, transport=_ControlTransport(coordinator),
         budget=lambda scope: (_PREPARE_SECONDS if scope.get('method') == 'POST'
-            and scope.get('path') == '/api/agent/docking/preparations' else _CONTROL_SECONDS + 0.1))
+            and (scope.get('path') == '/api/agent/docking/preparations'
+                 or scope.get('path', '').endswith('/source-inventory')) else _CONTROL_SECONDS + 0.1))
 
     def authenticate(request, *, mutation=True):
         owner = request.scope.get("agent_session_id")
@@ -368,7 +370,7 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
         return owner
 
     async def input_control(task_id, request, control):
-        deadline = request_deadline(request, _CONTROL_SECONDS)
+        deadline = request_deadline(request, _INVENTORY_SECONDS if control == 'source-inventory' else _CONTROL_SECONDS)
         owner = authenticate(request)
         transport = _ControlTransport(coordinator)
         root = transport.live(owner, 'task_id', task_id)
@@ -396,14 +398,14 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
                     or any(root.accepted_slots[name] != dict(state='fixed', value=value[name])
                            for name in ('receptor_ref', 'ligand_ref'))):
                 raise HTTPException(409, 'Input changed')
-            if control != 'source-page' and (root.staging_started or root.input_context is not None
+            if control not in {'source-page', 'source-inventory'} and (root.staging_started or root.input_context is not None
                     or root.task is not None and not root.task.done()):
                 raise HTTPException(409, 'Input busy')
 
         dispatchable()
         # One retained slot for either mutation; never coalesce differing inputs
         # into an earlier request. The coordinator remains the physical owner.
-        slot = object() if control == 'source-page' else ('input', id(root))
+        slot = object() if control in {'source-page', 'source-inventory'} else ('input', id(root))
         pending = transport.tasks.get(slot)
         if pending is not None and not pending.done():
             raise HTTPException(409, 'Input busy')
@@ -421,6 +423,8 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
             if control == 'source-page':
                 return await coordinator.source_page(**args, **{name: value[name] for name in
                     ('source_sha256', 'section', 'offset', 'limit')})
+            if control == 'source-inventory':
+                return await coordinator.source_inventory(**args, source_sha256=value['source_sha256'])
             if control == 'selection':
                 return await coordinator.select_source(**args, source_sha256=value['source_sha256'],
                                                        selection=value['selection'])
@@ -435,15 +439,15 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
             # a pending receipt. A queued/rejected job or a duplicate status
             # wait is not admission, even if some other operation is running.
             marker = root.selection_key if control == 'selection' else root.confirmation_key
-            if (exc.status_code != 503 or control == 'source-page' or not dispatched
+            if (exc.status_code != 503 or control in {'source-page', 'source-inventory'} or not dispatched
                     or entry_key is not None or marker != key or root.task is entry_task):
                 raise
             current(revision=False)
             return JSONResponse(_receipt(task_id, root.preparation_id, root.phase, pending=True),
                 status_code=202, headers={'Cache-Control': 'private, no-store'})
-        current(revision=control == 'source-page')
+        current(revision=control in {'source-page', 'source-inventory'})
         check_feedback(request)
-        if control == 'source-page':
+        if control in {'source-page', 'source-inventory'}:
             if view.get('ok') is not True:
                 raise HTTPException(409, 'Source unavailable')
             return JSONResponse(view, headers={'Cache-Control': 'private, no-store'})
@@ -459,6 +463,10 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
     @app.post('/api/agent/docking/tasks/{task_id}/source-page')
     async def source_page(task_id: str, request: Request):
         return await input_control(task_id, request, 'source-page')
+
+    @app.post('/api/agent/docking/tasks/{task_id}/source-inventory')
+    async def source_inventory(task_id: str, request: Request):
+        return await input_control(task_id, request, 'source-inventory')
 
     @app.post('/api/agent/docking/tasks/{task_id}/selection')
     async def selection(task_id: str, request: Request):

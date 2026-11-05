@@ -8,6 +8,119 @@ from src.agent.tools.base_tool import execute_tool_compat
 from tests.agent.test_family_activity_tool import boundary  # shared synthetic service
 
 
+@pytest.mark.parametrize('smiles', ['CCO', 'CCO.Cl'])
+def test_labeled_activity_field_followed_by_separated_target(smiles):
+    from src.agent.tools.activity_input import parse_activity_input
+    from src.agent.tools.base_tool import BaseMolecularTool
+    _, values, target = parse_activity_input(
+        f'请预测 SMILES: {smiles} 对人丁酰胆碱酯酶（BuChE）的活性。', BaseMolecularTool('test', ''))
+    assert values == [smiles] and target == '丁酰胆碱酯酶'
+
+
+def test_activity_target_reference_does_not_hide_new_explicit_target():
+    from src.agent.tools.activity_input import parse_activity_input
+    from src.agent.tools.base_tool import BaseMolecularTool
+    parser = BaseMolecularTool('test', '')
+    query = '请预测 SMILES: CCO 对人丁酰胆碱酯酶（BuChE）的抑制活性，并说明模型是否支持该靶点以及该分子是否在模型适用域内。'
+    assert parse_activity_input(query, parser)[1:] == (['CCO'], '丁酰胆碱酯酶')
+    with pytest.raises(ValueError):
+        parse_activity_input(query.replace('该靶点以及', '该靶点 EGFR 以及'), parser)
+
+
+@pytest.mark.parametrize('suffix', ['', '，并给出模型信息与适用范围'])
+def test_spaced_human_buche_request_keeps_the_full_smiles(suffix):
+    from src.agent.tools.activity_input import parse_activity_input
+    from src.agent.tools.base_tool import BaseMolecularTool
+    parser = BaseMolecularTool('test', '')
+    query = f'请预测 SMILES：CCO 对人源 BuChE 的活性{suffix}。'
+    assert parse_activity_input(query, parser)[1:] == (['CCO'], 'BuChE')
+    with pytest.raises(ValueError):
+        parse_activity_input(query.replace('CCO', 'CCO$bad'), parser)
+
+
+@pytest.mark.parametrize('suffix', ['$bad', ')', '.'])
+def test_labeled_activity_field_does_not_discard_invalid_structure_suffix(suffix):
+    from src.agent.tools.activity_input import parse_activity_input
+    from src.agent.tools.base_tool import BaseMolecularTool
+    with pytest.raises(ValueError):
+        parse_activity_input(f'请预测 SMILES: CCO{suffix} 对人丁酰胆碱酯酶（BuChE）的活性。',
+                             BaseMolecularTool('test', ''))
+
+
+def test_explicit_labeled_two_molecule_activity_comparison(boundary):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, '比较 SMILES: CCO 和 CCN 对 BuChE 的活性。')
+    assert result.success
+    assert calls == [(['CCO', 'CCN'], 'BuChE')]
+
+
+def test_labeled_comparison_retains_complete_disconnected_structure():
+    from src.agent.tools.activity_input import parse_activity_input
+    from src.agent.tools.base_tool import BaseMolecularTool
+    _, structures, target = parse_activity_input(
+        '比较 SMILES: CCO.Cl 和 C1CC1 对 BuChE 的活性。', BaseMolecularTool('test', ''))
+    assert structures == ['CCO.Cl', 'C1CC1'] and target == 'BuChE'
+
+
+def test_labeled_activity_comparison_routes_only_to_activity():
+    from src.agent.contracts import AgentContext
+    from src.agent.contracts.web_requirements import WEB_TOOLS
+    from src.agent.scientific_session.web_requirements import compile_web_requirements
+    query = '比较 SMILES: CCO 和 CCN 对 BuChE 的活性。'
+    plan = compile_web_requirements(AgentContext(query, 'comparison'), allowed_tools=WEB_TOOLS)
+    assert [step.tool_name for step in plan.steps] == ['activity_predictor']
+    assert plan.request['query'] == query
+
+
+def test_web_labeled_activity_comparison_uses_both_exact_structures(tmp_path):
+    from tests.agent.test_browser_evidence_followup import handler_for, prediction, turn
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCO', 4.3), prediction('CCN', 4.7)])
+    result, _ = turn(handler, '比较 SMILES: CCO 和 CCN 对 BuChE 的活性。', [])
+    assert result['status'] == 'completed', result
+    assert len(activity.calls) == 1
+    from src.agent.tools.activity_input import parse_activity_input
+    from src.agent.tools.base_tool import BaseMolecularTool
+    _, structures, target = parse_activity_input(activity.calls[0], BaseMolecularTool('test', ''))
+    assert structures == ['CCO', 'CCN'] and target == 'BuChE'
+    assert 'CCO' in result['content'] and 'CCN' in result['content']
+
+
+@pytest.mark.parametrize('bad_structure', ['CCN$bad', 'CCN)', 'C1CC'])
+def test_web_labeled_comparison_reports_complete_invalid_structure(tmp_path, bad_structure):
+    from src.agent.utils.validators import InputValidator
+    from tests.agent.test_browser_evidence_followup import handler_for, prediction, turn
+    query = f'比较 SMILES: CCO 和 {bad_structure} 对 BuChE 的活性。'
+    analysis = InputValidator().analyze_molecular_input(query)
+    assert analysis.blocks_execution
+    assert any(candidate.value == bad_structure and candidate.validation == 'invalid'
+               for candidate in analysis.candidates)
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCO', 4.3), prediction('CCN', 4.7)])
+    result, _ = turn(handler, query, [])
+    assert result['status'] == 'rejected' and 'SMILES' in result['content']
+    assert '无效' in result['content'] and not activity.calls
+
+
+def test_invalid_comparison_does_not_log_structure(capfd, caplog):
+    from src.agent.utils.validators import InputValidator
+    query = '比较 SMILES: CCO 和 CCN$private_marker 对 BuChE 的活性。'
+    assert InputValidator().analyze_molecular_input(query).blocks_execution
+    assert 'private_marker' not in capfd.readouterr().err
+    assert 'private_marker' not in caplog.text
+
+
+@pytest.mark.parametrize('query', [
+    '比较 SMILES: CCO 和 CCN$bad 对 BuChE 的活性。',
+    '比较 SMILES: CCO 和 CCN 对 BuChE 的活性和 FooMetric。',
+    '比较 SMILES: CCO 和 CCN 对 BuChE 的活性并发送邮件。',
+])
+def test_labeled_activity_comparison_never_drops_invalid_suffix_or_extra_obligations(query):
+    from src.agent.contracts import AgentContext
+    from src.agent.contracts.web_requirements import WEB_TOOLS
+    from src.agent.scientific_session.web_requirements import compile_web_requirements
+    with pytest.raises(ValueError):
+        compile_web_requirements(AgentContext(query, 'invalid-comparison'), allowed_tools=WEB_TOOLS)
+
+
 @pytest.mark.parametrize("query", [
     "预测 CCO 的 pKi",
     "Predict Ki activity of CCO",
@@ -80,6 +193,16 @@ def test_negated_docking_clause_does_not_conflict_with_activity_target(boundary)
 
     assert result.success
     assert calls == [(["CCO"], "PDE4A")]
+
+
+def test_generated_candidates_pronoun_does_not_override_explicit_target(boundary):
+    from src.agent.tools.activity_input import activity_target
+    from rdkit import Chem
+    query = '为 BuChE 设计两个候选小分子，给出 SMILES 并预测它们的活性。'
+    assert activity_target(query, lambda value: Chem.MolFromSmiles(value) is not None).casefold() == 'buche'
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, {'query': query, 'target': 'BuChE', 'smiles': ['CCO', 'CCN']})
+    assert result.success and calls == [(['CCO', 'CCN'], 'BuChE')]
 
 
 @pytest.mark.parametrize("metric", ["IC50", "pIC50", "PIC50", "EC50", "pEC50", "Ki", "pKi", "Kd", "pKd"])
@@ -265,3 +388,40 @@ def test_known_targets_keep_supported_metric_suffixes(boundary, query, target):
     tool, calls, _ = boundary
     assert execute_tool_compat(tool, query).success
     assert calls == [(["CCO"], target)]
+
+
+def test_equivalent_parenthesized_target_alias_is_one_target(boundary):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, '预测 CCO 对丁酰胆碱酯酶（BuChE）的活性。')
+    assert result.success
+    assert calls == [(['CCO'], '丁酰胆碱酯酶')]
+
+
+@pytest.mark.parametrize('alias', ['PDE5A', 'EGFR'])
+def test_parenthesized_target_alias_must_not_hide_conflict_or_unknown(boundary, alias):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, f'预测 CCO 对丁酰胆碱酯酶（{alias}）的活性。')
+    assert result.status == ObservationStatus.INVALID_INPUT
+    assert not calls
+
+
+def test_parenthesized_alias_does_not_hide_an_attached_unknown_target(boundary):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, '预测 CCO 对丁酰胆碱酯酶（BuChE）EGFR 的活性。')
+    assert result.status == ObservationStatus.INVALID_INPUT
+    assert not calls
+
+
+def test_activity_target_rejection_mentions_species_scope():
+    from src.agent.scientific_session.controller import _decision_failure_message
+    assert '物种' in _decision_failure_message('activity_target_conflict_or_unknown')
+
+
+def test_explicit_new_activity_prediction_accepts_reprediction_verb():
+    from src.agent.tools.activity_input import parse_activity_input
+    from src.agent.tools.base_tool import BaseMolecularTool
+    query = '请重新预测 SMILES: CCO 对 BuChE 的活性。'
+    _, smiles, target = parse_activity_input(query, BaseMolecularTool('test', ''))
+    assert smiles == ['CCO'] and target == 'BuChE'
+    with pytest.raises(ValueError):
+        parse_activity_input(query.replace('CCO', 'CCO$bad'), BaseMolecularTool('test', ''))

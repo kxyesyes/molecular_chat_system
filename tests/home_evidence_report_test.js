@@ -101,6 +101,31 @@ function validateCases(report, event) {
   api.renderReport(warningCards, api.normalize(warningReport));
   assert(visibleText(warningCards).includes('处理 候选 1 时预测结果存在明显毒性风险'));
   assert(!visibleText(warningCards).includes(candidate.candidate_id));
+  const admetInfo = [
+    'ADMET-AI outputs are model predictions; they are not experimental results.',
+    'Physicochemical endpoints are calculated by RDKit inside ADMET-AI.',
+    'Risk summary is a screening heuristic, not a safety conclusion.',
+  ];
+  const admetReport = clone(report);
+  admetReport.warnings.push(...admetInfo, ...admetInfo, '具体端点存在数据缺失。');
+  const admetBox = new Element('div');
+  api.renderReport(admetBox, api.normalize(admetReport));
+  for (const info of admetInfo) {
+    assert(!visibleText(admetBox).includes(info), 'generic model notes belong in details');
+    assert(allText(admetBox).includes(info), 'original model notes remain available in details');
+  }
+  assert(visibleText(admetBox).includes('具体端点存在数据缺失。'), 'specific warning remains visible');
+  const failed = clone(report);
+  const stepId = 'web-' + 'a'.repeat(64);
+  const reason = '未找到与请求物种匹配的已登记活性模型；本次未生成预测值。';
+  const wrapped = `Optional step ${stepId} (activity_predictor) failed: ${reason}`;
+  failed.steps.push({step_id:stepId, tool_name:'activity_predictor', status:'failed',
+    source_observation_id:null, reason_code:'source_failed', message:'未取得可验证的成功工具证据'});
+  failed.warnings.push(reason, wrapped);
+  const failedBox = new Element('div'); api.renderReport(failedBox, api.normalize(failed));
+  assert(!visibleText(failedBox).includes(stepId), 'internal step IDs stay in the details');
+  assert.equal(visibleText(failedBox).split(reason).length - 1, 1, 'specific failure is shown once');
+  assert(allText(failedBox).includes(wrapped), 'the original warning stays in details');
 }
 
 // The server may publish the report before the candidate payload. The report
@@ -127,7 +152,7 @@ async function actualMain(frames, {failReport = false, failProperties = false, f
   const evidenceReportViews = new WeakMap();
   const source = fs.readFileSync(path.join(__dirname, "../src/web/static/js/home/main.js"), "utf8");
   const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
-  const renderer = section("function renderMoleculeCandidates(messageElement, payload)", "  window.HomeMain =");
+  const renderer = section("function renderMoleculeCandidates(", "  window.HomeMain =");
   const display = section("function displayCandidateCollections(element, payloads)", "  // DOM元素缓存");
   const resolve = section("function resolveCompletionAction(", "  // 完成最后一条消息");
   const complete = section("function completeLastMessage(", "  // 显示状态消息");

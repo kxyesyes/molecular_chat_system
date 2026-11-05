@@ -7,7 +7,7 @@
   const MAX_ROWS = 4096, MAX_BYTES = 2 * 1024 * 1024, MAX_NODES = 150000;
   const SECTIONS = "protein_selection reference_residue hetero_choices conformer_choices residues conformer_constraints connections limitations".split(" ");
   const TITLES = ["蛋白链与模型", "参考配体残基", "异源残基处理", "替代构象", "残基与原子事实", "构象约束", "连接事实", "结构限制"];
-  const ROLES = "protein deposited_ligand glycan metal solvent buffer water cofactor other unproven".split(" ");
+  const ROLES = "protein deposited_ligand site_candidate glycan metal solvent buffer water cofactor other unproven".split(" ");
   const ID_FIELDS = "model chain resname resseq icode";
   const fail = () => { throw new Error("结构选择不可用：数据不完整、无效或超出界面上限。"); };
   function require(value) { if (!value) fail(); }
@@ -146,11 +146,11 @@
     });
     const references = unique(data.reference_residue, r => {
       const key = identity(r), fact = residues.get(key), p = proteins.get(chainKey(r));
-      require(fact && fact.role === "deposited_ligand" && fact.required_heavy_atoms.length && p && p.eligible); return key;
+      require(fact && ["deposited_ligand", "site_candidate"].includes(fact.role) && fact.required_heavy_atoms.length && p && p.eligible); return key;
     });
     require(references.size === data.residues.filter(r => {
       const p = proteins.get(chainKey(r.residue));
-      return r.role === "deposited_ligand" && r.required_heavy_atoms.length > 0 && p && p.eligible;
+      return ["deposited_ligand", "site_candidate"].includes(r.role) && r.required_heavy_atoms.length > 0 && p && p.eligible;
     }).length);
     const heteros = unique(data.hetero_choices, h => {
       closed(h, "residue role actions"); const key = identity(h.residue), r = residues.get(key);
@@ -250,7 +250,7 @@
     const request = options.request, isCurrent = options.isCurrent;
     const onSubmitted = options.onSubmitted, onError = options.onError;
     let disposed = false, stale = false, busy = false, loaded = false, failed = false, sent = false;
-    let event, source, data = {}, residues, reference = "";
+    let event, source, data = {}, residues, reference = "", waterExpanded = false, limitsExpanded = false;
     const selected = new Set(), hetero = new Map(), conformer = new Map(), reviewed = new Set();
     const listeners = [], controls = [];
     const root = doc.createElement("section"); host.appendChild(root);
@@ -270,7 +270,8 @@
     }
     const status = element("p", "仅准备对接输入，不授权或启动科学执行。"); status.setAttribute("role", "status");
     const open = element("button", "查看结构并选择"); open.type = "button";
-    const facts = element("div"), form = element("div");
+    const facts = element("div"), form = element("div"), validation = element("p");
+    validation.setAttribute("role", "status");
     const submit = element("button", "确认结构选择并生成输入"); submit.type = "button"; submit.disabled = true;
     function disable() {
       open.disabled = true; submit.disabled = true;
@@ -328,24 +329,44 @@
     function updateValidity() {
       submit.disabled = true;
       if (!current()) { disable(); return; }
+      validation.textContent = "";
+      if (loaded && reference) {
+        const zero = [...activeKeys()].map(k => residues.get(k)).filter(r =>
+          r.atoms.some(a => (!a.altloc || a.altloc === conformer.get(residueKey(r.residue)))
+            && a.occupancy_hundredths === 0));
+        if (zero.length) {
+          const names = zero.slice(0, 8).map(r => `${r.residue.chain || "空"} 链 ${r.residue.resname} ${r.residue.resseq}`);
+          validation.textContent = `已选结构含占有率为 0 的原子（${names.join("、")}${zero.length > 8 ? ` 等 ${zero.length} 个残基` : ""}）；当前无法生成输入，请调整结构选择或选择其他结构。`;
+        }
+        const incomplete = [...activeKeys()].map(k => residues.get(k)).filter(r => {
+          const choice = conformer.get(residueKey(r.residue));
+          if (!choice && r.atoms.some(a => a.altloc)) return false;
+          const atoms = r.atoms.filter(a => !a.altloc || a.altloc === choice);
+          return r.required_heavy_atoms.some(a => !atoms.some(b => a.name === b.name && a.element === b.element));
+        });
+        if (incomplete.length) {
+          const names = incomplete.slice(0, 8).map(r => `${r.residue.chain || "空"} 链 ${r.residue.resname} ${r.residue.resseq}`);
+          validation.textContent += ` 已选结构缺少必要重原子（${names.join("、")}${incomplete.length > 8 ? ` 等 ${incomplete.length} 个残基` : ""}）；当前无法生成输入，请调整结构选择或选择其他结构。`;
+        }
+      }
       try {
         const body = {revision: event.revision, source_sha256: source.source_sha256, selection: selection()};
         if (!bodyFits(body)) { unavailable(); return; }
         submit.disabled = false;
       } catch (_) { /* Explicitly incomplete. */ }
     }
-    function checkbox(role, caption, checked, enabled, change) {
-      const wrap = element("label", undefined, form), input = element("input", undefined, wrap);
+    function checkbox(role, caption, checked, enabled, change, parent = form) {
+      const wrap = element("label", undefined, parent), input = element("input", undefined, wrap);
       input.type = "checkbox"; input.checked = checked; input.disabled = !enabled;
       input.setAttribute("data-role", role); input.setAttribute("aria-label", caption);
       element("span", caption, wrap);
       listen(input, "change", () => { if (!current() || busy || failed || sent || input.disabled) return; change(input.checked === true); }, true);
       return input;
     }
-    function select(role, caption, choices, value, change) {
-      const wrap = element("label", caption, form), input = element("select", undefined, wrap);
+    function select(role, caption, choices, value, change, parent = form, emptyLabel = "请选择（无默认选择）") {
+      const wrap = element("label", caption, parent), input = element("select", undefined, wrap);
       input.setAttribute("data-role", role); input.setAttribute("aria-label", caption);
-      element("option", "请选择（无默认选择）", input).value = "";
+      element("option", emptyLabel, input).value = "";
       choices.forEach(([key, title]) => { element("option", title, input).value = key; }); input.value = value;
       listen(input, "change", () => {
         if (!current() || busy || failed || sent) return;
@@ -360,26 +381,59 @@
         checkbox("protein", `模型 ${p.model} / 链 ${p.chain || "(空链)"} / 实体 ${p.entity_id} / ${p.uniprot_id} / 物种 ${p.taxonomy_id}${p.eligible ? "" : "（不符合目标）"}`,
           selected.has(key), p.eligible, value => { if (value) selected.add(key); else selected.delete(key); resetChoices(); renderChoices(); });
       });
+      if (data.residues.some(r => r.role === "site_candidate"))
+        element("p", "位点注释候选也可能是添加剂；请核实其用途后再选择。", form);
+      const roles = new Map(data.residues.map(item => [residueKey(item.residue), item.role]));
       select("reference", "参考配体残基（用于生成输入，不保留在受体中）", data.reference_residue.flatMap((r, i) =>
-        selected.has(chainKey(r)) ? [[String(i), JSON.stringify(r)]] : []),
+        selected.has(chainKey(r)) ? [[String(i), JSON.stringify(r) + (roles.get(residueKey(r)) === "site_candidate" ? "（位点注释候选）" : "")]] : []),
       reference ? String(data.reference_residue.findIndex(r => residueKey(r) === reference)) : "", value => {
         reference = value === "" ? "" : residueKey(data.reference_residue[Number(value)]);
         hetero.clear(); conformer.clear(); reviewed.clear(); renderChoices();
       });
       if (reference) {
+        const waters = data.hetero_choices.filter(h => h.role === "water" && residueKey(h.residue) !== reference);
+        if (waters.length > 1) {
+          const actions = new Set(waters.map(h => hetero.get(residueKey(h.residue))));
+          const bulk = actions.size === 1 && !actions.has(undefined) ? [...actions][0] : "";
+          select("water-batch", `水分子（${waters.length} 个）`, [["retain", "全部保留"], ["remove", "全部移除"]], bulk, value => {
+            waters.forEach(h => {
+              const key = residueKey(h.residue);
+              if (value) hetero.set(key, value); else hetero.delete(key);
+              conformer.delete(key);
+            });
+            renderChoices();
+          }, form, actions.size > 1 && !actions.has(undefined) ? "已逐项设置" : "请选择（无默认选择）");
+        }
+        const waterDetails = waters.length > 1 ? element("details", undefined, form) : form;
+        if (waterDetails !== form) {
+          waterDetails.open = waterExpanded;
+          listen(waterDetails, "toggle", () => { waterExpanded = waterDetails.open; }, true);
+          element("summary", "逐个查看或调整水分子", waterDetails);
+        }
         data.hetero_choices.filter(h => residueKey(h.residue) !== reference).forEach(h => {
           const key = residueKey(h.residue);
           select("hetero", `明确处理 ${h.role} ${JSON.stringify(h.residue)}`, [["retain", "保留 retain"], ["remove", "移除 remove"]], hetero.get(key) || "", value => {
             hetero.set(key, value); conformer.delete(key); renderChoices();
-          });
+          }, h.role === "water" ? waterDetails : form);
         });
         const active = activeKeys();
         data.conformer_choices.filter(c => active.has(residueKey(c.residue))).forEach(c => {
           const key = residueKey(c.residue);
           select("conformer", `替代构象 ${JSON.stringify(c.residue)}`, c.altlocs.map(a => [a, `altloc ${a}`]), conformer.get(key) || "", value => { conformer.set(key, value); updateValidity(); });
         });
-        relevantLimitations().forEach(l => checkbox("limitation", `已审阅限制 ${l.id} / ${l.kind} / ${l.source_record_id} / ${JSON.stringify(l.residues)}`,
-          reviewed.has(l.id), true, checked => { if (checked) reviewed.add(l.id); else reviewed.delete(l.id); updateValidity(); }));
+        const limits = relevantLimitations();
+        const limitationDetails = limits.length > 1 ? element("details", undefined, form) : form;
+        if (limitationDetails !== form) {
+          limitationDetails.open = limitsExpanded;
+          listen(limitationDetails, "toggle", () => { limitsExpanded = limitationDetails.open; }, true);
+          element("summary", `查看全部结构限制（${limits.length} 条）`, limitationDetails);
+          checkbox("review-all", `已审阅全部 ${limits.length} 条结构限制`, limits.every(l => reviewed.has(l.id)), true, checked => {
+            limits.forEach(l => { if (checked) reviewed.add(l.id); else reviewed.delete(l.id); });
+            renderChoices();
+          }, limitationDetails);
+        }
+        limits.forEach(l => checkbox("limitation", `已审阅限制 ${l.kind} / ${JSON.stringify(l.residues)}`,
+          reviewed.has(l.id), true, checked => { if (checked) reviewed.add(l.id); else reviewed.delete(l.id); renderChoices(); }, limitationDetails));
       }
       updateValidity();
     }
@@ -388,7 +442,20 @@
       busy = true; open.disabled = true; status.textContent = "正在完整加载结构事实；尚未选择或授权执行。";
       try {
         const budget = {nodes: 0, bytes: 0};
-        for (const section of SECTIONS) {
+        if (typeof options.requestInventory === "function") {
+          const response = await options.requestInventory(`/api/agent/docking/tasks/${encodeURIComponent(event.task_id)}/source-inventory`,
+            {revision: event.revision, source_sha256: source.source_sha256});
+          if (!current()) return;
+          const snapshot = detached(response, budget);
+          closed(snapshot, "ok source_sha256 sections input_ready execution_authorized");
+          require(snapshot.ok === true && snapshot.source_sha256 === source.source_sha256
+            && snapshot.input_ready === false && snapshot.execution_authorized === false);
+          closed(snapshot.sections, SECTIONS.join(" "));
+          SECTIONS.forEach(section => {
+            require(Array.isArray(snapshot.sections[section]) && snapshot.sections[section].length === source.choice_counts[section]);
+            data[section] = snapshot.sections[section];
+          });
+        } else for (const section of SECTIONS) {
           const count = source.choice_counts[section]; let offset = 0; data[section] = [];
           do {
             if (!current()) return;

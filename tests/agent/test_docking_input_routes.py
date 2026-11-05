@@ -109,6 +109,32 @@ def receipt(response, *, pending=False):
     assert response.headers['cache-control'] == 'private, no-store'
 
 
+def test_source_inventory_is_one_owned_snapshot_without_execution(tmp_path, target_case, monkeypatch):
+    async def run():
+        async with input_case(tmp_path, target_case, monkeypatch) as case:
+            response = await post(case, 'source-inventory', {
+                'revision': case.root.accepted_revision, 'source_sha256': case.source_sha256})
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert data['ok'] and data['source_sha256'] == case.source_sha256
+            assert data['input_ready'] is data['execution_authorized'] is False
+            assert set(data['sections']) == routes._SECTIONS
+            assert data['sections']['reference_residue']
+            assert not case.calls
+            for invalid in (
+                {'revision': case.root.accepted_revision + 1, 'source_sha256': case.source_sha256},
+                {'revision': case.root.accepted_revision, 'source_sha256': 'f' * 64},
+                {'revision': case.root.accepted_revision, 'source_sha256': case.source_sha256, 'extra': True},
+            ):
+                denied = await post(case, 'source-inventory', invalid)
+                assert denied.status_code in {409, 422}
+            foreign = await case.client.post(path(case, 'source-inventory'),
+                json={'revision': case.root.accepted_revision, 'source_sha256': case.source_sha256},
+                headers={'Origin': ORIGIN}, cookies=cookies(case.foreign))
+            assert foreign.status_code == 404
+    asyncio.run(run())
+
+
 def test_actual_source_selection_parameters_and_current_revision_duplicates(tmp_path, target_case, monkeypatch):
     async def run():
         async with input_case(tmp_path, target_case, monkeypatch) as case:

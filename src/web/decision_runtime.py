@@ -6,7 +6,9 @@ gate covers physical worker settlement, not just an asyncio wrapper lifetime.
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+import html
 import json
+import logging
 import re
 import time
 from types import SimpleNamespace
@@ -30,6 +32,8 @@ from src.agent.contracts.ordinary_admission import (
     settled_waiting_credit, binding_digest, validate_carry_in,
 )
 from src.agent.decision_transport import IntentJournal
+from src.agent.contracts.consultation_request import (
+    asks_about_given_information, mentions_assay_concentration, tool_free_consultation_requested)
 from src.agent.pi_runtime.runtime import PiAgentRuntime
 from src.agent.scientific_session.decision_history import HistoryUpdate, history_pairs, history_prefix, retain_history_pair
 from src.agent.scientific_session.decision_inputs import (
@@ -59,6 +63,7 @@ from .scientific_obligations import ScientificObligationCompiler, ScientificPlan
 _now = time.monotonic
 _WEB_WAITING_TTL_SECONDS = 15 * 60
 _WEB_REQUEST_VERSION = 1
+logger = logging.getLogger(__name__)
 
 
 def _should_compile_scientific_plan(envelope):
@@ -69,6 +74,35 @@ def _should_compile_scientific_plan(envelope):
         and envelope.selection is None
         and ScientificObligationCompiler.is_profile_candidate(envelope.query)
     )
+
+
+def _batch_property_rows_match(plan, rows):
+    from rdkit import Chem
+    if not isinstance(rows, list) or len(rows) != len(plan.canonical_smiles.split('\n')):
+        return False
+    identities = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('smiles'), str):
+            return False
+        molecule = Chem.MolFromSmiles(row['smiles'])
+        if molecule is None:
+            return False
+        identities.append(Chem.MolToSmiles(molecule))
+    return identities == plan.canonical_smiles.split('\n')
+
+
+def _oral_explanation_has_candidate_claim(text):
+    for clause in re.split(r'[，,。！？!?；;\n]', text):
+        if (re.search(r'(?:某个|另一个|第[一二]|该|此)(?:个|种)?(?:分子|结构|候选)', clause)
+                and re.search(r'溶解|溶于|溶性|渗透|吸收|生物利用|安全性|疗效|临床', clause)
+                and not re.search(r'不能|无法|不可|不足以', clause)):
+            return True
+    return False
+
+
+def _oral_explanation_has_unrequested_descriptors(text, metrics):
+    return (not {'hba', 'hbd'}.intersection(metrics)
+            and bool(re.search(r'氢键(?:供体|受体|能力|数量|数目)', text)))
 
 
 def _resumable_scientific_clarification(plan):
@@ -85,12 +119,19 @@ def _resumable_scientific_clarification(plan):
 
 def terminal_message_for_reason(reason):
     """Return a user-facing terminal message without exposing internal codes."""
+    if reason == 'consultation_requires_clarification':
+        return ('未能确认整条请求仅为解释。请明确本轮只讨论原理或已有记录，'
+                '还是要执行新的计算或检索；本次未运行工具。')
+    if reason == 'consultation_intent_unavailable':
+        return '暂时无法完成请求意图判断，请重试；本次未运行工具。'
     if reason == 'web_clarification_changes_request':
         return '补充输入改变了原任务，请发起新请求；未继续执行旧计划。'
     if reason == 'molecular_input_required':
-        return '请提供要计算的分子的有效 SMILES（例如 CCO），再提交性质计算请求。当前请求未调用模型或科学工具。'
+        return '请提供有效 SMILES，并将完整请求和 SMILES 一起重新提交。当前未调用模型或科学工具。'
     if reason == 'target_clarification_required':
         return '请明确本次使用的单一靶点标识后重试。'
+    if reason == 'activity_target_conflict_or_unknown':
+        return '活性预测的靶点或物种不受支持、存在冲突或不明确；本次未进行活性预测。'
     if reason == 'invalid_molecular_input':
         return '你提供的 SMILES 无效，请检查并更正结构后重试。本次未进行科学计算。'
     if reason == 'molecular_validation_unavailable':
@@ -155,6 +196,19 @@ _INTENT_INSTRUCTION = (
     'A follow_up requires prior_ordinary_turn and actual eligible history. '
     'Do not answer the user, rewrite input, claim execution or propose tools. '
     'Trusted product/runtime facts (registration is not readiness): ')
+
+_CONSULTATION_INTENT_TIMEOUT = 30.0
+_CONSULTATION_INTENT_INSTRUCTION = (
+    'Classify the entire unchanged current request with ordinary_intent v1. '
+    'Evaluate every clause, including any prohibition on tools. Interpreting user-supplied assay '
+    'measurements or choosing a future experiment is a knowledge request. '
+    'Concepts, methods, limitations and interpretation of already accepted records are knowledge requests, '
+    'even when they mention ADMET, activity, docking, prediction or literature. '
+    'An additional request for new scientific values, calculations, predictions, retrieval or external '
+    'actions is mixed or scientific_execution/retrieval, not general_knowledge. '
+    'Use uncertain and unresolved=true when the whole request cannot be resolved. '
+    'Do not answer, rewrite the request, invent records or propose any tool. '
+    'The proposal can only admit a conversation with zero tool permissions. ')
 
 
 @dataclass(frozen=True)
@@ -227,6 +281,7 @@ class _Turn:
     docking_result: dict | None = None
     scientific_projection: object = None
     scientific_plan: ScientificPlan | None = None
+    tool_free_consultation: bool = False
     scientific_update: list | None = None
     reference_claim: dict | None = None
     result_format: str | None = None
@@ -464,10 +519,37 @@ class _TurnSender:
         if self.turn.allocation_timed_out:
             return  # A retained old owner has no further presentation authority.
         frame = json.loads(text)
+        # Change only visible prose. Evidence, endpoint keys and the details snapshot
+        # keep the model's exact identifier for reproducibility.
+        if frame['type'] in {'agent_result', 'complete'}:
+            for key in ('display_answer', 'final_answer', 'content'):
+                if isinstance(frame.get(key), str):
+                    frame[key] = re.sub(r'(?<![A-Za-z0-9_])BBB_Martins(?![A-Za-z0-9_])',
+                                        'BBB', frame[key], flags=re.I)
         if frame['type'] in {'agent_event', 'agent_result', 'complete'}:
             frame['turn_id'] = self.turn.turn_id
         if frame['type'] == 'agent_result':
             self.turn.result_started = True
+            waiting = self.turn.waiting
+            if (getattr(self.turn, 'intent_journal', None) is not None and self.sender._runtime.full_web
+                    or waiting is not None and waiting.context.metadata.get('tool_free_consultation') is True):
+                # The transport journal belongs to admission, while Pi owns
+                # decision counts (including restored rounds). Keep both facts.
+                store = self.sender._runtime.store
+                run = store.get_run(self.turn.trace_id)
+                saved = run['metadata'] if run else {}
+                record = (self.turn.intent_journal.snapshot() if self.turn.intent_journal is not None
+                          else saved['consultation_admission']['intent_record'])
+                attempts = record['model_call_metadata'].get('request_attempts', 0)
+                total = attempts + saved.get('decision_loop', {}).get('model_requests', 0)
+                audit = dict(intent_record=record, intent_requests=attempts, total_model_requests=total)
+                if run is None:
+                    owner = self.scope['agent_session_id']
+                    store.start_run(dict(trace_id=self.turn.trace_id, session_id=owner, user_id=owner,
+                        status=frame['status'], metadata={'consultation_admission': audit}), exclusive=True)
+                else:
+                    store.update_run_metadata(self.turn.trace_id, {'consultation_admission': audit})
+                frame['metadata'].update(intent_requests=attempts, total_model_requests=total)
             if frame.get('result_format') != 'summary_details_v1':
                 frame['metadata']['retrieval_performed'] = False
             if (frame.get('result_format') != 'summary_details_v1'
@@ -772,11 +854,16 @@ class WebDecisionRuntime:
                     payload.pop('mol_count')
             from .web_request import prepare_web_request
             prepare = prepare_web_request if self.full_web else prepare_decision_request
+            frozen = metadata.get('task_requirements', {}).get('request', {}).get('metadata', {})
+            consultation_options = {}
+            if self.full_web and frozen.get('tool_free_consultation') is True:
+                consultation_options = {'tool_free_consultation': True, **{key: frozen[key]
+                    for key in ('prior_candidate_context', 'prior_target_context', 'prior_activity_context') if key in frozen}}
             prepared = prepare(payload,
                 session_id=session_id, trace_id=trace_id,
                 references=self.references,
                 config_generation=web_request.get('config_generation'),
-                **({'history': web_request.get('memory', []),
+                **({**consultation_options, 'history': web_request.get('memory', []),
                     'max_output_tokens': web_request['output_limit'],
                     'input_max_chars': web_request['input_max_chars'],
                     'history_max_chars': web_request['history_max_chars'],
@@ -880,6 +967,44 @@ class WebDecisionRuntime:
             binding, snapshot.model_dump_json(), None)
         return prepared, context
 
+    async def _classify_tool_free_consultation(self, sender, turn, model, generation, input_limit,
+                                              rejection='consultation_requires_clarification'):
+        if self.max_model_requests < 2:
+            raise _SemanticFailure('model_budget_exhausted')
+        if not callable(getattr(model, 'propose_ordinary_intent', None)):
+            raise _SemanticFailure('consultation_intent_unavailable')
+        turn.intent_journal = IntentJournal(intent_id=uuid4().hex, trace_id=turn.trace_id,
+            turn_id=turn.turn_id, model_generation=generation,
+            capability_generation=self.application.capability_generation)
+        turn.intent_requests += 1
+        messages = [
+            {'role': 'system', 'content': _CONSULTATION_INTENT_INSTRUCTION +
+             'Prior conversation exists: ' + str(bool(sender.memory)).lower() + '.'},
+            {'role': 'user', 'content': turn.payload['message']},
+        ]
+        try:
+            response = await await_with_deadline(model.propose_ordinary_intent(
+                messages, mode=self.wire_mode, max_tokens=256,
+                timeout_seconds=_CONSULTATION_INTENT_TIMEOUT, _journal=turn.intent_journal,
+                input_budget={'max_chars': input_limit, 'history_max_chars': 0, 'history': []}),
+                timeout=_CONSULTATION_INTENT_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise _SemanticFailure('consultation_intent_unavailable') from None
+        if turn.cancel_event.is_set():
+            raise asyncio.CancelledError()
+        if not response.success:
+            if response.error.details.get('reason') == 'decision_input_budget_exceeded':
+                raise DecisionAdmissionError('decision_input_budget_exceeded')
+            raise _SemanticFailure('consultation_intent_unavailable')
+        intent = response.intent
+        if (intent.unresolved or intent.kind not in {
+                'general_knowledge', 'conversation', 'capability', 'follow_up'}
+                or (intent.kind == 'follow_up' and not sender.memory)):
+            if rejection is None:
+                return False
+            raise DecisionAdmissionError(rejection)
+        return True
+
     def _validate_resume(self, waiting, query, generation):
         """A1 validates the whole new text; only monotonic input refinement is legal.
 
@@ -939,13 +1064,24 @@ class WebDecisionRuntime:
             # waiting audit and bad-resume REJECTED retry behavior unchanged.
             sender.waiting = None
             turn.next_waiting = None
-        result = AgentResult(turn.trace_id, False, terminal_message_for_reason(reason), outcome=outcome,
+        message = terminal_message_for_reason(reason)
+        if self.full_web and reason == 'molecular_input_required':
+            from .web_business import named_admet_request
+            if named_admet_request(turn.payload.get('message', '')):
+                message = ('请在下一条消息中提供有效结构，格式为“SMILES: 分子结构”。'
+                           '本次未调用模型或科学工具；药物名称与结构的对应关系需要核验。')
+        if reason in {'request_clarification_required', 'unsupported_scientific_request'}:
+            from src.agent.contracts.docking_intent import explicit_docking_action
+            if explicit_docking_action(turn.payload.get('message')):
+                message = ('聊天中未能解析此对接请求。请在“分子对接”页面提供受体 PDB、配体，'
+                           '并设置对接盒子的中心和大小；靶点名称本身不是受体结构。'
+                           '如有其他任务，请分开提交。本次未执行对接。')
+        result = AgentResult(turn.trace_id, False, message, outcome=outcome,
                              metadata={'stop_reason': reason})
         if self.full_web:
             result.metadata['binding_profile'] = 'medchat-web-v1'
             if reason in {'input_budget_exceeded', 'molecular_input_required'}:
-                result.error = AgentExecutionError(AgentErrorCode.INVALID_INPUT,
-                    terminal_message_for_reason(reason), {'reason': reason})
+                result.error = AgentExecutionError(AgentErrorCode.INVALID_INPUT, message, {'reason': reason})
             turn.scientific_update = [{'user': turn.payload.get('message', ''), 'agent_used': False}]
         if self.semantic:
             record = (turn.intent_journal.snapshot() if turn.intent_journal is not None else
@@ -962,8 +1098,13 @@ class WebDecisionRuntime:
                 result.metadata.update(_durable_admission_facts(self.store, turn.trace_id, turn.admission_carry))
                 result.metadata['ordinary_admission'].update(stage='loop', reason=reason)
         turn_sender = _TurnSender(sender, turn)
+        business_view = None
+        if self.full_web and turn.scientific_projection is not None:
+            projection = turn.scientific_projection
+            if projection.mixed_activity_discussion and projection.mixed_history_view is not None:
+                business_view = projection.capture(result, context=AgentContext(query=projection.execution_query()))
         for frame in await _prepare_result_frames(handler, result, False,
-                websocket=turn_sender, store=self.store):
+                websocket=turn_sender, store=self.store, business_view=business_view):
             await turn_sender.send_text(frame)
 
     async def _projection_failed(self, sender, turn):
@@ -1015,9 +1156,9 @@ class WebDecisionRuntime:
             **self._compiled_plan_metadata(plan),
         }
         if plan.status == "clarification":
-            message = (
-                "请提供要计算的分子的有效 SMILES（例如 CCO），"
-                "再提交性质计算请求；当前未调用模型或科学工具。"
+            message = plan.message or (
+                "请提供有效 SMILES，并将完整请求和 SMILES 一起重新提交。"
+                "当前未调用模型或科学工具。"
             )
             # Resumable requests go through Pi's authenticated continuation
             # path. A terminal admission result must not advertise a fake wait.
@@ -1028,10 +1169,21 @@ class WebDecisionRuntime:
                 {"reason": "molecular_input_required"},
             )
         else:
-            message = plan.message or (
-                "当前请求包含尚未接入的科学能力；本次未运行部分性质计算，"
-                "请拆分请求或使用已支持的性质分析。"
-            )
+            if not plan.message and plan.missing_capabilities == ('docking',):
+                message = ('当前无法在同一请求中完成性质计算和对接，本次未执行计算或对接。'
+                           '请单独提交性质计算；对接请在“分子对接”页面提供受体 PDB、配体和对接盒中心及大小。')
+            elif not plan.message and 'metric:ionization_fraction' in plan.missing_capabilities:
+                message = ('当前无法完成指定条件下的电离比例计算；本次未执行性质计算。'
+                           '请单独提交可用的性质计算，并提供可靠的 pKa 和相关电离状态以评估电离比例。')
+            elif not plan.message and 'metric:logd' in plan.missing_capabilities:
+                message = ('当前未接入 logD 计算，本次未执行性质计算。'
+                           '可单独请求 logP，但 logP 不能代替指定 pH 下的 logD。'
+                           '如有其他要求，请分开提交。')
+            else:
+                message = plan.message or (
+                    "当前请求包含尚未接入的科学能力；本次未运行部分性质计算，"
+                    "请拆分请求或使用已支持的性质分析。"
+                )
             error = AgentExecutionError(
                 AgentErrorCode.INVALID_INPUT,
                 message,
@@ -1137,6 +1289,32 @@ class WebDecisionRuntime:
                         metadata={"stop_reason": "scientific_execution_failed"},
                     )
 
+            if (plan.workflow_version in {'web-property-batch-v1', 'web-admet-batch-v1', 'web-property-admet-batch-v1'}
+                    and (result.success or result.partial) and result.tool_results
+                    and ((result.success and [item.tool_name for item in result.tool_results] != list(plan.required_tools))
+                         or any(item.success and not _batch_property_rows_match(plan, item.data)
+                                for item in result.tool_results))):
+                result = AgentResult(
+                    trace_id=context.trace_id, success=False,
+                    message='部分分子的计算结果缺失或无法与输入对应，请重试。',
+                    final_answer='部分分子的计算结果缺失或无法与输入对应，请重试。',
+                    skill_name=context.active_skill, outcome=RunOutcome.FAILED,
+                    error=AgentExecutionError(AgentErrorCode.INTERNAL_ERROR,
+                                              'Batch property result does not match input'),
+                    metadata={'stop_reason': 'scientific_execution_failed'},
+                )
+            if (plan.workflow_version == 'web-admet-batch-v1'
+                    and not result.success and len(result.tool_results) == 1):
+                item = result.tool_results[0]
+                if (item.tool_name == 'admet_predictor'
+                        and _batch_property_rows_match(plan, item.data)):
+                    failed = [row['smiles'] for row in item.data
+                              if row.get('status') in {'failed', 'invalid_input', 'unavailable'}]
+                    if failed:
+                        result.final_answer = (
+                            '以下分子的 ADMET 预测失败：' + '、'.join(failed)
+                            + '。本次未交付批量预测结果，请重试。'
+                        )
             result.metadata.update(self._compiled_plan_metadata(plan))
             result.metadata.update(
                 binding_profile="medchat-web-v1",
@@ -1158,6 +1336,96 @@ class WebDecisionRuntime:
                 lambda: web_projection.capture(result, context=context),
                 worker_owner=worker_owner,
             )
+        admet_pending = 'ADMET 预测已产生，但模型预测局限的说明尚未生成。'
+        explanation_pending = (admet_pending if business_view is not None
+            and admet_pending in business_view.get('warnings', [])
+            else '计算已完成，但结果解释尚未生成。')
+        if (business_view is not None and explanation_pending in business_view.get('warnings', [])
+                and result.outcome == RunOutcome.COMPLETED and result.success):
+            # The table remains the authority for numbers; ask the configured
+            # model for an interpretation of the verified tool observation.
+            property_rows = [row.get('properties') for item in result.tool_results
+                if item.tool_name == 'property_calculator' and item.error is None
+                for row in (item.data or ()) if isinstance(row, dict)
+                and isinstance(row.get('properties'), dict)]
+            if property_rows or explanation_pending == admet_pending:
+                from .models import generate_for_chat
+                from .model_lifecycle import finish_on_cancel
+                from src.system.scientific_public_data import public_scientific_data
+                keys = {'mw': 'molecular_weight', 'logp': 'logp', 'hba': 'hba',
+                        'hbd': 'hbd', 'tpsa': 'tpsa', 'qed': 'qed',
+                        'formula': 'molecular_formula', 'rotatable_bonds': 'rotatable_bonds'}
+                evidence = [{keys[metric]: properties[keys[metric]] for metric in plan.metrics
+                             if metric in keys and keys[metric] in properties}
+                            for properties in property_rows]
+                prompt = ('说明计算模型预测 ADMET 的一般局限。说明预测并非实验结果，'
+                          '模型可靠性依赖训练数据覆盖及适用域，分类阈值命中不等于临床风险；'
+                          '不同端点的定义和单位需要逐项核对，并建议用适当实验验证。'
+                          '不要声称知道本次模型训练集、适用域、置信度或该分子的具体实验结果；'
+                          '不要输出数字、额外预测、诊断或治疗建议，不使用数字编号。'
+                          if explanation_pending == admet_pending else
+                          '解释下列由计算工具提供的分子描述符的含义及其一般用途。'
+                          '只讨论所给描述符，不推断该分子的溶解度、膜渗透性、'
+                          '蛋白结合、吸收、代谢、活性、安全性或其他实验性质。'
+                          '可以说明描述符只是研究参考，不能单独确定药代性质。'
+                          '不要输出任何数字或其他未提供的性质；不要使用数字编号。\n'
+                          + json.dumps(evidence, ensure_ascii=False, allow_nan=False))
+                if business_view.get('property_explanation') in ('oral_significance', 'oral_screening_choice'):
+                    from .property_comparison import batch_descriptor_comparison
+                    comparison = batch_descriptor_comparison(
+                        [{'properties': properties} for properties in property_rows], plan.metrics)
+                    if comparison:
+                        for field in ('final_answer', 'summary_answer'):
+                            business_view[field] += '\n\n描述符比较\n\n' + comparison
+                    for field in ('final_answer', 'summary_answer'):
+                        business_view[field] += ('\n\n这些是计算描述符，不能仅凭它们比较实际口服吸收、'
+                                                 '生物利用度或安全性。')
+                    labels = {'mw': '分子量', 'logp': 'logP', 'hba': '氢键受体数',
+                              'hbd': '氢键供体数', 'tpsa': 'TPSA', 'qed': 'QED',
+                              'rotatable_bonds': '可旋转键数', 'formula': '分子式'}
+                    requested = '、'.join(labels[metric] for metric in plan.metrics)
+                    prompt = ('结合下面按输入顺序排列的计算描述符，说明这些指标在口服药物研发筛选中的一般意义。'
+                              f'只解释用户请求的指标：{requested}；不要解释其他描述符。'
+                              '这些指标可为研究提供线索，但其作用依赖其他因素，'
+                              '不能单独判断哪个分子的溶解度、膜渗透性、吸收、生物利用度、安全性或临床效果更好。'
+                              '不得对任何具体候选作上述性质的推测，即使使用“可能”或举例也不可以。'
+                              '不要声称这些结果是实验测量，也不要预测或排序候选的口服表现；'
+                              '不输出数字、不使用数字编号，不添加未提供的分子性质。\n'
+                              + json.dumps(evidence, ensure_ascii=False, allow_nan=False))
+                if business_view.get('concept_question'):
+                    prompt += '\n同时回答概念问题：' + business_view['concept_question']
+                try:
+                    explanation = await asyncio.wait_for(finish_on_cancel(generate_for_chat(
+                        self.application.model, prompt, temperature=context.temperature,
+                        max_tokens=600, strict_errors=True)), timeout=45)
+                    explanation, changed = public_scientific_data(explanation)
+                    if (not isinstance(explanation, str) or not explanation.strip()
+                            or changed or len(explanation) > 4000 or re.search(r'\d', explanation)
+                            or (business_view.get('property_explanation') in ('oral_significance', 'oral_screening_choice')
+                                and (_oral_explanation_has_candidate_claim(explanation)
+                                     or _oral_explanation_has_unrequested_descriptors(explanation, plan.metrics)))
+                            or '模型调用失败' in explanation or '未配置' in explanation):
+                        logger.info('Result interpretation rejected: text=%s empty=%s redacted=%s oversized=%s digits=%s',
+                                    isinstance(explanation, str), not isinstance(explanation, str) or not explanation.strip(),
+                                    changed, isinstance(explanation, str) and len(explanation) > 4000,
+                                    isinstance(explanation, str) and bool(re.search(r'\d', explanation)))
+                        raise ValueError('invalid_interpretation')
+                except (Exception, asyncio.CancelledError) as exc:
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    logger.info('Result interpretation unavailable: %s', type(exc).__name__)
+                    business_view['warnings'] = [
+                        '计算已完成，但模型说明未生成；请重试。'
+                        if warning == explanation_pending else warning
+                        for warning in business_view['warnings']
+                    ]
+                else:
+                    for field in ('final_answer', 'summary_answer'):
+                        business_view[field] += '\n\n结果解释\n\n' + explanation.strip()
+                    business_view['warnings'].remove(explanation_pending)
+                    from .web_business import UNVERIFIED_NAME_WARNING
+                    if not any(warning != UNVERIFIED_NAME_WARNING for warning in business_view['warnings']):
+                        business_view.update(status='completed', success=True, partial=False)
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError()
         frames = await _prepare_result_frames(handler, result, False,
@@ -1229,6 +1497,8 @@ class WebDecisionRuntime:
         """The lease and all physical settlement stay inside the supervised child."""
         self._credit(turn)
         execution_payload = turn.payload
+        if self.full_web and turn.waiting is not None and tool_free_consultation_requested(turn.payload['message']):
+            raise DecisionAdmissionError('consultation_requires_clarification')
         if self.full_web and turn.waiting is None:
             from .web_business import WebTurnProjection
             from src.agent.scientific_session.decision_execution import settle_owned_call
@@ -1241,10 +1511,15 @@ class WebDecisionRuntime:
                 scientific_character_limit(handler.config, bool(getattr(handler.model, 'provider_name', None)))
             except InputBudgetExceeded:
                 raise DecisionAdmissionError('input_budget_exceeded') from None
+            from src.agent.contracts.concept_request import is_concept_explanation
+            turn.tool_free_consultation = (tool_free_consultation_requested(envelope.query)
+                                          and not is_concept_explanation(envelope.query))
+            if turn.tool_free_consultation and (envelope.reference is not None or envelope.selection is not None):
+                raise DecisionAdmissionError('consultation_requires_clarification')
             projection = WebTurnProjection(envelope.query, envelope.session_id,
                 turn.scientific_update or [], reverse_boundary=handler._ranked_reverse_evidence())
             turn.scientific_projection = projection
-            followup = await settle_owned_call(lambda: projection.followup(
+            followup = None if turn.tool_free_consultation else await settle_owned_call(lambda: projection.followup(
                 enable_tools=envelope.enable_tools, enable_rag=envelope.enable_rag),
                                                worker_owner=turn.worker_owner)
             if turn.cancel_event.is_set():
@@ -1252,6 +1527,325 @@ class WebDecisionRuntime:
             if followup is not None:
                 turn.scientific_update = [projection.entry]
                 destination = allocation_sender or _TurnSender(sender, turn)
+                if followup.get('research_question'):
+                    from src.literature.europe_pmc import EuropePMCClient
+                    from src.literature.research import request_search_query, request_research_synthesis, select_research_sources
+                    from src.target_search.remote_clients import BoundedJsonClient, RemoteSourceError
+                    question = followup['research_question']
+                    await self.application._refresh_llm_config_from_env()
+                    self._credit(turn)
+                    search_query = None
+                    try:
+                        async with self.application.model_request_gate.request():
+                            self._credit(turn)
+                            if turn.cancel_event.is_set():
+                                raise asyncio.CancelledError()
+                            model = self.application.model
+                            search_query = await asyncio.wait_for(request_search_query(
+                                model, self.wire_mode, question, timeout_seconds=45,
+                                max_tokens=min(600, handler._model_max_tokens(model)),
+                                input_budget={'max_chars': handler._input_limit(), 'history_max_chars': 0, 'history': []}),
+                                timeout=45)
+                    except asyncio.TimeoutError:
+                        pass
+                    self._credit(turn)
+                    if turn.cancel_event.is_set():
+                        raise asyncio.CancelledError()
+                    if search_query:
+                        attempts = []
+                        interpretations = []
+                        unavailable = False
+                        type_filter = (' AND PUB_TYPE:research-article NOT PUB_TYPE:review'
+                                       if followup['primary_only'] else '')
+                        title_abstract_query = re.sub(r'(?:TITLE:)?("[^"]+")',
+                                                      r'TITLE_ABS:\1', search_query)
+                        queries = [search_query + type_filter,
+                                   title_abstract_query + type_filter + ' sort_cited:y']
+                        for candidate_query in queries:
+                            def retrieve_literature():
+                                try:
+                                    with BoundedJsonClient(operation_timeout=20, timeout=(3, 7), max_attempts=2) as http:
+                                        return EuropePMCClient(http).search(candidate_query, limit=10)
+                                except RemoteSourceError:
+                                    return None
+                            literature = await settle_owned_call(retrieve_literature, worker_owner=turn.worker_owner)
+                            self._credit(turn)
+                            if turn.cancel_event.is_set():
+                                raise asyncio.CancelledError()
+                            if literature is None:
+                                unavailable = True
+                                break
+                            sources = select_research_sources(literature['articles'], primary_only=followup['primary_only'])
+                            source_ids = {source['pmid'] for source in sources}
+                            candidates = [{'pmid': article['pmid'], 'title': article['title'], 'year': article.get('year')}
+                                          for article in literature['articles']
+                                          if article.get('pmid') in source_ids and isinstance(article.get('title'), str)
+                                          and not contains_secret_material(article['title'])]
+                            attempts.append({'search_query': candidate_query, 'hit_count': literature['hit_count'],
+                                             'sources': deepcopy(sources), 'candidates': candidates})
+                            if sources:
+                                try:
+                                    async with self.application.model_request_gate.request():
+                                        self._credit(turn)
+                                        if turn.cancel_event.is_set():
+                                            raise asyncio.CancelledError()
+                                        interpretation = await asyncio.wait_for(request_research_synthesis(
+                                            self.application.model, self.wire_mode, question, sources, timeout_seconds=45,
+                                            max_tokens=min(1200, handler._model_max_tokens(self.application.model)),
+                                            input_budget={'max_chars': handler._input_limit(),
+                                                          'history_max_chars': 0, 'history': []}), timeout=45)
+                                except asyncio.TimeoutError:
+                                    interpretation = None
+                                self._credit(turn)
+                                if turn.cancel_event.is_set():
+                                    raise asyncio.CancelledError()
+                                if interpretation and interpretation not in interpretations:
+                                    interpretations.append(interpretation)
+                        projection.entry['literature_research'] = {'session_id': envelope.session_id,
+                                                                    'attempts': attempts}
+                        heading = ''
+                        for index, attempt in enumerate(attempts):
+                            label = '检索式' if index == 0 else '题目和摘要检索并按被引排序'
+                            heading += (f"{label}：{attempt['search_query']}。Europe PMC 返回 {attempt['hit_count']} "
+                                        f"条匹配记录；本次检查其中 {len(attempt['sources'])} 篇可用摘要。")
+                        if followup['primary_only'] and attempts:
+                            heading += '依据数据库发表类型筛选；未被标记不等于不是原始研究。'
+                        if unavailable:
+                            heading += '文献服务暂不可用。'
+                        if interpretations:
+                            followup['content'] = heading + '\n\n' + '\n\n'.join(interpretations)
+                        else:
+                            links = '、'.join(f"[PubMed {source['pmid']}]({source['url']})"
+                                              for attempt in attempts for source in attempt['sources'])
+                            followup['content'] = (heading + (f'可供核查：{links}。' if links else '')
+                                + '尚无可核验的摘要解读，未生成机制结论。')
+                        listed = set()
+                        candidate_lines = []
+                        visible_candidates = []
+                        for attempt in attempts:
+                            for candidate in attempt['candidates']:
+                                pmid = candidate['pmid']
+                                url = f'https://pubmed.ncbi.nlm.nih.gov/{pmid}/'
+                                if pmid in listed:
+                                    continue
+                                listed.add(pmid)
+                                visible_candidates.append(deepcopy(candidate))
+                                title = html.escape(candidate['title']).replace('[', '［').replace(']', '］').replace('`', r'\`')
+                                year = candidate['year']
+                                year_text = f' ({year})' if isinstance(year, str) and re.fullmatch(r'[0-9]{4}', year) else ''
+                                candidate_lines.append(f'{len(visible_candidates)}. [{title}]({url}){year_text}；PMID {pmid}')
+                        if candidate_lines:
+                            projection.entry['literature_research']['candidates'] = visible_candidates
+                            followup['content'] += '\n\n候选论文（未逐篇核验）：\n' + '\n'.join(candidate_lines)
+                if followup.get('fulltext_pmid'):
+                    from hashlib import sha256
+                    from src.literature.europe_pmc import EuropePMCClient
+                    from src.literature.fulltext import (select_passages, request_fulltext_analysis,
+                                                        kinetic_method_evidence, kinetic_pair_evidence)
+                    from src.target_search.remote_clients import BoundedJsonClient, RemoteSourceError
+                    pmid = followup['fulltext_pmid']
+                    question = followup['fulltext_question']
+                    source_question = followup.get('fulltext_source_question', question)
+                    previous_fulltext = followup.get('fulltext_previous')
+                    def retrieve_fulltext():
+                        try:
+                            with BoundedJsonClient(operation_timeout=20, timeout=(3, 7), max_attempts=2) as http:
+                                result = EuropePMCClient(http).search(f'EXT_ID:{pmid} AND SRC:MED', limit=2)
+                            article = next((item for item in result['articles'] if item['pmid'] == pmid), None)
+                            if article is None:
+                                return {'status': 'record_not_found'}
+                            if article.get('open_access') is not True or not article.get('pmcid'):
+                                return {'status': 'no_open_fulltext'}
+                            pmcid = article['pmcid']
+                            url = f'https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/BioC_json/{pmcid}/unicode'
+                            with BoundedJsonClient(operation_timeout=20, timeout=(3, 7), max_attempts=2) as http:
+                                payload = http.request_json('PMC_BioC', 'GET', url)
+                            if payload is None:
+                                return {'status': 'retrieval_failed'}
+                            passages = select_passages(payload, pmcid, source_question)
+                            metadata = [{'offset': item['offset'], 'section': item['section'],
+                                'heading': item['heading'], 'sha256': sha256(item['text'].encode('utf-8')).hexdigest()}
+                                for item in passages]
+                            if previous_fulltext and (pmcid != previous_fulltext['pmcid']
+                                    or metadata != previous_fulltext['passages']):
+                                return {'status': 'source_changed', 'pmcid': pmcid}
+                            return {'status': 'available', 'pmcid': pmcid, 'passages': passages}
+                        except RemoteSourceError as exc:
+                            return {'status': 'retrieval_failed', 'error_code': exc.code}
+                    fulltext = await settle_owned_call(retrieve_fulltext, worker_owner=turn.worker_owner)
+                    self._credit(turn)
+                    if turn.cancel_event.is_set():
+                        raise asyncio.CancelledError()
+                    projection.entry['literature_fulltext_lookup'] = {
+                        'session_id': envelope.session_id, 'pmid': pmid,
+                        'source': 'EuropePMC/PMC_BioC', 'status': fulltext['status'],
+                        **({'error_code': fulltext['error_code']} if 'error_code' in fulltext else {})}
+                    if fulltext['status'] == 'no_open_fulltext':
+                        followup['content'] = (f'已核对 [PMID {pmid}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/) 的数据库记录；'
+                            '当前 Europe PMC/PMC 来源未提供可获取的开放全文。'
+                            '本次未核对正文，所问正文内容未核实。')
+                        if re.search(r'IC50|阈值|截点', question, re.I):
+                            followup['content'] += '未根据摘要推断实验阈值。'
+                    elif fulltext['status'] == 'record_not_found':
+                        followup['content'] = '当前文献来源未找到该 PMID 记录，本次未核对正文，所问内容未核实。'
+                    elif fulltext['status'] == 'retrieval_failed':
+                        followup['content'] = '文献检索或全文服务暂不可用，本次未核对正文，所问内容未核实。'
+                    elif fulltext['status'] == 'source_changed':
+                        followup['content'] = '论文正文已变化或所选段落不再一致，请重新检索全文后再追问。'
+                    else:
+                        pmcid, passages = fulltext['pmcid'], fulltext['passages']
+                        url = f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/'
+                        projection.entry['literature_fulltext'] = {'session_id': envelope.session_id, 'pmid': pmid,
+                            'pmcid': pmcid, 'source_question': source_question,
+                            'passages': [{'offset': item['offset'], 'section': item['section'],
+                                'heading': item['heading'], 'sha256': sha256(item['text'].encode('utf-8')).hexdigest()}
+                                for item in passages]}
+                        followup['content'] = f'已找到 [PMC 开放全文]({url})；未找到足以分析的正文段落。'
+                        if passages:
+                            method = (kinetic_method_evidence(passages) if previous_fulltext
+                                      and re.search(r'\bKi\b', question, re.I)
+                                      and re.search(r'\bKd\b', question, re.I) else None)
+                            if method:
+                                quote = html.escape(method['quote']).replace('[', '［').replace(']', '］').replace('`', r'\`')
+                                pair = (kinetic_pair_evidence(passages, source_question)
+                                        if re.search(r'数值|分别|比较|哪个突变', envelope.query) else None)
+                                method_heading = next(item['heading'] for item in passages if item['offset'] == method['offset'])
+                                comparison = ''
+                                if pair and pair['heading'] == method_heading:
+                                    comparison = '文中比较的 Ki 为：' + '；'.join(
+                                        f'{group}：{value} {unit}' for group, value, unit in pair['groups']) + '。'
+                                followup['content'] = (comparison + '论文在所查小节说明，Ki 通过稳态酶动力学和 Cheng–Prusoff 方程估算；'
+                                    '该结果不应当作直接测得的 Kd。'
+                                    f' [PMC 原文]({url})；方法原文片段：{quote}…')
+                            else:
+                                await self.application._refresh_llm_config_from_env()
+                                self._credit(turn)
+                                interpretation = None
+                                try:
+                                    async with self.application.model_request_gate.request():
+                                        self._credit(turn)
+                                        if turn.cancel_event.is_set():
+                                            raise asyncio.CancelledError()
+                                        model = self.application.model
+                                        interpretation = await asyncio.wait_for(request_fulltext_analysis(
+                                            model, self.wire_mode, question, pmcid, passages, timeout_seconds=55,
+                                            max_tokens=min(1200, handler._model_max_tokens(model)),
+                                            input_budget={'max_chars': handler._input_limit(), 'history_max_chars': 0, 'history': []}),
+                                            timeout=55)
+                                except asyncio.TimeoutError:
+                                    pass
+                                self._credit(turn)
+                                if turn.cancel_event.is_set():
+                                    raise asyncio.CancelledError()
+                                followup['content'] = interpretation or (f'已检索 [PMC 开放全文]({url}) 的部分正文；'
+                                    '尚无经来源核对的结论，请查阅原文。')
+                if followup.get('research_lookup_pmid'):
+                    from src.literature.europe_pmc import EuropePMCClient
+                    from src.literature.summary_evidence import prepare_abstract
+                    from src.target_search.remote_clients import BoundedJsonClient, RemoteSourceError
+                    from .web_business import research_abstract_message
+                    pmid = followup['research_lookup_pmid']
+                    def retrieve_pmid():
+                        try:
+                            with BoundedJsonClient(operation_timeout=20, timeout=(3, 7), max_attempts=2) as http:
+                                return EuropePMCClient(http).search(f'EXT_ID:{pmid} AND SRC:MED', limit=2)
+                        except RemoteSourceError:
+                            return None
+                    literature = await settle_owned_call(retrieve_pmid, worker_owner=turn.worker_owner)
+                    self._credit(turn)
+                    if turn.cancel_event.is_set():
+                        raise asyncio.CancelledError()
+                    if literature is None:
+                        followup['content'] = '文献服务暂不可用，未能核对该 PMID 的摘要。'
+                    else:
+                        records = [(article, prepare_abstract(article)) for article in literature['articles']
+                                   if article['pmid'] == pmid]
+                        article, source = next(((article, source) for article, source in records if source), (None, None))
+                        if article is None and records and followup.get('research_metadata_requested'):
+                            article = records[0][0]
+                        if source is None:
+                            followup['content'] = f'未找到 PMID {pmid} 的可用摘要，无法核对研究结论。'
+                        else:
+                            projection.entry['literature_research'] = {'session_id': envelope.session_id,
+                                'attempts': [{'search_query': f'EXT_ID:{pmid} AND SRC:MED',
+                                              'sources': [deepcopy(source)]}]}
+                            followup['research_summary_source'] = source
+                            followup['content'] = research_abstract_message(source, followup['source_research_question'])
+                            if isinstance(article.get('title'), str) and not contains_secret_material(article['title']):
+                                title = html.escape(article['title']).replace('[', '［').replace(']', '］').replace('`', r'\`')
+                                year = article.get('year')
+                                year_text = f'（{year}）' if isinstance(year, str) and re.fullmatch(r'[0-9]{4}', year) else ''
+                                followup['content'] = f'{title}{year_text}\n\n' + followup['content']
+                        if article is not None and followup.get('research_metadata_requested'):
+                            doi = article.get('doi')
+                            if not (isinstance(doi, str) and len(doi) <= 255
+                                    and re.fullmatch(r'10\.[0-9]{4,9}/[A-Za-z0-9._;()/:-]+', doi, re.I)):
+                                doi = None
+                            title = article.get('title')
+                            if source is None and isinstance(title, str) and not contains_secret_material(title):
+                                title = html.escape(title).replace('[', '［').replace(']', '］').replace('`', r'\`')
+                                followup['content'] = f'{title}\n\n' + followup['content']
+                            followup['content'] += f'\n\nDOI：{doi or "来源未返回可核验的 DOI"}。'
+                if followup.get('research_summary_source'):
+                    from src.literature.research import request_research_synthesis
+                    await self.application._refresh_llm_config_from_env()
+                    self._credit(turn)
+                    interpretation = None
+                    try:
+                        async with self.application.model_request_gate.request():
+                            self._credit(turn)
+                            if turn.cancel_event.is_set():
+                                raise asyncio.CancelledError()
+                            model = self.application.model
+                            interpretation = await asyncio.wait_for(request_research_synthesis(
+                                model, self.wire_mode, followup['source_research_question'],
+                                [followup['research_summary_source']], timeout_seconds=45,
+                                max_tokens=min(1200, handler._model_max_tokens(model)),
+                                input_budget={'max_chars': handler._input_limit(), 'history_max_chars': 0, 'history': []}),
+                                timeout=45)
+                    except asyncio.TimeoutError:
+                        pass
+                    self._credit(turn)
+                    if turn.cancel_event.is_set():
+                        raise asyncio.CancelledError()
+                    if interpretation:
+                        followup['content'] = followup['content'] + '\n\n' + interpretation
+                if followup.get('summary_source'):
+                    from src.literature.summary_evidence import request_abstract_interpretation
+                    await self.application._refresh_llm_config_from_env()
+                    self._credit(turn)
+                    try:
+                        async with self.application.model_request_gate.request():
+                            self._credit(turn)
+                            if turn.cancel_event.is_set():
+                                raise asyncio.CancelledError()
+                            model = self.application.model
+                            interpretation = await asyncio.wait_for(
+                                request_abstract_interpretation(model, self.wire_mode,
+                                    followup['summary_source'], timeout_seconds=45,
+                                    max_tokens=min(1200, handler._model_max_tokens(model)),
+                                    input_budget={'max_chars': handler._input_limit(),
+                                                  'history_max_chars': 0, 'history': []}), timeout=45)
+                    except asyncio.TimeoutError:
+                        interpretation = None
+                    self._credit(turn)
+                    if turn.cancel_event.is_set():
+                        raise asyncio.CancelledError()
+                    if interpretation:
+                        followup['content'] = followup['summary_heading'] + '\n\n' + interpretation
+                    else:
+                        followup['content'] += ' 模型摘要不可用，以上仅为来源摘录。'
+                # A read-only view does not replace the last accepted molecule
+                # observations. Keep them distinct from newly retrieved prose;
+                # an explicitly updated candidate snapshot takes precedence.
+                for evidence_key in ('candidate_evidence', 'activity_evidence'):
+                    prior_evidence = (projection.history[-1].get(evidence_key)
+                                      if projection.history else None)
+                    if (followup['status'] in {'completed', 'partial'}
+                            and evidence_key not in projection.entry and isinstance(prior_evidence, dict)
+                            and prior_evidence.get('session_id') == envelope.session_id
+                            and prior_evidence.get('trace_id')):
+                        projection.entry[evidence_key] = deepcopy(prior_evidence)
                 # Read-only projections may return either the historical
                 # ``content`` field or the newer ``final_answer`` field. Do
                 # not evaluate a missing dict default eagerly: a valid
@@ -1287,15 +1881,29 @@ class WebDecisionRuntime:
                     raise asyncio.CancelledError()
                 for frame in frames:
                     await destination.send_text(frame)
+                if followup.get('supplied_calibration') and turn.displayed_answer:
+                    turn.history_update = retain_history_pair(sender.memory, user=envelope.query,
+                        assistant=turn.displayed_answer, request_kind='chat', outcome=outcome,
+                        safely_displayed=True)
                 return
-            if _should_compile_scientific_plan(envelope):
+            compile_query = envelope.query if turn.tool_free_consultation else projection.execution_query()
+            if not turn.tool_free_consultation and (_should_compile_scientific_plan(envelope)
+                    or ((projection.contextual_property or projection.property_bound_question or projection.concept_calculation is not None or projection.property_explanation is not None
+                         or projection.mixed_execution_query is not None)
+                        and envelope.enable_tools
+                        and envelope.reference is None and envelope.selection is None
+                        and ScientificObligationCompiler.is_profile_candidate(compile_query))):
                 # This compiler is intentionally consulted only for an
                 # explicit property/drug-likeness profile. Conceptual chat
                 # such as "解释 LogP 是什么" remains ordinary Pi chat.
                 turn.scientific_plan = ScientificObligationCompiler().compile(
-                    envelope.query
+                    compile_query
                 )
-            execution_payload = {**turn.payload, 'message': projection.execution_query()}
+            execution_payload = turn.payload if turn.tool_free_consultation else {**turn.payload, 'message': (
+                projection.query if (projection.property_explanation is not None
+                                     or projection.mixed_execution_query is not None)
+                and not projection.mixed_activity_discussion
+                and turn.scientific_plan is None else projection.execution_query())}
         await self.application._refresh_llm_config_from_env()
         self._credit(turn)
         async with self.application.model_request_gate.request():
@@ -1305,6 +1913,52 @@ class WebDecisionRuntime:
                     raise asyncio.CancelledError()
                 model = self.application.model
                 generation = self.application.model_generation
+                projection = turn.scientific_projection
+                if turn.tool_free_consultation:
+                    await self._classify_tool_free_consultation(sender, turn, model, generation, handler._input_limit())
+                elif (self.full_web and turn.waiting is None and turn.scientific_plan is not None
+                      and turn.scientific_plan.status == 'rejected' and not turn.scientific_plan.message
+                      and envelope.reference is None and envelope.selection is None
+                      and turn.scientific_plan.original_query == execution_payload['message'] == envelope.query
+                      and asks_about_given_information(envelope.query)):
+                    # Keep the original rejection for mixed or executable requests.
+                    if await self._classify_tool_free_consultation(
+                            sender, turn, model, generation, handler._input_limit(), rejection=None):
+                        turn.tool_free_consultation = True
+                        turn.scientific_plan = None
+                if (self.full_web and turn.waiting is None and projection is not None
+                        and not turn.tool_free_consultation
+                        and projection.mixed_activity_discussion and projection.mixed_history_view is None):
+                    from src.agent.pi_runtime.provider import ModelProviderAdapter
+                    from src.agent.contracts.decision import FinishDecision
+                    from src.agent.scientific_session.decision_policy import decision_system_message
+                    from src.system.scientific_public_data import public_scientific_data
+                    prior_context = projection.model_activity_context()
+                    projection.mixed_history_view = {
+                        'content': '已有活性结果的解释未生成，请重试。', 'status': 'partial'}
+                    if prior_context is None:
+                        projection.mixed_history_view['content'] = '缺少本会话可核对的活性预测记录，无法解释先前结果。'
+                    else:
+                        requirements = {'profile': 'medchat-web-v1', 'steps': [],
+                            'request': {'metadata': {'prior_activity_context': prior_context}}}
+                        response = await ModelProviderAdapter(model, self.wire_mode).request(
+                            [{'role': 'user', 'content': projection.mixed_history_query}], 45,
+                            system_message=decision_system_message('chat', set(), [], requirements,
+                                binding_profile='medchat-web-v1'), temperature=0,
+                            max_tokens=min(1200, handler._model_max_tokens(model)),
+                            input_budget={'max_chars': handler._input_limit(),
+                                          'history_max_chars': 0, 'history': []})
+                        self._credit(turn)
+                        if turn.cancel_event.is_set():
+                            raise asyncio.CancelledError()
+                        decision = response.decision
+                        if (response.success and isinstance(decision, FinishDecision)
+                                and decision.response_kind == 'chat' and not decision.evidence_ids):
+                            explanation, changed = public_scientific_data(decision.text)
+                            if explanation.strip() and not changed:
+                                from .web_business import activity_explanation_text
+                                explanation = activity_explanation_text(explanation, projection.mixed_history_query)
+                                projection.mixed_history_view = {'content': explanation, 'status': 'completed'}
                 base = self.application.ordinary_capability_base if self.semantic else None
                 capability_generation = self.application.capability_generation if self.semantic else None
                 if (
@@ -1337,19 +1991,46 @@ class WebDecisionRuntime:
                     else:
                         from .web_request import prepare_web_request
                         prepare = prepare_web_request if self.full_web else prepare_decision_request
-                        prepared = prepare(execution_payload,
-                            session_id=sender.scope['agent_session_id'], trace_id=turn.trace_id,
+                        options = dict(session_id=sender.scope['agent_session_id'], trace_id=turn.trace_id,
                             references=self.references, config_generation=generation,
                             **({'history': ([] if turn.scientific_projection is not None
                                             and turn.scientific_projection.concept_history is not None
                                             else sender.memory),
+                                'prior_target_context': (turn.scientific_projection.model_target_context()
+                                    if turn.scientific_projection is not None
+                                    and turn.scientific_projection.concept_history is None else None),
+                                'prior_candidate_context': (turn.scientific_projection.model_candidate_context()
+                                    if turn.scientific_projection is not None
+                                    and turn.scientific_projection.concept_history is None else None),
+                                'prior_activity_context': (turn.scientific_projection.model_activity_context()
+                                    if turn.scientific_projection is not None
+                                    and turn.scientific_projection.concept_history is None else None),
                                 'max_output_tokens': handler._model_max_tokens(model),
+                                'tool_free_consultation': turn.tool_free_consultation,
                                 'allow_molecular_clarification': _resumable_scientific_clarification(turn.scientific_plan),
                                 'input_max_chars': handler._input_limit(),
                                 'scientific_input_max_chars': scientific_character_limit(
                                     handler.config, bool(getattr(handler.model, 'provider_name', None))),
                                 'history_max_chars': character_limit(handler.config, section='history')}
                                if self.full_web else {}))
+                        try:
+                            prepared = prepare(execution_payload, **options)
+                        except DecisionAdmissionError as exc:
+                            # Review the unchanged inferential question, never a browser selection.
+                            # The classifier cannot authorize computation or resolve a candidate.
+                            reviewable = self.full_web and (
+                                exc.code == 'activity_target_conflict_or_unknown' and mentions_assay_concentration(envelope.query)
+                                or exc.code == 'scientific_reference_unavailable' and asks_about_given_information(envelope.query))
+                            if not (reviewable
+                                    and turn.scientific_plan is None and not turn.tool_free_consultation
+                                    and envelope.reference is None and envelope.selection is None
+                                    and execution_payload['message'] == envelope.query):
+                                raise
+                            turn.tool_free_consultation = True
+                            await self._classify_tool_free_consultation(sender, turn, model, generation,
+                                handler._input_limit(), rejection=exc.code)
+                            options['tool_free_consultation'] = True
+                            prepared = prepare(execution_payload, **options)
                         context = prepared.context
                         context.memory = history_pairs(sender.memory)
                         if (self.full_web and turn.scientific_projection is not None
@@ -1374,11 +2055,13 @@ class WebDecisionRuntime:
                     prepared = turn.waiting.prepared
                     context = deepcopy(turn.waiting.context)
                     queries = (*turn.waiting.input_queries, turn.payload['message'])
+                consultation_loop = self.full_web and context.metadata.get('tool_free_consultation') is True
                 loop = PiAgentRuntime(model, self.registry, self.store,
                     mode=self.wire_mode, config_generation=generation,
                     binding_profile=getattr(prepared, 'binding_profile', None),
-                    **({'timeout_seconds': self.timeout_seconds, 'max_model_requests': self.max_model_requests}
-                       if self.semantic else {}))
+                    **({'timeout_seconds': self.timeout_seconds,
+                        'max_model_requests': self.max_model_requests - int(consultation_loop)}
+                       if self.semantic or consultation_loop else {}))
                 if self.full_web and context.resolved_molecule is not None:
                     from .reference_retry import request_identity, frozen_admission, restore_admission
                     if turn.waiting is None:

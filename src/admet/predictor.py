@@ -779,7 +779,9 @@ class ADMETPredictor(BaseMolecularTool):
             value = f"{float(endpoint['value']):.6g}"
             unit = str(endpoint.get("unit") or "unknown")
             task_type = str(endpoint.get("task_type") or "unknown")
-            label = f"{endpoint_id} = {value} {unit}（{task_type}）"
+            label = (f"{endpoint_id}：原始模型输出 {value} {unit} 超出物理范围，预测不可用"
+                     if endpoint.get('validity') == 'out_of_range'
+                     else f"{endpoint_id} = {value} {unit}（{task_type}）")
             grouped.setdefault(category, []).append(label)
         lines = [
             "## ADMET-AI 1.4.0 本地模型结果",

@@ -222,14 +222,16 @@ def mock_downloads(monkeypatch, sample, *, fail=None):
     from src.target_search import downloader
     calls = []
 
-    def pair(pdb_id, *, deadline):
+    def pair(pdb_id, *, deadline, pinned):
+        assert pinned is True
         calls.append(("pair", pdb_id, deadline))
         if fail == "pair":
             raise downloader.StructureDownloadError("synthetic-private-diagnostic")
         return {"pdb_id": pdb_id, "pdb_bytes": sample[0], "cif_bytes": sample[1],
                 "pdb_sha256": "not-used-as-authentication", "cif_sha256": "not-used-as-authentication"}
 
-    def components(ids, *, deadline):
+    def components(ids, *, deadline, pinned):
+        assert pinned is True
         calls.append(("components", ids, deadline))
         if fail == "components":
             raise downloader.StructureDownloadError("synthetic-private-diagnostic")
@@ -367,3 +369,14 @@ def test_ordinary_parser_errors_keep_safe_compiler_reason(monkeypatch, sample, m
     assert expected == {"ok": False, "code": "RCSB_SOURCE_INVALID", "reason": "cif_invalid"}
     mock_downloads(monkeypatch, (pdb, cif, components))
     assert api()._source_candidate("1ABC", "P06276", 9606, time.monotonic() + 10) == expected
+
+
+def test_restricted_source_dns_has_actionable_safe_failure(monkeypatch):
+    from src.target_search import downloader
+    monkeypatch.setattr(downloader.socket, 'getaddrinfo', lambda *a, **k: [
+        (2, 1, 6, '', ('127.0.0.1', 443))])
+    monkeypatch.setattr(downloader.requests, 'get', lambda *a, **k: pytest.fail('restricted DNS must never dispatch'))
+    result = api()._source_candidate('1ABC', 'P06276', 9606, time.monotonic() + 10)
+    assert result['ok'] is False
+    assert result['code'] == 'SOURCE_DNS_RESTRICTED'
+    assert '127.0.0.1' not in str(result)

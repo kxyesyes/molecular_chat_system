@@ -31,6 +31,13 @@ for (const value of [
   "https://www.uniprot.org/uniprotkb/Q6P988/entry#",
   "https://www.uniprot.org/uniprotkb/x/../Q6P988/entry",
   "https://www.uniprot.org/uniprotkb/%2e/Q6P988/entry",
+  "https://pmc.ncbi.nlm.nih.gov/articles/PMC9649653/?redirect=https://evil.example",
+  "https://evil.pmc.ncbi.nlm.nih.gov/articles/PMC9649653/",
+  "https://pmc.ncbi.nlm.nih.gov/redirect?url=https://evil.example",
+  "https://pmc.ncbi.nlm.nih.gov/articles/PMC9649653/#other",
+  "https://tdcommons.ai/single_pred_tasks/tox/#herg-central",
+  "https://tdcommons.ai/single_pred_tasks/tox/?redirect=https://evil.example#herg-blockers",
+  "https://tdcommons.ai.evil.example/single_pred_tasks/tox/#herg-blockers",
 ]) {
   test(`chat URL rejects ${JSON.stringify(value)}`, () => {
     assert.equal(loadPolicy().MedChatSafeRender.safeChatUrl(value), "#");
@@ -41,7 +48,9 @@ for (const value of ["/target-search", "./report", "../report", "#results",
   "https://medchat.example/report", "https://www.rcsb.org/structure/1ABC",
   "https://www.uniprot.org/uniprotkb/Q6P988/entry",
   "https://www.uniprot.org/uniprotkb/A0A024RBG1/entry",
-  "https://pubmed.ncbi.nlm.nih.gov/123/", "https://doi.org/10.1234/example"]) {
+  "https://tdcommons.ai/single_pred_tasks/tox/#herg-blockers",
+  "https://pubmed.ncbi.nlm.nih.gov/123/", "https://pmc.ncbi.nlm.nih.gov/articles/PMC9649653/",
+  "https://doi.org/10.1234/example"]) {
   test(`chat URL preserves approved ${value}`, () => {
     assert.equal(loadPolicy().MedChatSafeRender.safeChatUrl(value), value);
   });
@@ -56,6 +65,15 @@ test("production formatter rejects external destinations and retains safe label 
   assert.ok(html.includes('&lt;img'));
 });
 
+test("literature link labels render escaped punctuation without allowing HTML", () => {
+  const page = loadPolicy();
+  const html = page.HomeFormatters.formatContent('[Tanespimycin&#x27;s role](https://pubmed.ncbi.nlm.nih.gov/123/)');
+  assert.ok(html.includes('Tanespimycin&#x27;s role'));
+  assert.ok(!html.includes('&amp;#x27;'));
+  const hostile = page.HomeFormatters.formatContent('[&lt;img src=x onerror=alert(1)&gt;](https://pubmed.ncbi.nlm.nih.gov/123/)');
+  assert.ok(!hostile.includes('<img'));
+});
+
 test("ranked structure formatter preserves official UniProt entry links", () => {
   const url = "https://www.uniprot.org/uniprotkb/Q6P988/entry";
   const html = loadPolicy().HomeFormatters.formatContent(`[UniProt Q6P988](${url})`);
@@ -66,6 +84,6 @@ test("homepage invalidates the pre-UniProt cached URL policy before formatting",
   const html = fs.readFileSync(path.join(__dirname, "../src/web/templates/index.html"), "utf8");
   const scripts = [...html.matchAll(/<script\s+src="([^"]+)"/g)].map(match => match[1]);
   const policies = scripts.filter(src => src.startsWith("/static/js/shared/safe_render.js"));
-  assert.deepEqual(policies, ["/static/js/shared/safe_render.js?v=20261016-uniprot-entry-v1"]);
+  assert.deepEqual(policies, ["/static/js/shared/safe_render.js?v=20261104-herg-source-v1"]);
   assert.ok(scripts.indexOf(policies[0]) < scripts.findIndex(src => src.startsWith("/static/js/home/formatters.js")));
 });

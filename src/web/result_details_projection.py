@@ -35,6 +35,25 @@ def accepted_ranking_ids(result):
     return accepted - rejected
 
 
+def species_mismatch_ids(result):
+    """Return observations whose request-bound species failed validation."""
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    acceptance = metadata.get('task_acceptance', {})
+    checks = acceptance.get('checks', []) if isinstance(acceptance, dict) else []
+    return {identity for check in checks if isinstance(check, dict)
+            and check.get('tool_name') == 'activity_predictor'
+            and 'activity_species_mismatch' in check.get('reason_codes', [])
+            for identity in check.get('evidence_ids', []) if isinstance(identity, str)}
+
+
+def hide_species_mismatch(value):
+    message = '活性结果的物种来源与请求不一致，未展示预测值。'
+    value.update(success=False, status='failed', message=message, data=None, formatted='',
+                 evidence=[], artifacts=[], error={'code': 'validation_error', 'message': message, 'details': {}})
+    _restrict_ranking_quality(value)
+    return value
+
+
 def hide_unaccepted_ranking(value):
     """Presentation only: keep the source observation intact in the ledger."""
     message = '候选排序结果未通过或尚未完成校验，未展示排名。'
@@ -104,11 +123,15 @@ def project_result_details(result, *, summary, status, error, warnings):
         raise ValueError('result_details_invalid')
     sequence = []
     accepted = accepted_ranking_ids(result)
+    species_rejected = species_mismatch_ids(result)
     for index, observation in enumerate(result.tool_results, 1):
         value = observation_value(observation)
         # The legacy formatted rendering duplicates data and is never authority.
         value.pop('formatted', None)
         value['step_id'] = str(observation.quality.get('step_id') or f'{observation.tool_name}:{index}')
+        if observation.tool_name == 'activity_predictor' and observation.quality.get('evidence_id') in species_rejected:
+            hide_species_mismatch(value)
+            value.pop('formatted', None)
         if (observation.tool_name == 'candidate_ranker' and accepted is not None
                 and observation.quality.get('evidence_id') not in accepted):
             if value.get('data') is not None or value.get('success') is True:

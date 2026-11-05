@@ -132,7 +132,7 @@ class LeadOptimizationVerifier:
                     comparisons[-1].update(endpoint=baseline_evidence[1]["endpoint"],
                                            units=baseline_evidence[1]["units"])
 
-            constraint_checks = check_property_bounds(bounds, (property_row or {}).get("properties"))
+            constraint_checks = check_property_bounds(bounds, (property_row or {}).get("properties"), rounded=True)
             missing.extend(check["metric"] for check in constraint_checks if check["satisfied"] is None)
             if not has_goals or missing or unverifiable_constraints:
                 status = "unverified"

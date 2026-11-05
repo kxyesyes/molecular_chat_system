@@ -188,6 +188,8 @@ class RankedReverseEvidence:
             for rank, row in enumerate(rows[:shown], 1):
                 lines.append('| ' + ' | '.join(cell(v) for v in (rank, row['target_name'], row['organism'],
                     row['final_similarity'], row['morgan_similarity'], row['maccs_similarity'], row['similar_count'])) + ' |')
+            if shown < len(rows) and rows[shown - 1]['final_similarity'] == rows[shown]['final_similarity']:
+                lines.extend(['', '截断处还有综合相似度相同的候选；行序不代表同分候选之间有可靠的优先级。'])
             if concise:
                 lines[0] = f'反向寻靶：前 {shown} 个候选靶点'
                 lines[2] = '结果是结构相似性线索，不能视为已确认靶点、结合能或活性预测；仍需实验验证。'

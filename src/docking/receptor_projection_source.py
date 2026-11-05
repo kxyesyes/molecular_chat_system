@@ -28,7 +28,7 @@ MAX_SCALAR = 128
 MAX_GROUPS = 256
 MAX_ASSIGNMENTS = 256
 MAX_GROUP_RESIDUES = 64
-_ROLES = frozenset("protein deposited_ligand glycan metal solvent buffer water cofactor other unproven".split())
+_ROLES = frozenset("protein deposited_ligand site_candidate glycan metal solvent buffer water cofactor other unproven".split())
 _ROOT = frozenset("schema_version sha256 pdb_id provenance target proteins residues connections conformer_constraints limitations".split())
 _IDENTITY = frozenset("model chain resname resseq icode".split())
 _ATOM = frozenset("serial name element altloc occupancy_hundredths xyz_milli bfactor_hundredths charge".split())
@@ -602,7 +602,7 @@ def protein_matches_target(protein, source):
 
 def reference_eligible(residue, proteins, source):
     protein = proteins.get(residue.identity[:2])
-    return (residue.role == "deposited_ligand" and bool(residue.required_heavy_atoms)
+    return (residue.role in {"deposited_ligand", "site_candidate"} and bool(residue.required_heavy_atoms)
             and protein is not None and protein_matches_target(protein, source))
 
 

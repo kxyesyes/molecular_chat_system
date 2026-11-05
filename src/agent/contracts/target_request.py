@@ -15,7 +15,7 @@ _VALUE = (
 )
 _SWITCH = r'(?:改(?:为|用)|换成|转而\s*使用)'
 _LABEL = re.compile(
-    r'(?:针对|靶点(?:\s*[:：]|\s+|(?=[A-Za-z]))|' + _SWITCH + r'|'
+    r'(?:针对(?:\s*人源)?|靶点(?:\s*[:：]|\s+|(?=[A-Za-z]))|' + _SWITCH + r'|'
     r'\b(?:against|target(?:ing)?)\s*[:=]?)\s*' + _VALUE, re.I,
 )
 # Delimiters cannot occur in the body: failed starts never rescan another
@@ -48,11 +48,19 @@ _ACTION_WORDS = frozenset({
 })
 _QUALIFIED = re.compile(
     r'不要针对|不针对|(?:不(?:要|能)?|别|勿)(?:\s*再)?\s*以|'
-    r'不考虑|并非|不是|排除|而非|选择性|' + _SWITCH + r'|'
+    r'不考虑|并非|不是(?!实验(?:结果|事实))|排除|而非|选择性|' + _SWITCH + r'|'
     r'\b(?:except|exclude|instead|rather|selective|switch)\b|'
     r'\bnot\s+(?:target(?:ing)?\b|against\b|' + TARGET_PATTERN.pattern + r')', re.I,
 )
 TARGET_CLARIFICATION = '请明确本次使用的单一靶点标识；多个靶点、未知标识或否定/切换/选择性条件不能自动选择。'
+
+# Species that the current target service cannot query. Keep explicit qualifiers
+# intact rather than letting a gene-only lookup silently fall back to human.
+UNSUPPORTED_TARGET_SPECIES = (
+    r'(?:斑马鱼|鸡|牛|兔|猴|羊|马|犬|狗|猪|大鼠)源?'
+    r'|(?:chicken|avian|zebrafish|bovine|cow|rabbit|monkey|sheep|horse|'
+    r'canine|dog|porcine|pig|rat|Gallus\s+gallus|Danio\s+rerio|Bos\s+taurus)'
+)
 
 
 @dataclass(frozen=True)
@@ -76,6 +84,24 @@ def _identifier_like(value: str) -> bool:
         and len(value) > 1
         and (value.isupper() or any(char.isdigit() for char in value))
     )
+
+
+def unrecognized_lookup_qualifier(text: str) -> str | None:
+    """Keep an unrecognized modifier attached to an explicit target lookup."""
+    pattern = (r'(?:查询|检索|查找|搜索)\s*'
+               r'([\u4e00-\u9fff]{1,12}|[A-Za-z]+(?:\s+[a-z]+)?)\s+'
+               r'([A-Za-z][A-Za-z0-9_-]*)')
+    allowed = {'人', '人类', '人源', '小鼠', '小鼠源', 'human', 'mouse',
+               'homo sapiens', 'mus musculus', '蛋白', '蛋白质', '靶点', '基因',
+               'protein', 'target', 'gene'}
+    for match in re.finditer(pattern, text):
+        qualifier, target = match[1], match[2]
+        named_target = re.sub(r'^(?:人源|人类|人|小鼠源|小鼠)', '', qualifier)
+        same_target = (canonical_target_identifier(named_target) is not None
+                       and canonical_target_identifier(named_target) == canonical_target_identifier(target))
+        if _identifier_like(target) and qualifier.casefold() not in allowed and not same_target:
+            return qualifier
+    return None
 
 
 def _is_candidate_selection(query: str, following: re.Match[str]) -> bool:

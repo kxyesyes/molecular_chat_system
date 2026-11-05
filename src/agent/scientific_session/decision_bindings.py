@@ -153,6 +153,7 @@ def prepare_binding_requirements(value, *, context, request_kind, allowed_tools,
 
 # The opt-in loop owns admission, deadlines, workers and Session creation.
 import json
+import re
 from dataclasses import dataclass, replace
 
 from src.agent.contracts.decision import ToolDecision
@@ -583,6 +584,10 @@ class B1BindingResolver:
                 if required and required.input != 'user':
                     raise DecisionBoundaryError(_BINDING_ERROR)
                 payload = {'query': required.query if required else json.loads(self._original)['query']}
+                from src.agent.planning.request_parsing import positive_intent_text
+                original_query = positive_intent_text(json.loads(self._original)['query'])
+                if re.search(r'功能|\bfunction\b', original_query, re.I):
+                    payload['include_function'] = True
             else:
                 values = self._user_molecules(snapshot, admitted)
                 self._subject_origin(values, snapshot, admitted)

@@ -229,6 +229,22 @@ class MolecularDockingService:
             vina_timeout_seconds = 300.0
         self.vina_timeout_seconds = vina_timeout_seconds
 
+        # When every higher-priority configured path exists, PATH fallbacks
+        # cannot affect the resolved tools. Open Babel remains discovered by
+        # _refresh_adapters, and the toolchain still verifies all file hashes.
+        explicit = {
+            "vina_exe": docking_config.get("vina_exe"),
+            "prepare_receptor_cmd": docking_config.get("prepare_receptor_cmd"),
+            "prepare_ligand_cmd": docking_config.get("prepare_ligand_cmd"),
+            "reduce_cmd": docking_config.get("reduce_cmd"),
+            "adfrsuite_path": docking_config.get("adfrsuite_bin"),
+        }
+        if all(value and os.path.exists(value) for value in explicit.values()):
+            for name, value in explicit.items():
+                setattr(self, name, os.path.abspath(value))
+            self._refresh_adapters()
+            return
+
         root_dir = docking_config.get("root_dir") or os.environ.get("MOLECULAR_DOCKING_ROOT", "")
         root_dir = os.path.abspath(root_dir) if root_dir else ""
         env_scripts_dir = os.path.join(os.path.dirname(self.python_exe), "Scripts")
@@ -1815,6 +1831,18 @@ class MolecularDockingService:
             response["warnings"] = warnings
         if scientific_quality is not None:
             response["scientific_quality"] = scientific_quality
+            known_failures = {
+                "redocking_rmsd_threshold_invalid", "redocking_rmsd_failed",
+                "box_evidence_missing", "box_geometry_invalid",
+                "expected_heavy_atom_count_invalid", "pose_set_empty",
+                "pose_coordinate_invalid", "pose_atoms_missing",
+                "pose_centroid_outside_box", "heavy_atom_count_mismatch",
+                "scientific_quality_persistence_failed",
+            }
+            failures = scientific_quality.get("failures", [])
+            safe_failures = [code for code in failures if code in known_failures]
+            if safe_failures:
+                logger.warning("Docking scientific quality check failed: %s", ", ".join(safe_failures))
         return response
 
     async def perform_docking(

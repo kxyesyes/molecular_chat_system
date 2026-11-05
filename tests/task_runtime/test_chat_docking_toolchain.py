@@ -58,6 +58,21 @@ def capture(rig):
     return api().ChatDockingToolchain(rig.service)
 
 
+def test_complete_explicit_configuration_avoids_unneeded_path_search(rig, monkeypatch):
+    reduce = rig.root / "reduce.exe"
+    reduce.write_bytes(b"synthetic reduce")
+    config = {**rig.config, "reduce_cmd": str(reduce), "adfrsuite_bin": str(rig.root)}
+    searches = []
+    monkeypatch.setattr(service_module.shutil, "which", lambda name: searches.append(name) or None)
+    service = service_module.MolecularDockingService(config={"docking": config})
+    binding = api().ChatDockingToolchain(service)
+    binding.require_current()
+    assert set(searches) == {"obabel"}
+    rig.paths["vina_exe"].write_bytes(b"modified executable")
+    with pytest.raises(DockingConsentError):
+        binding.require_current()
+
+
 def test_actual_hashes_closed_config_and_detached_public_descriptor(rig):
     binding = capture(rig)
     public = binding.public_descriptor()

@@ -759,3 +759,34 @@ def test_component_candidate_has_no_cache_database_paths_decompression_or_logs(w
     wire["responses"] = [Response((b"data_ATP",)), Response(status=500)]
     assert downloader.fetch_rcsb_component_files(("ATP",), deadline=110) == {"ATP": b"data_ATP"}
     component_failed()
+
+
+def test_pinned_structure_connection_uses_validated_address_with_original_tls_host(monkeypatch):
+    from src.target_search.pinned_transport import pinned_connection_class
+    from urllib3.util import connection
+    calls = []
+    monkeypatch.setattr(connection, 'create_connection', lambda address, *args, **kwargs: calls.append(address) or object())
+    connection_type = pinned_connection_class('93.184.216.34')
+    client = connection_type('files.rcsb.org', port=443, timeout=1)
+    client._new_conn()
+    assert calls == [('93.184.216.34', 443)]
+    assert client.host == 'files.rcsb.org'
+
+
+def test_pinned_request_uses_one_public_dns_snapshot(monkeypatch):
+    from src.target_search import pinned_transport
+    calls = []
+    monkeypatch.setattr(downloader, '_resolve_structure_host', lambda host, port: ('93.184.216.34',))
+    monkeypatch.setattr(pinned_transport, 'get_pinned', lambda url, address, **kw: calls.append((url, address, kw)) or Response())
+    result = downloader._request_pinned_structure('https://files.rcsb.org/download/1ABC.pdb', {'files.rcsb.org'}, deadline=time.monotonic() + 10, stream=True, allow_redirects=False)
+    assert result.status_code == 200
+    assert calls[0][1] == '93.184.216.34'
+    assert calls[0][2]['allow_redirects'] is False
+
+
+def test_pinned_request_never_dispatches_restricted_dns(monkeypatch):
+    from src.target_search import pinned_transport
+    monkeypatch.setattr(downloader.socket, 'getaddrinfo', lambda *args, **kwargs: [(2, 1, 6, '', ('127.0.0.1', 443))])
+    monkeypatch.setattr(pinned_transport, 'get_pinned', lambda *args, **kwargs: pytest.fail('must not connect'))
+    with pytest.raises(downloader.RestrictedStructureDNS):
+        downloader._request_pinned_structure('https://files.rcsb.org/download/1ABC.pdb', {'files.rcsb.org'}, deadline=time.monotonic() + 10)

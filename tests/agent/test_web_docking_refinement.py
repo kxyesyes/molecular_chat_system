@@ -65,7 +65,7 @@ def test_refinement_keeps_root_issuer_query_expiry_and_spent_budget(tmp_path, mo
             assert after['identity']['query_digest'] == before['identity']['query_digest']
             assert after['expires_at_ms'] == before['expires_at_ms']
             assert after['monotonic_expires'] == before['monotonic_expires']
-            assert after['draft']['budget'] == dict(limit_ms=180000, spent_ms=60000, proposal_slots_spent=2)
+            assert after['draft']['budget'] == dict(limit_ms=180000, spent_ms=120000, proposal_slots_spent=2)
             assert after['draft']['slots']['exhaustiveness'] == dict(state='fixed', value=8)
             assert after['draft']['slots']['receptor_ref'] == dict(state='pending')
             assert view['input_ready'] is False and view['execution_authorized'] is False
@@ -159,6 +159,7 @@ def test_three_refinements_keep_complete_prefix_and_four_model_slots(tmp_path):
                 messages = json.loads(rig.calls[-1].content)['messages']
                 assert len(json.loads(messages[-1]['content'])['refinements']) == index
             assert rig.read(view)['draft']['budget']['proposal_slots_spent'] == 4
+            assert rig.read(view)['draft']['budget']['spent_ms'] == 180000
             await refine(coordinator, 'center=[1,2,3]', 3)
             assert len(rig.calls) == 4
             await coordinator.close_root(root_id='root-1', owner_session_id='owner-1')

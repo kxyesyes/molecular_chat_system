@@ -159,6 +159,53 @@ def test_unknown_ligand_role_not_promoted(sample):
     assert result["source"]["residues"][2]["role"] == "unproven"
 
 
+def test_site_annotation_is_a_distinct_reviewable_candidate(sample):
+    pdb, cif, components = sample
+    cif = cif.replace(b"SUBJECT OF INVESTIGATION", b"OTHER FEATURE")
+    cif += loop("struct_site", "id pdbx_evidence_code pdbx_auth_asym_id pdbx_auth_comp_id pdbx_auth_seq_id pdbx_auth_ins_code",
+                ["AC1 Software A LIG 20 ?"]).encode()
+    cif += loop("struct_site_gen", "id site_id label_comp_id label_asym_id label_seq_id auth_comp_id auth_asym_id auth_seq_id pdbx_auth_ins_code symmetry",
+                ["1 AC1 ALA A 1 ALA A 10 ? 1_555"]).encode()
+    result = compile_sample((pdb, cif, components))
+    assert result["ok"], result
+    assert result["source"]["residues"][2]["role"] == "site_candidate"
+    assert result["evidence"]["site_context"] == [{"site_id": "AC1", "evidence_code": "Software",
+        "residue": {"model": 1, "chain": "A", "resname": "LIG", "resseq": 20, "icode": ""}}]
+    from src.docking.receptor_projection import inspect_receptor_projection
+    inspection = inspect_receptor_projection(pdb, source=result["source"])
+    assert inspection["ok"]
+    assert inspection["choices"]["reference_residue"] == [result["source"]["residues"][2]["identity"]]
+
+
+def test_site_without_matching_target_protein_is_not_a_reference_candidate(sample):
+    pdb, cif, components = sample
+    cif = cif.replace(b"SUBJECT OF INVESTIGATION", b"OTHER FEATURE")
+    cif += loop("struct_site", "id pdbx_evidence_code pdbx_auth_asym_id pdbx_auth_comp_id pdbx_auth_seq_id pdbx_auth_ins_code",
+                ["AC1 Software A LIG 20 ?"]).encode()
+    cif += loop("struct_site_gen", "id site_id label_comp_id label_asym_id label_seq_id auth_comp_id auth_asym_id auth_seq_id pdbx_auth_ins_code symmetry",
+                ["1 AC1 HOH C . HOH Z 40 ? 1_555"]).encode()
+    result = compile_sample((pdb, cif, components))
+    assert result["ok"], result
+    assert result["source"]["residues"][2]["role"] == "unproven"
+
+
+@pytest.mark.parametrize("generator", [
+    "1 AC1 GLY A 1 ALA A 10 ? 1_555",  # label residue disagrees
+    "1 AC1 ALA A 1 ALA A 10 ? 2_555",  # symmetry mate, not the input chain
+    "1 AC1 ALA A 1 ALA A 11 ? 1_555",  # author residue disagrees
+])
+def test_site_candidate_requires_consistent_original_protein_identity(sample, generator):
+    pdb, cif, components = sample
+    cif = cif.replace(b"SUBJECT OF INVESTIGATION", b"OTHER FEATURE")
+    cif += loop("struct_site", "id pdbx_evidence_code pdbx_auth_asym_id pdbx_auth_comp_id pdbx_auth_seq_id pdbx_auth_ins_code",
+                ["AC1 Software A LIG 20 ?"]).encode()
+    cif += loop("struct_site_gen", "id site_id label_comp_id label_asym_id label_seq_id auth_comp_id auth_asym_id auth_seq_id pdbx_auth_ins_code symmetry",
+                [generator]).encode()
+    result = compile_sample((pdb, cif, components))
+    assert result["ok"], result
+    assert result["source"]["residues"][2]["role"] == "unproven"
+
+
 @pytest.mark.parametrize("replacement", [b"2025-13-01", b"?", b"2023-02-31"])
 def test_component_date(sample, replacement):
     sample[2]["LIG"] = sample[2]["LIG"].replace(b"2023-01-01", replacement)

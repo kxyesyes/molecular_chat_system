@@ -29,6 +29,15 @@ _UNSUPPORTED_NUMERIC = re.compile(
     + r"|[+-]?(?:\d|\.\d|NaN\b|inf(?:inity)?\b))", re.I)
 
 
+def normalize_property_bound_questions(query):
+    """Normalize a bounded two-subject question without removing its tail."""
+    pattern = (r'(判断(?:两者|它们)是否都)\s*'
+               r'(?P<op>不超过|不大于|不低于|不小于|小于|低于|大于|高于)\s*'
+               r'(?P<metric>分子量|MW|logP|TPSA|QED|HBA|HBD)'
+               r'(?=\s*[+-]?(?:\d|\.\d))')
+    return re.sub(pattern, r'\1满足\g<metric>\g<op>', query, flags=re.I)
+
+
 def finite_number(value):
     try:
         return type(value) in (int, float) and math.isfinite(value)
@@ -40,10 +49,12 @@ def requested_property_bounds(query):
     bounds, unknown = [], []
     if not isinstance(query, str):
         return bounds, unknown
+    query = normalize_property_bound_questions(query)
     for match in _METRIC.finditer(query):
         name = match[0].casefold()
         metric = name if name in _UNITS else "molecular_weight"
-        op = _OP.match(query, match.end())
+        question = re.match(r"\s*是否\s*", query[match.end():])
+        op = _OP.match(query, match.end() + (question.end() if question else 0))
         if op is None:
             # Consume prefixes iteratively: "is approximately" must not drop
             # a numeric goal, but "is lower" remains a relative objective.
@@ -65,7 +76,7 @@ def requested_property_bounds(query):
         # A threshold must end at a known clause boundary. Unknown units and
         # arithmetic suffixes must not silently become a different constraint.
         bounded_tail = re.match(
-            r"\s*(?:$|[，,。;；\n、]|的(?:约束|要求|限制)(?:$|[，,。;；\n、])|并|且|和|同时"
+            r"\s*(?:$|[，,。;；\n、？?!！]|的(?:约束|要求|限制)(?:$|[，,。;；\n、])|并|且|和|同时"
             + r"|\band\b(?=\s*" + _METRIC.pattern + _OP.pattern + r"))", tail, re.I)
         continuation = re.match(r"\s*(?:[，,。;；、]\s*)*(?:(?:并且|同时|并|且|和|and)\s*)?", tail, re.I)
         implicit_bound = continuation and (
@@ -79,13 +90,16 @@ def requested_property_bounds(query):
     return bounds, list(dict.fromkeys(unknown))
 
 
-def check_property_bounds(bounds, properties):
+def check_property_bounds(bounds, properties, *, rounded=False):
     properties = properties if isinstance(properties, dict) else {}
     checks = []
+    half_steps = {"molecular_weight": .005, "logp": .0005, "tpsa": .005, "qed": .0005}
     for bound in bounds:
         value = properties.get(bound["metric"])
         passed = None
-        if finite_number(value):
+        uncertain = (rounded and finite_number(value) and bound['metric'] in half_steps
+                     and abs(value - bound['threshold']) <= half_steps[bound['metric']] + 1e-12)
+        if finite_number(value) and not uncertain:
             threshold = bound["threshold"]
             passed = {"<": value < threshold, "<=": value <= threshold,
                       ">": value > threshold, ">=": value >= threshold}[bound["operator"]]

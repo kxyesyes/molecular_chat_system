@@ -10,6 +10,16 @@ from src.web.scientific_references import (
 from tests.agent.test_scientific_reference_web import pointer, seed
 
 
+@pytest.mark.parametrize('noun', ['预测值', '预测数值', '预测结果', '预测分数'])
+def test_prediction_result_noun_does_not_require_new_candidate_execution(noun):
+    from src.web.scientific_references import scientific_intent
+    query = (f'再核对第二个分子的原{noun}，保留单位。它的记录是否明确了 pH？'
+             '只回答已有记录，不要计算新数据。')
+    assert not scientific_intent(query)
+    assert ScientificReferenceService(None).resolve(query, session_id='s', enable_tools=True) is None
+    assert scientific_intent(query + '再预测第二个分子的水溶解度。')
+
+
 NEW_GENERATION_QUERIES = [
     "请使用分子生成工具生成 2 个候选小分子，返回有效 SMILES，并说明生成模型来源",
     "以 PDE 为靶点设计三个候选分子，要求分子量小于 450、logP 小于 3，返回 SMILES 并逐项检查约束。",
@@ -216,3 +226,8 @@ def test_source_reference_needs_confirmed_owned_view_and_explicit_selection(refe
     store.update_run_status("trace", "failed")
     with pytest.raises(ValueError):
         svc.resolve(query, p, selection, session_id="owner", enable_tools=True)
+def test_negated_recalculation_does_not_require_candidate_selection():
+    from src.web.scientific_references import scientific_intent
+    assert not scientific_intent('所以能直接认定第二个分子更适合作为口服先导物吗？'
+                                 '请基于刚才的结果说明还缺哪些证据，不要重新计算。')
+    assert scientific_intent('不要重新预测活性，但请计算第二个分子的 LogP。')

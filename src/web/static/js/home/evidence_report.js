@@ -235,8 +235,28 @@
     const genericWarnings = new Set([
       '计算描述符及候选优先级不代表实验验证、活性、疗效或对接结合能。',
       '性质数字仅对本次实时证据展示有效；刷新后不恢复数字。',
+      'ADMET-AI outputs are model predictions; they are not experimental results.',
+      'Physicochemical endpoints are calculated by RDKit inside ADMET-AI.',
+      'Risk summary is a screening heuristic, not a safety conclusion.',
     ]);
-    report.warnings.filter(w => !genericWarnings.has(w)).forEach(w => line(overview, 'p', humanize(w)));
+    const optionalWarnings = new Map();
+    for (const warning of report.warnings) {
+      const match = /^Optional step ([A-Za-z0-9_:.-]{1,128}) \(([^()\s]+)\) failed: ([\s\S]+)$/.exec(warning);
+      if (match && report.steps.some(step => step.step_id === match[1] &&
+          step.tool_name === match[2] && step.status === 'failed')) {
+        optionalWarnings.set(warning, {tool: match[2], reason: match[3]});
+      }
+    }
+    const wrappedReasons = [...optionalWarnings.values()].map(item => item.reason);
+    const displayedWarnings = new Set();
+    for (const warning of report.warnings) {
+      if (genericWarnings.has(warning) || (!optionalWarnings.has(warning) &&
+          wrappedReasons.some(reason => reason.includes(warning)))) continue;
+      const optional = optionalWarnings.get(warning);
+      const display = optional ? `${names[optional.tool] || '计算步骤'}：失败。${humanize(optional.reason)}` : humanize(warning);
+      if (!displayedWarnings.has(display)) line(overview, 'p', display);
+      displayedWarnings.add(display);
+    }
     if (Object.values(report.omitted).some(v => v > 0)) line(overview, 'p', '部分结果未完整展示。');
     if (overview.children.length) container.appendChild(overview);
     const details = document.createElement('details');

@@ -206,6 +206,16 @@ _CLAUSE_PART = re.compile(_PATH_TOKEN + r"|(?P<boundary>" + _CLAUSE_END + r")", 
 _NEGATION = r"(?:不要|无需|不需要|不做|不运行|不预测|禁止|跳过|避免|勿|(?<![分特区识鉴辨类级差个])别|\bwithout\b|\bdo\s+not\b|\bdon't\b|\bskip\b|\bexclude\b)"
 
 
+def without_past_result_actions(query: str) -> str:
+    """Remove action words used as references to past results."""
+    # In “刚才的水溶解度预测是多少”, prediction is a result noun.
+    # Retain its endpoint and predicate, and leave new action clauses intact.
+    query = re.sub(r'((?:刚才|上一轮|之前|上次)\s*的[^，。？！!?；;\n]+?)'
+                   r'预测(?=\s*(?:是多少|为多少))', r'\1', query)
+    return re.sub(r'(刚才|上一轮|之前|上次)\s*'
+                  r'(?:给出|返回|报告|展示|显示|计算|预测)\s*的', r'\1的', query)
+
+
 def positive_intent_text(query: str) -> str:
     """Remove negated operation spans, not unrelated positive clauses.
 

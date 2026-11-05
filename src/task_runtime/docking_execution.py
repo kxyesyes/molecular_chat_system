@@ -499,7 +499,6 @@ class DockingExecution:
         finally:
             payload.clear()
 
-        _emit_progress(progress_callback, "result_parsing", 75)
         if not isinstance(tool_result, ToolResult):
             return _failure(
                 AgentErrorCode.INVALID_OUTPUT,
@@ -527,6 +526,7 @@ class DockingExecution:
                 },
             )
 
+        _emit_progress(progress_callback, "result_parsing", 75)
         inputs.verify_integrity()
         _attach_verified_input_evidence(tool_result, inputs)
         _emit_progress(progress_callback, "scientific_validation", 90)

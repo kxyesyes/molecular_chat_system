@@ -102,15 +102,13 @@ def test_explicit_species_requires_matching_evidence(scope):
 
 
 @pytest.mark.parametrize("scope", ["mixed", "all", "any"])
-def test_mixed_scope_is_valid_evidence_for_an_explicit_species(scope):
-    from src.activity.request_selection import ActivityModelRequest, select_family_bundle
+def test_mixed_scope_does_not_prove_an_explicit_species(scope):
+    from src.activity.request_selection import ActivityModelRequest, ModelSelectionError, select_family_bundle
 
     bundle = _bundle()
     bundle["scope"]["species"] = scope
-    selected = select_family_bundle(
-        bundle, ActivityModelRequest.from_mapping({"target": "PDE", "species": "human"})
-    )
-    assert selected.species == "human"
+    with pytest.raises(ModelSelectionError, match='species'):
+        select_family_bundle(bundle, ActivityModelRequest.from_mapping({"target": "PDE", "species": "human"}))
 
 
 @pytest.mark.parametrize("target", ["PDE5A unknown", "PDE,BuChE", "PDE_5A", "not PDE"])

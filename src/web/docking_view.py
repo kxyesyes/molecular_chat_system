@@ -130,7 +130,9 @@ async def capture_docking_view(coordinator, *, root_id, owner_session_id,
 
     try:
         unchanged()
-        view = await coordinator.status(root_id=root_id, owner_session_id=owner_session_id)
+        from .docking_consent import FEEDBACK_SECONDS
+        view = await coordinator.status(root_id=root_id, owner_session_id=owner_session_id,
+                                        wait=False, wait_timeout=min(0.5, FEEDBACK_SECONDS / 2))
         unchanged(released_failure=view['phase'] in {
             'FAILED', 'CANCELLED', 'CLOSED', 'TIMED_OUT', 'UNKNOWN', 'UNAVAILABLE'})
         if (view['root_id'] != root_id or view['task_id'] != identity[0]

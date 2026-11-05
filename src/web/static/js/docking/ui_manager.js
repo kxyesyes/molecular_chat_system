@@ -1005,7 +1005,7 @@ async function loadDurableResultDetails(result, options = {}) {
 function userFacingDockingFailure(record) {
   const raw = String(record && (record.error || (record.result && record.result.error)) || "");
   if (raw === "Docking process failed") {
-    return "对接工具未能完成计算，未生成可验证结果。请检查受体结构准备工具、受体格式和对接盒参数后重试。";
+    return "对接工具未能完成计算，未生成可验证结果。请检查受体结构准备工具、受体格式、配体结构及其准备过程和对接盒参数后重试。";
   }
   if (raw === "Docking environment unavailable") {
     return "对接环境当前不可用，未生成可验证结果。请检查 Vina、受体/配体准备工具及其运行环境。";

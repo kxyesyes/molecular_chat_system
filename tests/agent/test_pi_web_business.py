@@ -114,3 +114,16 @@ def test_invalid_structure_correction_reuses_only_prior_operation(actual_app):
                 assert second['tool_result_sequence'][0]['data'][0]['smiles'] == 'CCO'
                 assert len(second['tool_result_sequence']) == 1
     asyncio.run(run())
+
+
+def test_explicit_corrected_structure_with_following_request_is_calculated(actual_app):
+    async def run():
+        async with actual_app(ordinary_policy=None, respond=compiled_decision) as bundle:
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                first = result_of(await socket.turn({'message': '请计算这个分子的分子量和 LogP，SMILES: C1CC', 'enable_rag': False}))
+                assert first['status'] == 'rejected'
+                second = result_of(await socket.turn({'message': '更正为 SMILES: CCO，请继续计算分子量和 LogP。', 'enable_rag': False}))
+                assert second['status'] == 'completed', second
+                assert second['tool_result_sequence'][0]['data'][0]['smiles'] == 'CCO'
+    asyncio.run(run())

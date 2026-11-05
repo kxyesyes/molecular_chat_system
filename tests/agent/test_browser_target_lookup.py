@@ -9,6 +9,183 @@ from src.agent.tools.target_database_tool import TargetDatabaseTool
 from src.agent.planning.request_parsing import target_lookup_text
 
 
+def test_target_function_flag_reaches_service(monkeypatch):
+    calls = []
+    class Service:
+        def search_targets(self, query, **kwargs):
+            calls.append((query, kwargs))
+            return {'status': 'not_found', 'results': [], 'warnings': [], 'lookup_path': []}
+    tool = TargetDatabaseTool()
+    monkeypatch.setattr(tool, '_get_service', lambda: Service())
+    tool.execute({'query': 'EGFR', 'include_function': True})
+    assert calls == [('EGFR', {'include_function': True})]
+
+
+def test_target_adapter_preserves_function_flag():
+    from types import SimpleNamespace
+    from src.agent.tooling.target_contract import TargetSearchInput, TargetToolAdapter
+    adapter = SimpleNamespace(spec=SimpleNamespace(name='target_database_search', input_schema=TargetSearchInput))
+    payload = {'query': 'EGFR', 'include_function': True}
+    assert TargetToolAdapter._validate_input(adapter, payload) == payload
+
+
+def test_target_adapter_preserves_requested_species():
+    from types import SimpleNamespace
+    from src.agent.tooling.target_contract import TargetSearchInput, TargetToolAdapter
+    adapter = SimpleNamespace(spec=SimpleNamespace(name='target_database_search', input_schema=TargetSearchInput))
+    payload = {'query': 'EGFR', 'organism': 'Mus musculus'}
+    assert TargetToolAdapter._validate_input(adapter, payload) == payload
+
+
+def test_target_species_cannot_accept_a_mismatched_service_result(monkeypatch):
+    class Service:
+        def search_targets(self, query, **kwargs):
+            return {'status': 'resolved', 'results': [{'gene_symbol': 'EGFR',
+                    'uniprot_id': 'P00533', 'organism': 'Homo sapiens'}]}
+    tool = TargetDatabaseTool()
+    monkeypatch.setattr(tool, '_get_service', lambda organism=None: Service())
+    result = tool.execute({'query': 'EGFR', 'organism': 'Mus musculus'})
+    assert not result['success'] and not result.get('data')
+
+
+def test_mouse_target_lookup_uses_explicit_accession_without_gene_fallback(monkeypatch):
+    calls = []
+    class Service:
+        def search_targets(self, query, **kwargs):
+            calls.append(query)
+            return {'status': 'not_found', 'results': [], 'warnings': [], 'lookup_path': []}
+    tool = TargetDatabaseTool()
+    monkeypatch.setattr(tool, '_get_service', lambda organism=None: Service())
+    result = tool.execute({'query': '请查询小鼠 EGFR（UniProt P00533）的蛋白信息和实验结构。',
+                           'organism': 'Mus musculus'})
+    assert calls == ['P00533']
+    assert result['status'] == 'not_found' and not result.get('data')
+
+
+def test_web_mouse_accession_not_found_is_reported(tmp_path, monkeypatch):
+    from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
+    from pi_web_support import make_web_handler, run_web_turn
+
+    class Service:
+        def search_targets(self, query, **kwargs):
+            return {'status': 'not_found', 'results': [], 'warnings': [], 'lookup_path': ['UniProt']}
+
+    tool = TargetDatabaseTool()
+    monkeypatch.setattr(tool, '_get_service', lambda organism=None: Service())
+    handler = make_web_handler([tool], SQLiteAgentStateStore(tmp_path / 'target.sqlite'))
+    complete, frames = run_web_turn(handler, '请查询小鼠 EGFR（UniProt P00533）的蛋白信息和实验结构。',
+                                    result_format='summary_details_v1')
+    assert '未找到匹配靶点' in complete['content'], frames
+    assert 'Q01279' not in complete['content']
+
+
+def test_unsupported_target_species_is_explained_without_using_human_data():
+    from src.web.web_business import WebTurnProjection
+    query = '请查询大鼠 EGFR 的蛋白信息和实验结构。'
+    view = WebTurnProjection(query, 'species-session', []).followup(enable_tools=True)
+    assert view['status'] == 'rejected'
+    assert '大鼠' in view['content'] and '不支持' in view['content'] and '人源' in view['content']
+    assert WebTurnProjection(query + '再运行对接。', 'species-session', []).followup(enable_tools=True) is None
+
+
+def test_unknown_target_species_is_explained_without_using_human_data():
+    from src.web.web_business import WebTurnProjection
+    query = '请查询鸡源 EGFR 的蛋白信息和实验结构，列出物种、UniProt 和 PDB 编号。'
+    view = WebTurnProjection(query, 'species-session', []).followup(enable_tools=True)
+    assert view['status'] == 'rejected'
+    assert '鸡源' in view['content'] and '不支持' in view['content']
+    assert WebTurnProjection(query + '再运行对接。', 'species-session', []).followup(enable_tools=True) is None
+
+
+@pytest.mark.parametrize('species', ['鸡', 'chicken', '斑马鱼', 'zebrafish'])
+def test_unsupported_species_without_source_suffix_is_explained(species):
+    from src.web.web_business import WebTurnProjection
+    query = f'请查询{species} EGFR 的蛋白信息和实验结构，列出物种、UniProt 和 PDB 编号。'
+    view = WebTurnProjection(query, 'species-session', []).followup(enable_tools=True)
+    assert view['status'] == 'rejected'
+    assert species in view['content'] and '不支持' in view['content']
+
+
+@pytest.mark.parametrize('qualifier', ['雪貂', 'ferret', 'Mustela putorius'])
+def test_unrecognized_target_qualifier_requires_clarification(qualifier):
+    from src.web.web_business import WebTurnProjection
+    query = f'请查询{qualifier} EGFR 的蛋白信息和实验结构，列出物种、UniProt 和 PDB 编号。'
+    view = WebTurnProjection(query, 'species-session', []).followup(enable_tools=True)
+    assert view['status'] == 'rejected'
+    assert qualifier in view['content'] and '物种' in view['content'] and '未检索' in view['content']
+    assert '人源' in view['content'] and '小鼠' in view['content']
+    assert WebTurnProjection(query + '再运行对接。', 'species-session', []).followup(enable_tools=True) is None
+
+
+@pytest.mark.parametrize('species', ['雪貂', '大鼠', '鸡', 'ferret'])
+def test_explicit_unsupported_species_declaration_is_explained(species):
+    from src.web.web_business import WebTurnProjection
+    query = f'请查询 EGFR 的蛋白信息和实验结构，物种为{species}。'
+    view = WebTurnProjection(query, 'species-session', []).followup(enable_tools=True)
+    assert view['status'] == 'rejected'
+    assert species in view['content'] and '人源' in view['content'] and '小鼠' in view['content']
+    assert '未检索' in view['content']
+    assert WebTurnProjection(query + '再运行对接。', 'species-session', []).followup(enable_tools=True) is None
+
+
+@pytest.mark.parametrize('species', ['人源', '小鼠'])
+def test_supported_species_declaration_is_not_refused(species):
+    from src.web.web_business import WebTurnProjection
+    query = f'请查询 EGFR 的蛋白信息和实验结构，物种为{species}。'
+    assert WebTurnProjection(query, 'species-session', []).followup(enable_tools=True) is None
+
+
+def test_web_species_declaration_rejection_reaches_summary(tmp_path):
+    from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
+    from pi_web_support import make_web_handler, run_web_turn
+    handler = make_web_handler([], SQLiteAgentStateStore(tmp_path / 'species.sqlite'))
+    complete, _ = run_web_turn(handler, '请查询 EGFR 的蛋白信息和实验结构，物种为雪貂。',
+                               result_format='summary_details_v1')
+    assert complete['status'] == 'rejected'
+    assert all(word in complete['content'] for word in ('雪貂', '人源', '小鼠', '未检索'))
+
+
+def test_target_lookup_retains_structures_beyond_preview_and_resolution(monkeypatch):
+    from src.web.decision_chat import _target_display_answer
+    structures = [{'structure_id': f'{i:04d}', 'source': 'RCSB_PDB',
+                   'structure_type': 'experimental', 'resolution': 1.5 + i / 10,
+                   'ligand_ids': [], 'recommendation_level': 'High'} for i in range(5)]
+    structures[-1]['resolution'] = None
+    class Service:
+        def search_targets(self, query, **kwargs):
+            return {'status': 'resolved', 'results': [{'target_id': 1, 'gene_symbol': 'PDE4A',
+                'organism': 'Homo sapiens', 'structure_count': 5}], 'warnings': [], 'lookup_path': ['local']}
+        def get_target_structures(self, target_id):
+            return {'structures': deepcopy(structures)}
+    tool = TargetDatabaseTool()
+    monkeypatch.setattr(tool, '_get_service', lambda: Service())
+    result = tool.execute('查找人源 PDE4A 的实验结构和分辨率')
+    assert len(result['data'][0]['recommended_structures']) == 5
+    answer = _target_display_answer(result['data'], concise=True)
+    assert all(row['structure_id'] in answer for row in structures)
+    assert '1.5' in answer and '分辨率：未记录' in answer
+    assert '推荐级别' not in answer and 'High' not in answer
+    assert result['data'][0]['recommended_structures'][0]['recommendation_level'] == 'High'
+    assert result['status'] == 'partial' and 'structure_resolution_missing' in result['warnings']
+
+
+def test_long_structure_list_reports_truncation(monkeypatch):
+    from src.web.decision_chat import _target_display_answer
+    class Service:
+        def search_targets(self, query, **kwargs):
+            return {'status': 'resolved', 'results': [{'target_id': 1, 'gene_symbol': 'PDE4A',
+                'structure_count': 21}], 'warnings': [], 'lookup_path': ['local']}
+        def get_target_structures(self, target_id):
+            return {'structures': [{'structure_id': f'{i:04d}', 'source': 'RCSB_PDB',
+                'structure_type': 'experimental', 'resolution': 2.0} for i in range(21)]}
+    tool = TargetDatabaseTool()
+    monkeypatch.setattr(tool, '_get_service', lambda: Service())
+    result = tool.execute('查找 PDE4A 的实验结构和分辨率')
+    assert result['status'] == 'partial' and 'structure_list_truncated' in result['warnings']
+    assert len(result['data'][0]['recommended_structures']) == 20
+    assert '当前展示 20 条，记录总数为 21' in _target_display_answer(result['data'], concise=True)
+
+
 @pytest.mark.parametrize('query', [
     'Lookup BuChE and UNKNOWN target information',
     'Lookup BuChE target information except EGFR',
@@ -119,3 +296,29 @@ def test_broad_family_lookup_is_bounded_without_silent_success(monkeypatch):
     assert len(result["evidence"]) <= 5
     assert result["quality"]["matched_target_count"] == 24
     assert result["quality"]["requires_exact_subtype"] is True
+
+
+def test_human_chinese_alias_and_accession_reaches_target_lookup(monkeypatch):
+    calls = []
+    class Service:
+        def search_targets(self, query, **kwargs):
+            calls.append(query)
+            return {'status': 'not_found', 'results': [], 'warnings': [], 'lookup_path': []}
+    tool = TargetDatabaseTool()
+    monkeypatch.setattr(tool, '_get_service', lambda: Service())
+    result = tool.execute('请查询人丁酰胆碱酯酶 BCHE（UniProt P06276）的蛋白信息和实验结构。')
+    assert calls == ['P06276']
+    assert result['status'] == 'not_found'
+
+
+def test_target_function_and_structures_with_named_accession_reaches_authoritative_service(monkeypatch):
+    calls = []
+    class Service:
+        def search_targets(self, query, **kwargs):
+            calls.append((query, kwargs))
+            return {'status': 'not_found', 'results': [], 'warnings': [], 'lookup_path': []}
+    tool = TargetDatabaseTool()
+    monkeypatch.setattr(tool, '_get_service', lambda: Service())
+    result = tool.execute({'query': '请查询人 EGFR（UniProt P00533）的蛋白功能和实验结构。', 'include_function': True})
+    assert calls == [('P00533', {'include_function': True})]
+    assert result['status'] == 'not_found'

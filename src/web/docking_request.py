@@ -54,8 +54,9 @@ _BARE_DOCKING = re.compile(
 )
 _POCKET_CLAUSE = '使用共晶配体定义口袋'
 _NO_GUESS_CLAUSE = '缺少该信息先说明，不要猜坐标'
+_PRECHECK_CLAUSE = '请先核验结构和配体，不要猜坐标'
 _NO_GUESS_TAIL = re.compile(
-    r'[，,]' + _SPACE + re.escape(_NO_GUESS_CLAUSE) + _SPACE +
+    r'[，,]' + _SPACE + '(?:' + re.escape(_NO_GUESS_CLAUSE) + '|' + re.escape(_PRECHECK_CLAUSE) + ')' + _SPACE +
     r'(?:[。.!！?？]' + _SPACE + r')?\Z'
 )
 _TEXT_REF = re.compile(r'[A-Za-z0-9_-]{1,128}\Z', re.ASCII)
@@ -146,6 +147,16 @@ def assess_docking_request_text(query, *, enabled, enable_tools):
             position += whitespace.end()
             if position == len(query):
                 break
+            if query[position] in ',，':
+                start = position + 1
+                start += re.match(_SPACE, query[start:]).end()
+                end = start + len(_POCKET_CLAUSE)
+                if (query[start:end] == _POCKET_CLAUSE
+                        and (end == len(query) or query[end] in '，,。.;； \t\r\n')):
+                    if pocket or clauses >= 8:
+                        return _text_rejection()
+                    pocket, position, clauses = True, end, clauses + 1
+                    continue
             # A final full stop is permitted, but not an unfinished field separator.
             separator = query[position]
             if separator not in '。.;；':
@@ -170,7 +181,7 @@ def assess_docking_request_text(query, *, enabled, enable_tools):
                 if pocket:
                     return _text_rejection()
                 pocket = True
-            elif token == _NO_GUESS_CLAUSE:
+            elif token in {_NO_GUESS_CLAUSE, _PRECHECK_CLAUSE}:
                 if not pocket or no_guess:
                     return _text_rejection()
                 no_guess = True

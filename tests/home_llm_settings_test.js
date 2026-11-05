@@ -957,5 +957,5 @@ test("send readiness does not overwrite a draft typed before config load", async
 
 test("homepage loads the updated settings script instead of the stale cached version", () => {
   const activeHtml = html.replace(/<!--[\s\S]*?-->/g, "");
-  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261028-quick-actions-v1"></script>'));
+  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261104-multiline-v1"></script>'));
 });

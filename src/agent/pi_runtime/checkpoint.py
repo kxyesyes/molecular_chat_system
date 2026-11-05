@@ -101,7 +101,8 @@ def validate_pi_checkpoint(saved, *, mode, system_message, allowed_tools=()):
     for call, record in zip(feedback, failed):
         expected = schema_correction(SimpleNamespace(error=AgentExecutionError(
             AgentErrorCode.INVALID_OUTPUT, 'Schema rejected', {
-                'reason': 'invalid_decision_schema', 'schema_issues': record.get('schema_issues')})))
+                'reason': record.get('reason'), 'schema_issues': record.get('schema_issues')}),
+            metadata={'mode': record.get('mode'), 'native_response_shape': record.get('native_response_shape')}))
         if call.get('arguments') != {'feedback': expected}:
             raise ValueError('pi_repair_history_invalid')
     proposals = saved.get('proposals', [])

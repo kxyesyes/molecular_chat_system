@@ -60,6 +60,15 @@ def test_d2_accepts_structure_before_ligand_natural_language_order():
     assert result['inputs'] == {'pdb_id': '1M17', 'smiles': 'CCO'}
 
 
+def test_d2_accepts_comma_separated_reference_pocket_without_extra_actions():
+    query = '请用 CC(=O)Oc1ccccc1C(=O)O 与 1P0I 对接，使用共晶配体定义口袋，缺少该信息先说明，不要猜坐标。'
+    result = text_boundary(query)
+    assert result['assessed'] and result['pocket_rule_requested'] == 'co_crystal_reference'
+    assert result['inputs'] == {'pdb_id': '1P0I', 'smiles': 'CC(=O)Oc1ccccc1C(=O)O'}
+    assert not text_boundary(query + '再预测毒性。')['assessed']
+    assert not text_boundary('用 CCO 与 1P0I 对接，使用共晶配体定义口袋并预测毒性。')['assessed']
+
+
 def test_d2_accepts_explicit_safety_clause_after_natural_action():
     result = text_boundary(
         '使用 EGFR 的实验结构 1M17 与候选分子 CCO 进行一次真实分子对接，'
@@ -67,6 +76,18 @@ def test_d2_accepts_explicit_safety_clause_after_natural_action():
     )
     assert result['assessed'] is True
     assert result['inputs'] == {'pdb_id': '1M17', 'smiles': 'CCO'}
+
+
+@pytest.mark.parametrize('separator', ['；', '，'])
+def test_d2_accepts_precheck_without_losing_request_or_authorizing_execution(separator):
+    query = ('请用 CC(=O)Oc1ccccc1C(=O)O 与 1XKK 对接，使用共晶配体定义口袋'
+             + separator + '请先核验结构和配体，不要猜坐标。')
+    result = text_boundary(query)
+    assert result['assessed'] is True
+    assert result['inputs'] == {'pdb_id': '1XKK', 'smiles': 'CC(=O)Oc1ccccc1C(=O)O'}
+    assert result['pocket_rule_requested'] == 'co_crystal_reference'
+    assert result['input_ready'] is result['execution_authorized'] is False
+    assert not text_boundary(query + '然后预测毒性。')['assessed']
 
 
 @pytest.mark.parametrize('query', [

@@ -60,6 +60,28 @@ def test_prompt_supplies_exact_current_codepoint_range_without_rewriting_sources
         assert messages == snapshot.messages()
 
 
+def test_refinement_prompt_distinguishes_current_field_from_missing_docking_inputs():
+    mod = api()
+    snapshot = mod.capture_source_snapshot(query="请对接", history=[], descriptors=[])
+    issuer = mod.TextSegmentIssuer(root_id="root-1", owner_session_id="owner-1",
+        preparation_id="prep-1", origin_turn_id="turn-1", original_snapshot=snapshot,
+        runtime_generation="runtime-1")
+    segment = mod.capture_text_segment(issuer=issuer, original_snapshot=snapshot,
+        text_segment_index=1, server_turn_id="turn-2", current_text="exhaustiveness=8",
+        preceding_refinements=[])
+    instruction = segment.messages()[0]["content"]
+    assert 'exhaustiveness: start=15; end=16' in instruction
+    assert 'missing inputs in the original request do not make the current refinement unresolved' in instruction
+
+
+def test_transport_prompt_scopes_unresolved_to_the_current_text_kind():
+    from src.agent.decision_transport import _DOCKING_INSTRUCTION
+    assert 'For docking_request, missing scientific inputs make unresolved true' in _DOCKING_INSTRUCTION
+    assert 'For docking_refinement, unresolved concerns only ambiguity in the current refinement' in _DOCKING_INSTRUCTION
+    assert 'Missing scientific inputs remain unresolved even' not in _DOCKING_INSTRUCTION
+    assert 'leave missing inputs unresolved' not in _DOCKING_INSTRUCTION
+
+
 def wire(mode="native", kind="docking_request"):
     raw = json.dumps({"proposal": dict(version="1", kind=kind, unresolved=True,
                                        source_spans=[], fields={})})
@@ -219,6 +241,37 @@ def test_real_transport_precharged_private_journal_and_no_execution(rig, mode):
     with connection(rig.tasks.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"] == 0
         assert conn.execute("SELECT COUNT(*) AS n FROM task_events").fetchone()["n"] == 0
+
+
+@pytest.mark.parametrize('slow_call', [1, 2])
+def test_slow_context_validation_does_not_block_event_loop(rig, slow_call):
+    rig = rig()
+    async def run():
+        entered, release = threading.Event(), threading.Event()
+        async with rig.client() as client:
+            owner = rig.owner(client)
+            original = owner.capture_current
+            calls = 0
+            def slow_capture():
+                nonlocal calls
+                calls += 1
+                if calls == slow_call:
+                    entered.set()
+                    release.wait(2)
+                return original()
+            owner.capture_current = slow_capture
+            watchdog = threading.Timer(1, release.set)
+            watchdog.start()
+            task = asyncio.create_task(rig.call(owner))
+            try:
+                assert await asyncio.to_thread(entered.wait, .5)
+                await asyncio.sleep(.05)
+                assert not release.is_set(), 'context validation blocked the event loop'
+            finally:
+                release.set()
+                watchdog.cancel()
+                await task
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("fault", ["owner", "root", "query", "source", "model", "capability",

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from html import escape
 import json
+import math
 import re
 
 from src.agent.persistence.redaction import contains_secret_material
@@ -20,6 +21,16 @@ _FOLLOWUP = re.compile(
     r"按(?:活性证据|pIC50)排序"
     r"(?:[；;，,]\s*解释(?:另外|其他)的候选为何没有参与排序)?"
     r"(?:[，,]\s*不要改动原始预测)?[。.!]?\s*", re.I)
+_PIC50_CONVERSION = re.compile(
+    r'\s*(?:请)?(?:把|将)\s*(?:刚才|上一轮|上次)(?:的)?\s*(?:预测的?)?\s*'
+    r'(?:(?P<smiles>[A-Za-z0-9@+\-\[\]().=#\\/:%*]+)\s*的\s*)?'
+    r'pIC50\s*(?:换算|转换)\s*(?:为|成)\s*IC50\s*[（(]\s*(?P<unit>nM|微摩尔|μM|µM|uM)\s*[）)]'
+    r'(?:\s*[，,；;]\s*(?:并)?\s*(?:请)?(?:说明(?:这个)?结果(?:代表|意味着)什么|'
+    r'(?P<explain>解释为什么分类(?:和|与)回归结果不一致)))?'
+    r'(?:\s*是多少)?[。.!！?？]?\s*', re.I)
+_PIC50_NATURAL_CONVERSION = re.compile(
+    r'\s*(?:这个|刚才的|上一轮的)\s*pIC50\s*(?:换算|转换)\s*(?:成|为)\s*'
+    r'(?:多少)?\s*(?P<unit>微摩尔|μM|µM|uM|nM)\s*[？?。.!！]?\s*', re.I)
 
 
 def comparison_tools(query):
@@ -133,6 +144,40 @@ def accepted_activity_evidence(result, query, session_id):
         return None
     return {"session_id": session_id, "trace_id": result["trace_id"],
             "query": query, "smiles": smiles, "observations": observations}
+
+
+def accepted_generated_activity_evidence(result, candidates, query, session_id):
+    """Bind an accepted activity batch to the verified generated candidate set."""
+    if (not isinstance(result, Mapping) or not isinstance(candidates, dict) or not session_id
+            or candidates.get('session_id') != session_id or candidates.get('trace_id') != result.get('trace_id')
+            or candidates.get('generation_scope_verified') is not True):
+        return None
+    rows = candidates.get('candidates')
+    if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_CANDIDATES:
+        return None
+    smiles = [_canonical(row.get('canonical_smiles')) if isinstance(row, dict) else None for row in rows]
+    if None in smiles or len(set(smiles)) != len(smiles):
+        return None
+    observations = _observations(result, ('activity_predictor',))
+    if len(observations) != 1 or not _bounded(observations):
+        return None
+    item = observations[0]
+    aligned = _aligned_rows(item, smiles)
+    if not _accepted(item) or aligned is None:
+        return None
+    from src.agent.tools.activity_input import activity_target
+    from src.activity.family_contract import resolve_activity_family
+    from src.agent.activity_evidence_inspection import valid_inspection_evidence
+    try:
+        family = resolve_activity_family(activity_target(query, lambda value: _canonical(value) is not None))
+        if any(row.get('family_id') != family or resolve_activity_family(row.get('requested_target')) != family
+               for row in aligned.values()):
+            return None
+    except (ValueError, TypeError, AttributeError):
+        return None
+    evidence = {'session_id': session_id, 'trace_id': result['trace_id'], 'query': query,
+                'smiles': smiles, 'observations': observations}
+    return evidence if valid_inspection_evidence(evidence) else None
 
 
 def _exclusion(row):
@@ -259,6 +304,166 @@ def followup_answer(query, history, session_id):
     """Return None outside the deliberately closed follow-up grammar."""
     from .activity_evidence_inspection import inspection_request, inspection_answer, valid_inspection_evidence
     from .contracts.concept_request import is_concept_explanation
+    domain_question = re.fullmatch(
+        r'\s*(?:刚才|上一轮)(?:这个|该)分子是否在\s*(?P<target>[A-Za-z][A-Za-z0-9_-]*)'
+        r'\s*模型的适用域内[？?]\s*依据是什么[？?。]?\s*', query, re.I)
+    if domain_question:
+        previous = history[-1].get('activity_evidence') if history else None
+        evidence = None
+        if isinstance(previous, dict) and session_id and previous.get('session_id') == session_id:
+            evidence = accepted_activity_evidence(
+                {'trace_id': previous.get('trace_id'), 'tool_result_sequence': previous.get('observations')},
+                previous.get('query', ''), session_id)
+        rows = evidence['observations'][0]['data'] if evidence and valid_inspection_evidence(evidence) else []
+        from src.activity.family_contract import resolve_activity_family
+        try:
+            family = resolve_activity_family(domain_question.group('target'))
+            matched = [row for row in rows if resolve_activity_family(row['requested_target']) == family]
+        except (ValueError, TypeError, KeyError):
+            matched = []
+        if len(rows) != 1 or len(matched) != 1:
+            return {'final_answer': '无法核对上一轮唯一分子和靶点的活性预测记录；请先完成对应预测。未重新计算。',
+                    'status': 'not_calculated', 'success': False}
+        row = matched[0]
+        return {'final_answer': (f"上一轮 `{_cell(row['smiles'])}` 对 {_cell(row['requested_target'])} 的预测记录中，"
+                '未提供经过验证的该结构适用域评估，因此无法判断它是否处于模型适用域内。'
+                '需要模型定义的适用域方法、训练数据及相应阈值，不能仅凭已有预测分数判断；未重新计算。'),
+                'status': 'partial', 'success': False, 'activity_evidence': evidence}
+    inactive_question = re.fullmatch(
+        r'\s*预测分类为无活性[，,]\s*是否意味着(?:这个|该)分子(?:一定|必然)没有\s*'
+        r'(?P<target>[A-Za-z][A-Za-z0-9_-]*)\s*(?:的)?抑制作用[？?。]?\s*', query, re.I)
+    if inactive_question:
+        previous = history[-1].get('activity_evidence') if history else None
+        evidence = None
+        if isinstance(previous, dict) and session_id and previous.get('session_id') == session_id:
+            evidence = accepted_activity_evidence(
+                {'trace_id': previous.get('trace_id'), 'tool_result_sequence': previous.get('observations')},
+                previous.get('query', ''), session_id)
+        rows = evidence['observations'][0]['data'] if evidence and valid_inspection_evidence(evidence) else []
+        from src.activity.family_contract import resolve_activity_family
+        try:
+            family = resolve_activity_family(inactive_question.group('target'))
+            matched = [row for row in rows if resolve_activity_family(row['requested_target']) == family]
+        except (ValueError, TypeError, KeyError):
+            matched = []
+        if len(rows) != 1 or len(matched) != 1 or matched[0].get('activity_class') != '无活性':
+            return {'final_answer': '无法核对上一轮唯一分子、靶点及无活性分类；请先完成对应预测。未重新计算。',
+                    'status': 'not_calculated', 'success': False}
+        row = matched[0]
+        answer = (f"不能。`{_cell(row['smiles'])}` 对 {_cell(row['requested_target'])} 的“无活性”"
+                  '是模型根据分类阈值得出的预测，并不证明没有抑制作用或实验活性。'
+                  '需要核查模型适用域、预测误差和实验条件，并通过合适的实验验证。')
+        return {'final_answer': answer, 'status': 'completed', 'success': True, 'activity_evidence': evidence}
+    conversion = _PIC50_CONVERSION.fullmatch(query) or _PIC50_NATURAL_CONVERSION.fullmatch(query)
+    if conversion:
+        previous = history[-1].get('activity_evidence') if history else None
+        evidence = None
+        if isinstance(previous, dict) and previous.get('session_id') == session_id and session_id:
+            evidence = accepted_activity_evidence(
+                {'trace_id': previous.get('trace_id'), 'tool_result_sequence': previous.get('observations')},
+                previous.get('query', ''), session_id)
+        if evidence is None or not valid_inspection_evidence(evidence):
+            return {'final_answer': '无法确认上一轮的活性预测证据；请先完成对应分子和靶点的预测。',
+                    'status': 'not_calculated', 'success': False}
+        rows = evidence['observations'][0]['data']
+        selector = conversion.groupdict().get('smiles')
+        if selector is not None:
+            selected = _canonical(selector)
+            rows = [row for row in rows if selected is not None and _canonical(row.get('smiles')) == selected]
+            if len(rows) != 1:
+                return {'final_answer': '上一轮没有该分子对应的可验证活性预测；未改用其他分子。',
+                        'status': 'not_calculated', 'success': False}
+        elif len(rows) != 1:
+            return {'final_answer': '上一轮包含多个分子，无法确定要换算哪一个；请明确指定分子。',
+                    'status': 'not_calculated', 'success': False}
+        row = rows[0]
+        value = row.get('predicted_pIC50')
+        try:
+            exponent = 9 if conversion.group('unit').lower() == 'nm' else 6
+            converted = 10 ** (exponent - value) if type(value) in (int, float) and math.isfinite(value) else None
+        except OverflowError:
+            converted = None
+        if converted is None or not math.isfinite(converted) or converted <= 0:
+            return {'final_answer': '上一轮没有可换算的有效 pIC50 预测值。',
+                    'status': 'not_calculated', 'success': False}
+        review = _exclusion(row)
+        note = '；分类与回归不一致或证据不完整，需复核' if review else ''
+        unit = conversion.group('unit')
+        if unit == '微摩尔':
+            unit = '微摩尔（μM）'
+        answer = (f"分子 `{_cell(row['smiles'])}` 对 {_cell(row['requested_target'])} 的预测 pIC50 "
+                  f"为 {value:.6g}，按 IC50（{unit}）= 10^({exponent} − pIC50) 换算约为 {converted:.4g} {unit}{note}。"
+                  '这是由模型预测值换算的浓度，表示预测的半数抑制浓度，不能作为实验测定结果。')
+        if conversion.groupdict().get('explain'):
+            from src.activity.family_contract import LABEL_THRESHOLD, PROBABILITY_THRESHOLD
+            probability = row.get('activity_probability')
+            answer += (f" 原始活性概率：{_cell(probability)}；预测分类：{_cell(row.get('activity_class'))}。"
+                       if probability is not None else ' 原始活性概率不可用。')
+            if (row.get('label_threshold') == LABEL_THRESHOLD
+                    and row.get('probability_threshold') == PROBABILITY_THRESHOLD):
+                answer += (f' 分类概率阈值为 {PROBABILITY_THRESHOLD}，回归 pIC50 的活性标签阈值为 {LABEL_THRESHOLD}。'
+                           '分类与回归分别预测；不一致表示两者给出的活性标签不同，具体原因无法由这些结果确定，需复核并以实验验证。')
+            else:
+                answer += ' 未提供可验证的阈值信息，无法进一步解释一致性。'
+        return {'final_answer': answer, 'status': 'partial' if review else 'completed',
+                'success': not bool(review), 'activity_evidence': evidence}
+    species_question = re.fullmatch(
+        r'(?:这个|刚才的|上一轮的)(?:(?:预测)?结果|预测值)能(?:否|不能|不可以|不能否|)说明\s*'
+        r'(?P<smiles>该分子|这个分子|[A-Za-z0-9@+\-\[\]().=#\\/:%*]+)\s*对\s*人源\s*'
+        r'(?P<target>[A-Za-z0-9-]+)\s*有活性(?:吗)?[？?]'
+        r'(?:\s*请说明依据和限制[。.!！]?)?\s*', query, re.I)
+    if species_question:
+        previous = history[-1].get('activity_evidence') if history else None
+        evidence = None
+        if isinstance(previous, dict) and previous.get('session_id') == session_id and session_id:
+            evidence = accepted_activity_evidence(
+                {'trace_id': previous.get('trace_id'), 'tool_result_sequence': previous.get('observations')},
+                previous.get('query', ''), session_id)
+        rows = evidence['observations'][0]['data'] if evidence and valid_inspection_evidence(evidence) else []
+        selector = species_question.group('smiles')
+        canonical = _canonical(selector) if selector not in {'该分子', '这个分子'} else None
+        target = species_question.group('target').casefold()
+        matched = [row for row in rows if ((canonical is not None and _canonical(row['smiles']) == canonical)
+                   or (selector in {'该分子', '这个分子'} and len(rows) == 1))
+                   and str(row.get('requested_target', '')).casefold() == target]
+        if len(matched) != 1 or matched[0].get('predicted_pIC50') is None:
+            return {'final_answer': '缺少该分子和靶点对应的已验证活性预测；未重新计算。',
+                    'status': 'not_calculated', 'success': False}
+        row = matched[0]
+        scope = (row.get('provenance') or {}).get('scope') or {}
+        species = scope.get('species') if isinstance(scope, dict) else None
+        scope_text = {'mixed': '模型范围为混合物种，不能将其视为人源特异预测。',
+                      'human': '模型范围标注为人源，但预测不能证明实验活性。'}.get(
+                          species, '模型的物种范围未明确为人源，不能将其视为人源特异预测。')
+        disagreement = ('分类与回归预测不一致，需要复核。'
+                        if row.get('classification_regression_consistent') is False else '')
+        answer = (f"不能根据该结果确认 `{_cell(row['smiles'])}` 对 {_cell(row['requested_target'])} "
+                  f"具有人源实验活性。预测 pIC50 为 {_cell(row['predicted_pIC50'])}；"
+                  f"活性概率为 {_cell(row.get('activity_probability'))}。{scope_text}{disagreement}"
+                  '该结果未证明模型适用域覆盖此结构；需要结合适用域评估及人源实验验证。')
+        return {'final_answer': answer, 'status': 'partial', 'success': False, 'activity_evidence': evidence}
+    proof = re.fullmatch(r'这是否证明\s+([^\s]+)\s+对\s+([^\s]+)\s+没有活性[？?。]?', query.strip())
+    if proof:
+        previous = history[-1].get('activity_evidence') if history else None
+        evidence = None
+        if isinstance(previous, dict) and previous.get('session_id') == session_id and session_id:
+            result = {'trace_id': previous.get('trace_id'), 'tool_result_sequence': previous.get('observations')}
+            evidence = accepted_activity_evidence(result, previous.get('query', ''), session_id)
+        from src.activity.family_contract import resolve_activity_family
+        try:
+            canonical = _canonical(proof.group(1))
+            family = resolve_activity_family(proof.group(2))
+            rows = evidence['observations'][0]['data'] if evidence and valid_inspection_evidence(evidence) else []
+            matched = [row for row in rows if _canonical(row['smiles']) == canonical
+                       and resolve_activity_family(row['requested_target']) == family]
+        except (ValueError, TypeError, KeyError):
+            matched = []
+        if len(matched) != 1:
+            return {'final_answer': '缺少该分子和靶点对应的已验证活性记录；未重新计算。',
+                    'status': 'not_calculated', 'success': False}
+        return {'final_answer': f'对 `{proof.group(1)}` 和 `{proof.group(2)}` 的模型预测不能证明该分子没有实验活性；'
+                '需要结合模型适用范围并通过实验验证。', 'status': 'completed', 'success': True,
+                'activity_evidence': evidence}
     inspection = inspection_request(query)
     concept = is_concept_explanation(query)
     if inspection is False and not concept:

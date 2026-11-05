@@ -15,6 +15,23 @@ FIRST = '对 CCO 做反向寻靶，列出前五个候选靶点、物种、相似
 FOLLOWUP = '查找排名第一的靶点结构，并说明能否继续对接。'
 
 
+@pytest.mark.parametrize(('state', 'expected'), [
+    ('loading', '已校验 120/1000 条'),
+    ('ready', '已完成'),
+    ('failed', '暂不可用'),
+])
+def test_reverse_source_status_question_uses_live_snapshot_without_guessing_eta(state, expected):
+    from src.web.web_business import WebTurnProjection
+    tool = SimpleNamespace(source_status=lambda: {'state': state, 'verified_rows': 120, 'total_rows': 1000})
+    boundary = SimpleNamespace(reverse_tool=tool)
+    query = '反向寻靶数据源的校验现在进行到哪里？还要等多久？'
+    view = WebTurnProjection(query, 'session', [], reverse_boundary=boundary).followup(enable_tools=True)
+    assert expected in view['content']
+    if state == 'loading':
+        assert '无法预计' in view['content'] and view['status'] == 'partial'
+    assert WebTurnProjection(query + '请运行反向寻靶。', 'session', [], reverse_boundary=boundary).followup(enable_tools=True) is None
+
+
 def make_handler(case, *, summarize=False):
     handler = make_web_handler({case.tool.name: case.tool}, case.store)
     handler.config.update(agent={'summarize_workflow_results': summarize}, inference={'stream': False})
@@ -53,9 +70,22 @@ def test_chat_without_five_request_preserves_ten_row_display(ranked):
     assert 'Synthetic J' in result['content'] and '前 10' in result['content']
 
 
+def test_relist_prior_five_reuses_current_verified_ranking(ranked):
+    handler, history = make_handler(ranked), []
+    turn(handler, '对 CCO 做反向寻靶，列出候选靶点。', history)
+    result, _ = turn(handler, '请列出刚才排名前 5 个候选靶点及其支持证据。', history)
+    assert '前 5' in result['content']
+    assert '来源 trace' not in result['content'] and '证据摘要' not in result['content']
+    assert 'Synthetic E' in result['content'] and 'Synthetic F' not in result['content']
+    assert history[-1].get('reverse_target_evidence')
+    foreign, _ = turn(handler, '请列出刚才排名前 5 个候选靶点及其支持证据。', history, session='foreign-session')
+    assert '无法核对' in foreign['content'] and 'Synthetic A' not in foreign['content']
+
+
 def test_reverse_rank_projection_does_not_depend_on_model_citing_evidence_id(ranked):
     """The server-owned receipt remains usable when model prose omits its ID."""
     from src.agent.contracts import RunOutcome
+    from src.system.scientific_contracts import ToolResult
     from src.web.reverse_target_followup import RankedReverseEvidence
     from src.web.web_business import WebTurnProjection
 
@@ -68,7 +98,7 @@ def test_reverse_rank_projection_does_not_depend_on_model_citing_evidence_id(ran
         success = True
         trace_id = payload['trace_id']
         final_answer = payload['final_answer']
-        tool_results = [object()]
+        tool_results = [ToolResult.success_result('reverse_target_predictor')]
 
         @staticmethod
         def to_legacy_dict():

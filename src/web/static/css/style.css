@@ -310,11 +310,14 @@ header .right .link {
   position: relative;
 }
 
-.index_con .right .fill input {
+.index_con .right .fill textarea {
   width: 100%;
   outline: none;
-  height: 55px;
-  padding: 0 20px;
+  height: 96px;
+  padding: 11px 20px;
+  line-height: 24px;
+  resize: none;
+  overflow-y: auto;
   background: #fdfdfd;
   border-radius: 8px;
   border: 1px solid #e6e6e6;
@@ -323,7 +326,7 @@ header .right .link {
   transition: border-color 0.3s ease;
 }
 
-.index_con .right .fill input:focus {
+.index_con .right .fill textarea:focus {
   border-color: #4f46e5;
 }
 

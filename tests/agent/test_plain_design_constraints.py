@@ -132,8 +132,8 @@ def test_missing_or_failed_property_observation_has_explicit_unverified_report(c
     assert "未验证" in report and "| 满足 |" not in report and "| 不满足 |" not in report
     assert "46.07" not in report and "45.08" not in report
     if clause == "MW < 450":
-        for candidate in ("candidate-1", "candidate-2"):
-            assert f"| {candidate} | molecular_weight < 450.0 Da | 不可用 | 未验证 |" in report
+        for index, smiles in enumerate(("CCO", "CCN"), 1):
+            assert f"| 候选 {index} `{smiles}` | 分子量 < 450.0 Da | 不可用 | 未验证 |" in report
     else:
         assert "未验证的约束语法：molecular_weight_bound" in report
 
@@ -255,12 +255,17 @@ def test_real_router_through_runtime_to_bounded_property_report(clause, fail_pro
         assert execution.result.partial is True
         assert "未验证" in report and "| 满足 |" not in report
         if clause not in UNKNOWN:
-            assert all(candidate["candidate_id"] in report for candidate in candidates)
+            assert all(candidate["canonical_smiles"] in report for candidate in candidates)
     else:
         rows = result["tool_result_sequence"][1]["data"]
         assert {row["candidate_id"]: row["smiles"] for row in rows} == {
             candidate["candidate_id"]: candidate["canonical_smiles"] for candidate in candidates}
-        assert "plain-design-integration" in report and "独立 RDKit 描述符，不是实验验证" in report
+        assert result["trace_id"] == "plain-design-integration"
+        assert result["tool_result_sequence"][1]["quality"]["evidence_id"]
+        assert result["tool_result_sequence"][1]["provenance"]["tool_name"] == "property_calculator"
+        assert "数值为计算描述符" in report
+        if clause not in UNKNOWN:
+            assert all(candidate["canonical_smiles"] in report for candidate in candidates)
         if clause in UNKNOWN:
             assert "未验证的约束语法" in report and "| 满足 |" not in report
         elif clause == "MW < 46":

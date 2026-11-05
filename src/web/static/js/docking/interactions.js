@@ -160,6 +160,8 @@ async function requestInteractionAnalysis(kind) {
     Utils.showToast("请先加载有效的对接任务和构象", "warning");
     return;
   }
+  const status = document.getElementById("interaction-status");
+  if (status) status.textContent = "";
   try {
     const analysis = await fetchInteractionAnalysis(jobId, pose);
     if ((typeof getDockingViewSequence === "function" && getDockingViewSequence() !== viewSequence) || getCurrentJobId() !== jobId || parseInt(poseSelect?.value || "1", 10) !== pose) return;
@@ -175,10 +177,11 @@ async function requestInteractionAnalysis(kind) {
     }
     const interactions = (analysis.interactions || []).filter((item) => item.type === kind);
     if (analysis.status !== "success") {
-      Utils.showToast(
-        analysis.warnings?.[0] || "缺少可靠结构证据，无法分析该类相互作用",
-        "warning",
-      );
+      const message = analysis.warnings?.[0] === "protein_explicit_hydrogens_are_required_by_prolif"
+        ? "受体缺少显式氢，无法进行相互作用分析；请准备带显式氢的受体后重试。"
+        : "缺少可靠结构证据，无法分析该类相互作用。";
+      if (status) status.textContent = `Pose ${pose}：${message}`;
+      Utils.showToast(message, "warning");
       return;
     }
     const rendered = renderInteractionEvidence(kind, interactions);

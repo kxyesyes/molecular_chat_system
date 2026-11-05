@@ -15,7 +15,7 @@ from src.agent.contracts import (
     ToolProvenance,
     ToolResult,
 )
-from .activity_input import activity_intent_requested, parse_activity_input, requested_activity_endpoint
+from .activity_input import activity_intent_requested, parse_activity_input, requested_activity_endpoint, requested_activity_species
 from .base_tool import BaseMolecularTool
 from src.activity.request_selection import (
     ActivityModelRequest,
@@ -31,6 +31,23 @@ class ActivityPredictorTool(BaseMolecularTool):
     # WorkflowRunSession uses checkpoint_model_version to bind reuse to that
     # exact request; if it cannot resolve an identity, reuse remains disabled.
     checkpoint_reuse_requires_runtime_identity = True
+
+    @staticmethod
+    def _model_request(query, target, endpoint):
+        request = query.get('model_request') if isinstance(query, dict) else None
+        if request is not None and not isinstance(request, dict):
+            raise ValueError('模型请求参数必须是结构化对象。')
+        payload = dict(request or {})
+        payload.setdefault('target', target)
+        if endpoint is not None:
+            payload.setdefault('endpoint', endpoint)
+        species = requested_activity_species(query)
+        if species is not None:
+            supplied = payload.get('species')
+            if supplied is not None and (not isinstance(supplied, str) or supplied.strip().casefold() != species):
+                raise ValueError('模型请求物种与输入不一致。')
+            payload['species'] = species
+        return payload, request is not None or species is not None
 
     def __init__(self):
         super().__init__(
@@ -60,13 +77,7 @@ class ActivityPredictorTool(BaseMolecularTool):
             endpoint = requested_activity_endpoint(input_data)
             if target is None:
                 return None
-            request_model = input_data.get("model_request") if isinstance(input_data, dict) else None
-            if request_model is not None and not isinstance(request_model, dict):
-                return None
-            request_payload = dict(request_model or {})
-            request_payload.setdefault("target", target)
-            if endpoint is not None:
-                request_payload.setdefault("endpoint", endpoint)
+            request_payload, _ = self._model_request(input_data, target, endpoint)
             expected = ActivityModelRequest.from_mapping(request_payload)
             if expected.family_id != resolve_activity_family(target):
                 return None
@@ -87,14 +98,8 @@ class ActivityPredictorTool(BaseMolecularTool):
                 not isinstance(candidate_ids, list) or len(candidate_ids) != len(smiles)
             ):
                 return False
-            request_model = input_data.get("model_request") if isinstance(input_data, dict) else None
-            if request_model is not None and not isinstance(request_model, dict):
-                return False
-            request_payload = dict(request_model or {})
-            request_payload.setdefault("target", target)
             endpoint = requested_activity_endpoint(input_data)
-            if endpoint is not None:
-                request_payload.setdefault("endpoint", endpoint)
+            request_payload, _ = self._model_request(input_data, target, endpoint)
             expected = ActivityModelRequest.from_mapping(request_payload)
             if expected.family_id != resolve_activity_family(target):
                 return False
@@ -177,18 +182,13 @@ class ActivityPredictorTool(BaseMolecularTool):
                 status=ObservationStatus.INVALID_INPUT,
             )
         try:
+            request_payload, has_model_request = self._model_request(query, target, endpoint)
+        except ValueError as exc:
+            return ToolResult.error_result(
+                self.name, AgentErrorCode.INVALID_INPUT, str(exc),
+                status=ObservationStatus.INVALID_INPUT)
+        try:
             from src.activity.prediction_service import predict_activity
-            request_model = query.get("model_request") if isinstance(query, dict) else None
-            if request_model is not None and not isinstance(request_model, dict):
-                return ToolResult.error_result(
-                    self.name, AgentErrorCode.INVALID_INPUT,
-                    "模型请求参数必须是结构化对象。",
-                    status=ObservationStatus.INVALID_INPUT,
-                )
-            request_payload = dict(request_model or {})
-            request_payload.setdefault("target", target)
-            if endpoint is not None:
-                request_payload.setdefault("endpoint", endpoint)
             expected_request = ActivityModelRequest.from_mapping(request_payload)
             if expected_request.family_id != resolve_activity_family(target):
                 return ToolResult.error_result(
@@ -202,10 +202,10 @@ class ActivityPredictorTool(BaseMolecularTool):
                     f"当前真实活性模型仅登记为 pIC50，无法直接提供 {expected_request.endpoint}。",
                     status=ObservationStatus.UNAVAILABLE,
                 )
-            if request_model is None:
+            if not has_model_request:
                 summary = predict_activity(smiles, target=target)
             else:
-                summary = predict_activity(smiles, target=target, model_request=request_model)
+                summary = predict_activity(smiles, target=target, model_request=request_payload)
         except ModelSelectionError as exc:
             return ToolResult.error_result(
                 self.name, AgentErrorCode.INVALID_INPUT, str(exc),
@@ -253,19 +253,16 @@ class ActivityPredictorTool(BaseMolecularTool):
         service_warnings = summary.get("warnings", [])
         warnings = [warning for warning in service_warnings if isinstance(warning, str)] \
             if isinstance(service_warnings, list) else []
-        model_stage_failed = any(
-            isinstance(row.get("errors"), dict)
-            and any(stage in row["errors"] for stage in ("bundle", "classification", "regression"))
-            and row.get("activity_probability") is None
-            and row.get("predicted_pIC50") is None
-            for row in rows
-            if isinstance(row, dict)
-        )
-        if model_stage_failed:
+        errors = [row.get('errors', {}) for row in rows if isinstance(row, dict)]
+        if any(error.get('bundle') == 'species_model_unavailable' for error in errors):
+            warnings.append('未找到与请求物种匹配的已登记活性模型；本次未生成预测值。')
+        if any('bundle' in error and error['bundle'] != 'species_model_unavailable' for error in errors):
             warnings.append(
                 "活性预测模型不可用：请确认 PyTorch 与已登记 RG-MPNN 模型权重已安装；"
                 "本次未生成 pIC50 数值。"
             )
+        if any('classification' in error or 'regression' in error for error in errors):
+            warnings.append('活性预测模型执行失败或输出未通过校验；未生成的预测值不可用，请检查运行日志。')
         # Reuse the shared warning contract without altering original observations.
         warnings = list(dict.fromkeys(warnings + expected["warnings"]))
         request_identities = {

@@ -646,7 +646,8 @@ class WorkflowOrchestrator:
             if isinstance(workflow_metadata_keys, tuple):
                 for key in workflow_metadata_keys:
                     if key in step.metadata:
-                        request_metadata[key] = step.metadata[key]
+                        value = step.metadata[key]
+                        request_metadata[key] = list(value) if isinstance(value, tuple) else value
             input_data = BindingResolver().resolve(
                 selector,
                 transform,

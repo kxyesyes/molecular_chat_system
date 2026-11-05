@@ -19,7 +19,7 @@ assert.doesNotMatch(source, /InteractionGeometry/);
 assert.doesNotMatch(source, /selectedAtoms\(\{\}\)/);
 assert.doesNotMatch(source, /selectedAtoms\(/);
 assert.doesNotMatch(template, /docking\/interaction_geometry\.js/);
-assert.match(template, /docking\/interactions\.js\?v=20261027-interaction-scope-v1/);
+assert.match(template, /docking\/interactions\.js\?v=20261031-interaction-status-v2/);
 assert.match(source, /interactionAnalysisCache/);
 
 const shapes = [];
@@ -87,6 +87,20 @@ async function main() {
   await requestContext.requestInteractionAnalysis("hydrogen_bond");
   await requestContext.requestInteractionAnalysis("hydrogen_bond");
   assert.equal(requests.length, 1);
+  const status = {textContent: ""};
+  const unavailable = vm.createContext({
+    viewer: {addCylinder() {}, render() {}}, console, setTimeout,
+    getCurrentJobId: () => "job-2",
+    document: {getElementById: (id) => id === "interaction-status" ? status : {value: "1"}},
+    Utils: {showToast() {}},
+    fetch: async () => ({ok: true, json: async () => ({status: "unavailable",
+      warnings: ["protein_explicit_hydrogens_are_required_by_prolif"], interactions: []})}),
+  });
+  vm.runInContext(source, unavailable);
+  await unavailable.requestInteractionAnalysis("hydrogen_bond");
+  assert.match(status.textContent, /受体.*显式氢/);
+  assert.match(status.textContent, /无法.*分析/);
+  assert.doesNotMatch(status.textContent, /未报告|protein_explicit/);
   let finish;
   let viewSequence = 1;
   let drawn = 0;

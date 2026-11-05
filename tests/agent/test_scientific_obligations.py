@@ -11,6 +11,70 @@ from src.web.scientific_obligations import (
 from src.system.molecular_input_parser import MolecularInputUnavailable
 
 
+@pytest.mark.parametrize('noun', ['预测数值', '预测结果', '预测分数', '预测值'])
+def test_prediction_result_noun_is_not_a_new_calculation_request(noun):
+    from src.web.web_request import prepare_web_request
+    query = (f'先别算新的数据。请把刚才的两个{noun}放在一起解释一下：'
+             '为什么数值较高还不足以决定优先推进哪一个？'
+             '只说现有结果能支持什么、不能支持什么。')
+    assert not ScientificObligationCompiler.is_profile_candidate(query)
+    prepared = prepare_web_request({'message': query, 'enable_rag': False},
+                                   session_id='s', trace_id='t')
+    assert prepared.request_kind == 'chat'
+    assert not prepared.allowed_tools
+    assert ScientificObligationCompiler.is_profile_candidate(query + '再计算 CCO 的 LogD。')
+
+
+@pytest.mark.parametrize('verb', ['给出', '返回', '报告', '展示', '显示', '计算', '预测'])
+def test_past_result_attribution_does_not_authorize_new_endpoint(verb):
+    from src.web.web_request import prepare_web_request
+    query = f'你刚才{verb}的两个数值，是 pH 7.4 下的 logD 吗？请核对一下，不要重新计算。'
+    assert not ScientificObligationCompiler.is_profile_candidate(query)
+    prepared = prepare_web_request({'message': query, 'enable_rag': False},
+                                   session_id='s', trace_id='t')
+    assert prepared.context.query == query
+    assert prepared.request_kind == 'chat'
+    assert not prepared.allowed_tools
+    mixed = query + '请再计算 CCO 的 LogD。'
+    assert ScientificObligationCompiler.is_profile_candidate(mixed)
+    assert ScientificObligationCompiler().compile(mixed).status == 'rejected'
+
+
+def test_current_intent_with_attributive_word_still_requests_execution():
+    assert ScientificObligationCompiler.is_profile_candidate('我想计算的是 CCO 的 LogD。')
+    assert ScientificObligationCompiler.is_profile_candidate('请计算刚才给出的分子的 LogD。')
+
+
+def test_requested_prediction_result_keeps_combined_endpoint_obligations():
+    query = '请给出 CCO 的活性和水溶解度预测结果。'
+    assert ScientificObligationCompiler.is_profile_candidate(query)
+
+
+@pytest.mark.parametrize('phrase', ['写进报告', '写入报告', '放进报告', '纳入报告', '用于报告'])
+def test_report_document_noun_does_not_request_scientific_execution(phrase):
+    query = ('那是否可以把刚才的数值默认当作纯水、pH 7 和 25°C 下的结果？'
+             f'我想把这几个条件{phrase}，请只依据已有记录核对，不要重新计算。')
+    assert not ScientificObligationCompiler.is_profile_candidate(query)
+    assert ScientificObligationCompiler.is_profile_candidate(query + '请报告 CCO 的分子量。')
+
+
+@pytest.mark.parametrize('predicate', ['是多少', '为多少'])
+def test_prior_prediction_value_question_does_not_request_condition_specific_prediction(predicate):
+    from src.web.web_request import prepare_web_request
+    query = (f'先只看第一个分子。它刚才的水溶解度预测{predicate}？'
+             '这个结果能说明它在 pH 7.4 下的溶解度吗？不要重新计算。')
+    assert not ScientificObligationCompiler.is_profile_candidate(query)
+    prepared = prepare_web_request({'message': query, 'enable_rag': False},
+                                   session_id='s', trace_id='t')
+    assert prepared.request_kind == 'chat'
+    assert not prepared.allowed_tools
+    mixed = query + '再预测 CCO 在 pH 7.4 下的水溶解度。'
+    assert ScientificObligationCompiler.is_profile_candidate(mixed)
+    plan = ScientificObligationCompiler().compile(mixed)
+    assert plan.status == 'rejected'
+    assert 'condition_specific_solubility' in plan.missing_capabilities
+
+
 def test_compiles_requested_properties_into_a_typed_ready_plan():
     plan = ScientificObligationCompiler().compile(
         "请分析 CCO 的分子性质，返回 LogP 和 TPSA。"
@@ -25,6 +89,471 @@ def test_compiles_requested_properties_into_a_typed_ready_plan():
     assert plan.steps[0].input_data == "CCO"
     assert plan.steps[0].output_key == "properties"
     assert plan.steps[0].capability == "molecular_properties"
+
+
+def test_calculated_logp_alias_is_a_supported_property():
+    plan = ScientificObligationCompiler().compile('计算 CCO 的 cLogP。')
+    assert plan.status == 'ready'
+    assert plan.metrics == ('logp',)
+
+
+def test_brief_result_explanation_is_not_an_unknown_metric():
+    plan = ScientificObligationCompiler().compile(
+        '请计算乙醇（SMILES：CCO）的分子量和 logP，并简要解释结果。'
+    )
+    assert plan.status == 'ready'
+    assert set(plan.metrics) == {'mw', 'logp'}
+    assert plan.smiles == 'CCO'
+
+
+def test_brief_explanation_does_not_hide_unknown_metric():
+    plan = ScientificObligationCompiler().compile(
+        '请计算乙醇（SMILES：CCO）的分子量、logP 和 FooMetric，并简要解释结果。'
+    )
+    assert plan.status == 'rejected'
+    assert 'metric:unreviewed' in plan.missing_capabilities
+
+
+def test_exact_pdb_resolution_and_ligands_are_not_molecular_metrics():
+    query = '请查询人源 EGFR 的实验结构 PDB 1M17，给出分辨率，并说明包含哪些配体。'
+    assert not ScientificObligationCompiler.is_profile_candidate(query)
+
+
+def test_exact_pdb_request_does_not_hide_unknown_molecular_metric():
+    from src.web.scientific_obligations import _unreviewed_metric_capabilities
+    query = '请查询人源 EGFR 的 PDB 1M17，给出分辨率，并计算 CCO 的 LogP 和 FooMetric。'
+    assert 'metric:unreviewed' in _unreviewed_metric_capabilities(query)
+
+
+def test_direct_cyp3a4_inhibition_request_uses_admet_tool():
+    query = '请预测分子 SMILES: CCO 的 CYP3A4 抑制风险，给出预测结果并说明能否直接当作人体不良反应概率。'
+    compiler = ScientificObligationCompiler()
+    assert compiler.is_profile_candidate(query)
+    plan = compiler.compile(query)
+    assert plan.status == 'ready'
+    assert plan.required_tools == ('admet_predictor',)
+
+
+def test_direct_aqueous_solubility_prediction_comparison_uses_admet():
+    query = ('比较阿司匹林 CC(=O)Oc1ccccc1C(=O)O 和对乙酰氨基酚 CC(=O)Nc1ccc(O)cc1 '
+             '的水溶解度预测。只比较这一项，保留单位和预测局限。')
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert plan.required_tools == ('admet_predictor',)
+    assert len(plan.canonical_smiles.splitlines()) == 2
+    from src.web.decision_chat import _requested_admet_endpoints
+    assert _requested_admet_endpoints(query) == ('Solubility_AqSolDB',)
+
+
+@pytest.mark.parametrize('extra', ['和 logD', '和 FooMetric', '，pH 7.4 下', '，温度 37℃ 下'])
+def test_solubility_prediction_does_not_drop_unavailable_obligations(extra):
+    query = '预测 CCO 和 CCN 的水溶解度' + extra + '。'
+    assert ScientificObligationCompiler().compile(query).status == 'rejected'
+
+
+def test_admet_requested_solubility_and_toxicity_are_not_rejected_as_properties():
+    from src.web.decision_chat import _requested_admet_endpoints
+    query = ('请预测 SMILES: CC(=O)Oc1ccccc1C(=O)O 的 ADMET，'
+             '重点关注溶解度、肝毒性和 hERG 风险；无法预测的指标请明确说明。')
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert plan.required_tools == ('admet_predictor',)
+    assert set(_requested_admet_endpoints(query)) == {'Solubility_AqSolDB', 'DILI', 'hERG'}
+    extra = ScientificObligationCompiler().compile(query.replace('hERG 风险', 'hERG 风险和 logD'))
+    assert extra.status == 'rejected' and 'metric:logd' in extra.missing_capabilities
+
+
+def test_admet_aqueous_solubility_alias_is_bound_to_its_model_endpoint():
+    from src.web.decision_chat import _requested_admet_endpoints
+    query = '请预测 SMILES: CCO 的 ADMET，重点关注水溶解度、hERG 和肝毒性。'
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready' and plan.required_tools == ('admet_predictor',)
+    assert set(_requested_admet_endpoints(query)) == {'Solubility_AqSolDB', 'DILI', 'hERG'}
+    extra = ScientificObligationCompiler().compile(query.replace('肝毒性', '肝毒性和 logD'))
+    assert extra.status == 'rejected' and 'metric:logd' in extra.missing_capabilities
+
+
+def test_admet_do_prediction_after_labeled_smiles_keeps_focused_endpoints():
+    from src.web.decision_chat import _requested_admet_endpoints
+    query = ('请对 SMILES: CC(=O)Oc1ccccc1C(=O)O 做 ADMET 预测，'
+             '重点关注水溶解度、肝毒性和 hERG 风险，并说明哪些是预测值。')
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert plan.smiles == 'CC(=O)Oc1ccccc1C(=O)O'
+    assert plan.required_tools == ('admet_predictor',)
+    assert set(_requested_admet_endpoints(query)) == {'Solubility_AqSolDB', 'DILI', 'hERG'}
+    assert ScientificObligationCompiler().compile(query.replace('hERG 风险', 'hERG 风险和 logD')).status == 'rejected'
+    assert ScientificObligationCompiler().compile(query.replace('C(=O)O 做', 'C(=O)O broken 做')).status == 'rejected'
+
+
+def test_cyp3a4_inhibition_accepts_labeled_complex_smiles():
+    query = '请预测分子 SMILES: CC(=O)Oc1ccccc1C(=O)O 的 CYP3A4 抑制风险，给出预测结果并说明能否直接当作人体不良反应概率。'
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert plan.smiles == 'CC(=O)Oc1ccccc1C(=O)O'
+    assert plan.required_tools == ('admet_predictor',)
+
+
+def test_cyp3a4_inhibition_accepts_named_labeled_structure():
+    query = '请预测阿司匹林（SMILES: CC(=O)Oc1ccccc1C(=O)O）的 CYP3A4 抑制风险。'
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert plan.smiles == 'CC(=O)Oc1ccccc1C(=O)O'
+
+
+def test_property_request_accepts_labeled_chiral_smiles():
+    smiles = 'CC(C)Cc1ccc([C@@H](C)C(=O)O)cc1'
+    plan = ScientificObligationCompiler().compile(f'请计算 SMILES: {smiles} 的分子量和 LogP。')
+    assert plan.status == 'ready' and plan.smiles == smiles
+    assert set(plan.metrics) == {'mw', 'logp'}
+
+
+def test_chiral_smiles_does_not_hide_unknown_metric():
+    query = '计算 SMILES: CC(C)Cc1ccc([C@@H](C)C(=O)O)cc1 的 LogP 和 FooMetric。'
+    assert ScientificObligationCompiler().compile(query).status == 'rejected'
+
+
+def test_two_labeled_structures_joined_by_and_are_both_calculated():
+    smiles = 'CC(C)Cc1ccc([C@@H](C)C(=O)O)cc1'
+    query = f'比较 SMILES: {smiles} 和 SMILES: CCO 的分子量及 LogP。'
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert plan.smiles == smiles + '\nCCO'
+    assert set(plan.metrics) == {'mw', 'logp'}
+
+
+def test_direct_herg_and_dili_prediction_is_admet_request():
+    query = '请预测 SMILES: Cn1c(=O)c2c(ncn2C)n(C)c1=O 的 hERG 和 DILI。'
+    assert ScientificObligationCompiler.is_profile_candidate(query)
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready' and plan.required_tools == ('admet_predictor',)
+
+
+def test_single_smiles_label_can_introduce_two_admet_candidates():
+    query = '请比较 SMILES: CCO 和 CCN 的 ADMET，列出各自的 hERG 和 DILI 预测值。'
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready' and plan.smiles == 'CCO\nCCN'
+    assert plan.required_tools == ('admet_predictor',)
+    invalid = ScientificObligationCompiler().compile(query.replace('CCN', 'CCN$bad'))
+    assert invalid.status == 'rejected'
+    mixed = ScientificObligationCompiler().compile(query.replace('CCN', '阿司匹林'))
+    assert mixed.status != 'ready'
+
+
+def test_single_label_comparison_is_understood_by_shared_molecular_boundary():
+    from src.agent.tools.base_tool import BaseMolecularTool
+    from src.system.molecular_input_parser import parse_molecular_smiles
+    query = ('请比较 SMILES: CCO 和 CCN 的 ADMET，列出各自的 hERG 和 DILI 预测值；'
+             '如有缺失请说明，不要推断人体安全性。')
+    parser = BaseMolecularTool('test', '')
+    assert parse_molecular_smiles(query, parser) == ['CCO', 'CCN']
+    with pytest.raises(ValueError):
+        parse_molecular_smiles(query.replace('CCN', 'CCN$bad'), parser)
+
+
+def test_property_bound_unit_is_not_an_unknown_metric():
+    query = '比较 CCO 和 CCN 的分子量与 logP，判断它们是否满足分子量不大于 45.08 Da。'
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert plan.required_tools == ('property_calculator',)
+    assert ScientificObligationCompiler().compile(query.replace('logP', 'logP 和 FooMetric')).status == 'rejected'
+    from src.agent.property_constraints import requested_property_bounds
+    assert requested_property_bounds(query.replace('Da', 'FooMetric'))[1]
+
+
+def test_natural_single_molecule_bounds_preserve_other_obligations():
+    compiler = ScientificObligationCompiler()
+    query = ('请计算 SMILES: CC(=O)O 的分子量和 logP，并判断其是否符合'
+             '分子量小于 500、logP 小于 5 的要求。')
+    assert compiler.compile(query).status == 'ready'
+    assert compiler.compile(query.replace('logP，并', 'logP 和 FooMetric，并')).status == 'rejected'
+    assert compiler.compile(query + '再进行对接。').status == 'rejected'
+
+
+def test_natural_bound_question_preserves_unknowns_and_extra_obligations():
+    from src.agent.property_constraints import requested_property_bounds
+    query = '比较 CCO 和 CCN 的分子量和 logP，判断两者是否都不超过分子量 45.08 Da。'
+    bounds, unknown = requested_property_bounds(query)
+    assert not unknown and bounds[0]['operator'] == '<=' and bounds[0]['threshold'] == 45.08
+    assert requested_property_bounds(query.replace('Da', 'kDa'))[1]
+    assert ScientificObligationCompiler().compile(query.replace('logP', 'logP 和 FooMetric')).status == 'rejected'
+    combined = ScientificObligationCompiler().compile(query + '再预测毒性。')
+    assert combined.status != 'ready' or 'admet_predictor' in combined.required_tools
+
+
+def test_mixed_bounds_do_not_hide_unknown_metrics_or_other_tasks():
+    query = ('比较 CCO 和 CCN 的分子量和 logP，判断它们是否满足'
+             '分子量不大于 50 Da 和 logP 不大于 2 kDa。')
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready' and plan.required_tools == ('property_calculator',)
+    assert ScientificObligationCompiler().compile(query.replace('logP，', 'logP 和 FooMetric，', 1)).status == 'rejected'
+    assert ScientificObligationCompiler().compile(query.replace('logP 不大于', 'FooMetric 不大于')).status == 'rejected'
+    combined = ScientificObligationCompiler().compile(query + '再预测毒性。')
+    assert combined.status != 'ready' or 'admet_predictor' in combined.required_tools
+
+
+def test_labeled_structure_joiner_does_not_hide_invalid_suffix():
+    query = '比较 SMILES: CCO invalid_suffix 和 SMILES: CCN 的分子量及 LogP。'
+    assert ScientificObligationCompiler().compile(query).status == 'rejected'
+
+
+def test_cyp3a4_substrate_question_uses_complete_smiles():
+    query = '请预测分子 SMILES: CCO 是否为 CYP3A4 的底物，并给出模型结果。'
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert plan.smiles == 'CCO' and plan.required_tools == ('admet_predictor',)
+
+
+def test_cyp3a4_substrate_question_rejects_malformed_smiles_suffix():
+    query = '请预测分子 SMILES: CCO invalid_suffix 是否为 CYP3A4 的底物。'
+    assert ScientificObligationCompiler().compile(query).status == 'rejected'
+
+
+def test_calculation_followed_by_explanation_keeps_the_property_obligation():
+    plan = ScientificObligationCompiler().compile('计算 CCO 的 LogP，并解释该指标的含义。')
+    assert plan.status == 'ready'
+    assert plan.metrics == ('logp',)
+    assert plan.steps[0].input_data == 'CCO'
+
+
+def test_explanation_does_not_hide_an_additional_unknown_metric():
+    plan = ScientificObligationCompiler().compile('计算 CCO 的 LogP，并解释该指标的含义，再计算 FooMetric。')
+    assert plan.status == 'rejected'
+
+
+def test_property_comparison_plans_all_explicit_structures():
+    plan = ScientificObligationCompiler().compile('比较 CCO 和 CCN 的分子性质。')
+    assert plan.status == 'ready'
+    assert plan.workflow_version == 'web-property-batch-v1'
+    assert plan.smiles == 'CCO\nCCN'
+    assert plan.canonical_smiles == 'CCO\nCCN'
+    assert plan.required_tools == ('property_calculator',)
+    assert plan.steps[0].input_data == plan.smiles
+
+
+def test_explicit_descriptor_comparison_enters_property_compiler():
+    query = '比较 CC(=O)Oc1ccccc1C(=O)O 和 CC(C)Cc1ccc(C(C)C(=O)O)cc1 的分子量、LogP、HBA 和 HBD。'
+    assert ScientificObligationCompiler.is_profile_candidate(query)
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert set(plan.metrics) == {'mw', 'logp', 'hba', 'hbd'}
+
+
+def test_named_parenthesized_structures_are_compared():
+    query = '比较阿司匹林（CC(=O)Oc1ccccc1C(=O)O）和布洛芬（CC(C)Cc1ccc(C(C)C(=O)O)cc1）的分子量、LogP 和氢键供受体。'
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert len(plan.smiles.split('\n')) == 2
+    assert set(plan.metrics) == {'mw', 'logp', 'hba', 'hbd'}
+
+
+def test_named_space_separated_structures_are_compared_without_dropping_inputs():
+    query = '比较乙醇 CCO 和乙酸 CC(=O)O 的分子量和 logP。'
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert plan.smiles == 'CCO\nCC(=O)O'
+    assert set(plan.metrics) == {'mw', 'logp'}
+    assert ScientificObligationCompiler().compile(query.replace('CC(=O)O', 'CC(=O)O$bad')).status != 'ready'
+    assert ScientificObligationCompiler().compile(query.replace('乙酸 CC(=O)O', '乙酸')).status != 'ready'
+    assert ScientificObligationCompiler().compile(query.replace('logP', 'logP 和 FooMetric')).status != 'ready'
+
+
+def test_named_labeled_structures_are_compared():
+    query = ('比较阿司匹林（SMILES: CC(=O)Oc1ccccc1C(=O)O）和'
+             '布洛芬（SMILES: CC(C)Cc1ccc(C(C)C(=O)O)cc1）的分子量、logP 和 TPSA。')
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert len(plan.smiles.split('\n')) == 2
+    assert set(plan.metrics) == {'mw', 'logp', 'tpsa'}
+
+
+def test_oral_significance_explanation_retains_both_calculation_and_explanation():
+    from src.web.web_business import WebTurnProjection
+    query = ('比较阿司匹林（CC(=O)Oc1ccccc1C(=O)O）和布洛芬（CC(C)Cc1ccc(C(C)C(=O)O)cc1）'
+             '的分子量、LogP 和氢键供受体，并说明结果对口服成药性的意义。')
+    projection = WebTurnProjection(query, 'test-session', [])
+    assert projection.property_explanation == 'oral_significance'
+    plan = ScientificObligationCompiler().compile(projection.execution_query())
+    assert plan.status == 'ready'
+    assert plan.required_tools == ('property_calculator',)
+    assert len(plan.smiles.split('\n')) == 2
+
+
+def test_property_comparison_with_efficacy_limit_preserves_both_obligations():
+    from src.web.web_business import WebTurnProjection
+    query = ('请比较阿司匹林 CC(=O)Oc1ccccc1C(=O)O 和对乙酰氨基酚 CC(=O)Nc1ccc(O)cc1'
+             ' 的分子量、LogP、TPSA、氢键供受体数，并说明这些计算性质能否直接证明它们具有更好的药效。')
+    projection = WebTurnProjection(query, 'test-session', [])
+    assert projection.property_explanation == 'efficacy_limit'
+    plan = ScientificObligationCompiler().compile(projection.execution_query())
+    assert plan.status == 'ready' and plan.required_tools == ('property_calculator',)
+    assert len(plan.smiles.split('\n')) == 2
+    assert set(plan.metrics) == {'mw', 'logp', 'tpsa', 'hba', 'hbd'}
+    bad = query.replace('LogP、TPSA', 'LogP、FooMetric、TPSA')
+    assert ScientificObligationCompiler().compile(WebTurnProjection(bad, 'test-session', []).execution_query()).status == 'rejected'
+    extra = query + '请预测 CCO 的活性。'
+    assert WebTurnProjection(extra, 'test-session', []).property_explanation != 'efficacy_limit'
+
+
+def test_oral_significance_understands_descriptor_wording():
+    from src.web.web_business import WebTurnProjection
+    query = '比较 CCO 和 CCN 的分子量和 LogP，并解释这些指标对口服成药性的意义。'
+    projection = WebTurnProjection(query, 'test-session', [])
+    assert projection.property_explanation == 'oral_significance'
+    assert ScientificObligationCompiler().compile(projection.execution_query()).status == 'ready'
+
+
+def test_oral_comparison_from_calculated_results_preserves_user_request():
+    from src.web.web_business import WebTurnProjection
+    query = ('请比较阿司匹林（SMILES: CC(=O)Oc1ccccc1C(=O)O）和'
+             '布洛芬（SMILES: CC(C)Cc1ccc(cc1)C(C)C(=O)O）的分子量、LogP、'
+             '氢键供体和受体数，并根据这些结果分析口服成药性差异；不要编造实验数据。')
+    projection = WebTurnProjection(query, 'test-session', [])
+    assert projection.property_explanation == 'oral_significance'
+    plan = ScientificObligationCompiler().compile(projection.execution_query())
+    assert plan.status == 'ready'
+    assert len(plan.smiles.split('\n')) == 2
+    assert set(plan.metrics) == {'mw', 'logp', 'hba', 'hbd'}
+
+
+def test_oral_comparison_does_not_hide_unknown_metric():
+    from src.web.web_business import WebTurnProjection
+    query = ('比较 CCO 和 CCN 的分子量和 FooMetric，'
+             '并根据这些结果分析口服成药性差异；不要编造实验数据。')
+    projection = WebTurnProjection(query, 'test-session', [])
+    assert ScientificObligationCompiler().compile(projection.execution_query()).status == 'rejected'
+
+
+def test_oral_screening_question_preserves_supported_calculation_and_unresolved_choice():
+    from src.web.web_business import WebTurnProjection
+    query = '比较 CCO 和 CCN 的分子量、logP 和 TPSA，并说明哪一个更适合口服筛选。'
+    projection = WebTurnProjection(query, 'test-session', [])
+    assert projection.property_explanation == 'oral_screening_choice'
+    plan = ScientificObligationCompiler().compile(projection.execution_query())
+    assert plan.status == 'ready'
+    assert set(plan.metrics) == {'mw', 'logp', 'tpsa'}
+
+
+def test_oral_lead_choice_keeps_explicit_structures_and_requested_descriptors():
+    from src.web.web_business import WebTurnProjection
+    query = ('比较两个候选分子：A 的 SMILES 是 CC(=O)Oc1ccccc1C(=O)O，'
+             'B 的 SMILES 是 CC(C)Cc1ccc(cc1)[C@@H](C)C(=O)O。'
+             '请计算它们的分子量和 LogP，说明哪个更适合作为口服药物先导物，并说明判断的局限。')
+    projection = WebTurnProjection(query, 'test-session', [])
+    assert projection.property_explanation == 'oral_screening_choice'
+    plan = ScientificObligationCompiler().compile(projection.execution_query())
+    assert plan.status == 'ready'
+    assert plan.smiles.split('\n') == ['CC(=O)Oc1ccccc1C(=O)O',
+                                       'CC(C)Cc1ccc(cc1)[C@@H](C)C(=O)O']
+    assert set(plan.metrics) == {'mw', 'logp'}
+
+
+def test_element_b_remains_a_structure_when_not_a_candidate_label():
+    plan = ScientificObligationCompiler().compile('计算 B 的分子量和 LogP。')
+    assert plan.status == 'ready' and plan.smiles == 'B'
+
+
+def test_named_candidate_smiles_field_rejects_an_invalid_structure():
+    plan = ScientificObligationCompiler().compile(
+        '比较 A 的 SMILES 是 CCO，B 的 SMILES 是 not_a_smiles 的分子量和 LogP。')
+    assert plan.status == 'rejected'
+
+
+def test_oral_screening_does_not_hide_unknown_metric():
+    from src.web.web_business import WebTurnProjection
+    query = '比较 CCO 和 CCN 的分子量和 FooMetric，并说明哪一个更适合口服筛选。'
+    plan = ScientificObligationCompiler().compile(WebTurnProjection(query, 'test-session', []).execution_query())
+    assert plan.status == 'rejected'
+
+
+def test_oral_explanation_cannot_hide_an_additional_metric():
+    from src.web.web_business import WebTurnProjection
+    query = '比较 CCO 和 CCN 的分子量和 FooMetric，并说明结果对口服成药性的意义。'
+    plan = ScientificObligationCompiler().compile(WebTurnProjection(query, 'test-session', []).execution_query())
+    assert plan.status == 'rejected'
+
+
+def test_batch_comparison_describes_only_requested_computed_differences():
+    from src.web.property_comparison import batch_descriptor_comparison
+    rows = [
+        {'properties': {'molecular_weight': 180.16, 'logp': 1.31, 'hba': 3, 'hbd': 1}},
+        {'properties': {'molecular_weight': 206.28, 'logp': 3.073, 'hba': 1, 'hbd': 1}},
+    ]
+    result = batch_descriptor_comparison(rows, ('mw', 'logp', 'hba', 'hbd'))
+    assert '分子量：第二个结构较高' in result
+    assert 'logP：第二个结构较高' in result
+    assert 'HBA：第一个结构较高' in result
+    assert 'HBD：两者相同' in result
+    assert 'TPSA' not in result
+
+
+def test_oral_explanation_rejects_specific_unmeasured_candidate_claims():
+    from src.web.decision_runtime import _oral_explanation_has_candidate_claim
+    assert _oral_explanation_has_candidate_claim('某个分子可能更易溶于水，另一个分子膜渗透性较低。')
+    assert _oral_explanation_has_candidate_claim('第二个结构的吸收可能更好。')
+    assert _oral_explanation_has_candidate_claim('不能确定，第二个结构的吸收可能更好。')
+    assert not _oral_explanation_has_candidate_claim('不能仅凭这些描述符判断哪个分子的溶解度或吸收更好。')
+    assert not _oral_explanation_has_candidate_claim('亲脂性与溶解性和膜渗透性之间通常存在权衡。')
+
+
+def test_oral_explanation_does_not_add_unrequested_hydrogen_bond_descriptors():
+    from src.web.decision_runtime import _oral_explanation_has_unrequested_descriptors
+    assert _oral_explanation_has_unrequested_descriptors('氢键供体与氢键受体的数量影响溶剂化。', ('mw', 'logp'))
+    assert not _oral_explanation_has_unrequested_descriptors('氢键供体数量影响溶剂化。', ('mw', 'hbd'))
+    assert not _oral_explanation_has_unrequested_descriptors('分子量和亲脂性可用于初步筛选。', ('mw', 'logp'))
+
+
+def test_calculate_explicit_molecule_subject_preserves_metric_boundary():
+    compiler = ScientificObligationCompiler()
+    query = '请计算分子 CC(=O)Oc1ccccc1C(=O)O 的分子量、LogP 和 TPSA。'
+    plan = compiler.compile(query)
+    assert plan.status == 'ready'
+    assert set(plan.metrics) == {'mw', 'logp', 'tpsa'}
+    assert compiler.compile(query[:-1] + ' 和 FooMetric。').status == 'rejected'
+
+
+def test_calculate_smiles_without_colon_preserves_metric_boundary():
+    compiler = ScientificObligationCompiler()
+    query = '计算 SMILES CC(=O)Oc1ccccc1C(=O)O 的性质。'
+    assert compiler.compile(query).status == 'ready'
+    assert compiler.compile(query[:-1] + '和 FooMetric。').status == 'rejected'
+
+
+def test_property_comparison_does_not_drop_unknown_metric():
+    plan = ScientificObligationCompiler().compile('比较 CCO 和 CCN 的分子量、LogP 和 FooMetric。')
+    assert plan.status == 'rejected'
+    assert not plan.steps
+
+
+@pytest.mark.parametrize('query', [
+    '比较 CCO 和阿司匹林的分子性质。',
+    '比较 CCO 和 CCN 和阿司匹林的分子性质。',
+])
+def test_comparison_does_not_silently_drop_a_named_subject(query):
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'clarification'
+    assert '每个分子' in plan.message
+    assert not plan.steps
+
+
+def test_batch_property_results_must_match_every_requested_structure():
+    from src.web.decision_runtime import _batch_property_rows_match
+    plan = ScientificObligationCompiler().compile('比较 CCO 和 CCN 的分子性质。')
+    assert _batch_property_rows_match(plan, [{'smiles': 'CCO'}, {'smiles': 'CCN'}])
+    assert not _batch_property_rows_match(plan, [{'smiles': 'CCO'}])
+    assert not _batch_property_rows_match(plan, [{'smiles': 'CCO'}, {'smiles': 'CCC'}])
+
+
+def test_batch_plan_rejects_identity_and_step_tampering():
+    plan = ScientificObligationCompiler().compile('比较 CCO 和 CCN 的分子性质。')
+    payload = plan.model_dump(mode='json')
+    payload['canonical_smiles'] = 'CCO\nCCC'
+    with pytest.raises(ValidationError):
+        ScientificPlan.model_validate(payload)
+    payload = plan.model_dump(mode='json')
+    payload['steps'][0]['input_data'] = 'CCO'
+    with pytest.raises(ValidationError):
+        ScientificPlan.model_validate(payload)
 
 
 @pytest.mark.parametrize('query', [
@@ -87,6 +616,26 @@ def test_compiles_admet_request_into_a_reviewed_admet_step():
     assert plan.steps[0].input_data == "CCO"
     assert plan.steps[0].output_key == "admet"
     assert plan.steps[0].capability == "molecule.admet"
+
+
+@pytest.mark.parametrize(('query', 'tools'), [
+    ('请预测 SMILES: CCO 的血脑屏障通透性。', ('admet_predictor',)),
+    ('请计算 CCO 的分子量和 logP，并预测其血脑屏障通透性。', ('property_calculator', 'admet_predictor')),
+    ('请预测 SMILES: CCO 的 BBB 通透性。', ('admet_predictor',)),
+])
+def test_bbb_request_routes_to_admet_without_dropping_properties(query, tools):
+    assert ScientificObligationCompiler.is_profile_candidate(query)
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready', plan
+    assert plan.required_tools == tools
+
+
+def test_bbb_request_does_not_hide_an_unsupported_metric():
+    plan = ScientificObligationCompiler().compile('请预测 CCO 的血脑屏障通透性和 LogD。')
+    assert plan.status == 'rejected'
+    assert 'metric:logd' in plan.missing_capabilities
+    plan = ScientificObligationCompiler().compile('请预测 CCO 的血脑屏障通透性和 FooMetric。')
+    assert plan.status == 'rejected'
 
 
 def test_compiles_properties_and_admet_without_dropping_either_obligation():
@@ -174,6 +723,20 @@ def test_requests_without_a_smiles_return_clarification_without_steps():
     assert plan.smiles is None
     assert plan.canonical_smiles is None
     assert plan.metrics == ()
+
+
+def test_named_molecule_with_pronoun_requests_structure_instead_of_unknown_capability():
+    query = '我有阿司匹林，帮我评估它的成药性。'
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'clarification'
+    assert plan.missing_fields == ('smiles',) and not plan.steps
+    assert not plan.missing_capabilities
+
+
+@pytest.mark.parametrize('extra', ['FooMetric', 'LogD', '量子轨道能量'])
+def test_named_molecule_pronoun_does_not_hide_unknown_metric(extra):
+    plan = ScientificObligationCompiler().compile(f'我有阿司匹林，帮我评估它的成药性和{extra}。')
+    assert plan.status == 'rejected'
 
 
 @pytest.mark.parametrize("query", [
@@ -309,6 +872,22 @@ def test_explicit_unreviewed_metrics_are_rejected_instead_of_dropped(
     assert plan.steps == ()
 
 
+@pytest.mark.parametrize('query', [
+    '计算 CCO 的分子量并评估类药性。',
+    '计算 CCO 的分子量并评估类药性，不要检索文献。',
+])
+def test_explicit_property_and_drug_likeness_are_not_unknown_metrics(query):
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert plan.required_tools == ('property_calculator', 'drug_likeness_assessment')
+
+
+def test_unknown_metric_is_not_hidden_by_drug_likeness_action():
+    plan = ScientificObligationCompiler().compile('计算 CCO 的分子量和 FooMetric 并评估类药性。')
+    assert plan.status == 'rejected'
+    assert 'metric:unreviewed' in plan.missing_capabilities
+
+
 @pytest.mark.parametrize(
     ("query_text", "missing_capabilities"),
     [
@@ -381,6 +960,16 @@ def test_standalone_logd_is_not_silently_replaced_by_default_properties():
     assert plan.steps == ()
 
 
+@pytest.mark.parametrize('query,missing', [
+    ('计算 CCO 的分子量、logP、HBD、HBA、FooMetric，并判断是否符合 Lipinski 规则。', 'metric:unreviewed'),
+    ('计算 CCO 的分子量、logP、氢键供体和受体数、FooMetric，并判断是否符合 Lipinski 五规则。', 'metric:unreviewed'),
+    ('计算 CCO 的分子量、logP，并判断是否符合 Lipinski 规则，再进行对接。', 'docking'),
+])
+def test_lipinski_request_does_not_hide_unknown_additional_obligations(query, missing):
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'rejected' and missing in plan.missing_capabilities
+
+
 def test_explicit_metric_list_with_unknown_token_is_rejected_atomically():
     plan = ScientificObligationCompiler().compile(
         "Analyze CCO properties including LogP and permeability_index."
@@ -405,6 +994,22 @@ def test_metric_parser_allows_explanatory_trailing_text(query_text):
     assert plan.status == "ready"
     assert plan.steps
     assert plan.missing_capabilities == ()
+
+
+@pytest.mark.parametrize('verb', ['指出', '解释'])
+def test_property_optimization_interpretation_is_not_an_unknown_metric(verb):
+    query = ('请评估阿司匹林（SMILES: CC(=O)Oc1ccccc1C(=O)O）的理化性质和类药性，'
+             f'并{verb}结果对后续优化的意义。')
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert not plan.missing_capabilities
+
+
+def test_optimization_interpretation_does_not_hide_unknown_metric():
+    query = ('计算 CCO 的理化性质和 FooMetric，并指出结果对后续优化的意义。')
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'rejected'
+    assert 'metric:unreviewed' in plan.missing_capabilities
 
 
 @pytest.mark.parametrize(
@@ -770,8 +1375,8 @@ def test_multiple_smiles_are_not_silently_reduced_to_one():
         "请分析 CCO 和 CCN 的分子性质"
     )
 
-    assert plan.status == "rejected"
-    assert plan.steps == ()
+    assert plan.status == "ready"
+    assert plan.steps[0].input_data == 'CCO\nCCN'
 
 
 def test_explicit_drug_likeness_uses_the_exact_smiles_input():
@@ -1007,3 +1612,27 @@ def test_scientific_plan_json_dump_round_trips_workflow_steps():
     assert isinstance(restored.steps[0], WorkflowStep)
     with pytest.raises(TypeError):
         restored.steps[0].metadata["unsafe"] = True
+
+
+@pytest.mark.parametrize('query', [
+    '请查询人 EGFR 靶点，给出 UniProt 编号和功能信息。',
+    '请检索人源 EGFR 靶点，给出 UniProt 编号及蛋白功能。',
+])
+def test_target_function_lookup_does_not_enter_property_compiler(query):
+    assert not ScientificObligationCompiler.is_profile_candidate(query)
+
+
+def test_target_lookup_and_admet_are_not_silently_reduced_to_admet():
+    query = '查询人 EGFR 的生物学功能和 UniProt 编号，并预测 CCO 的 ADMET。'
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'rejected'
+    assert not plan.steps
+    assert '靶点' in plan.message and 'ADMET' in plan.message
+
+
+def test_property_only_compiler_does_not_claim_three_task_composite():
+    query = '预测 CCO 的 ADMET，并查询人 EGFR 的生物学功能和 UniProt 编号，再计算 CCN 的 LogP。'
+    assert not ScientificObligationCompiler.is_profile_candidate(query)
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'rejected' and not plan.steps
+    assert '各项任务分别提交' in plan.message

@@ -117,6 +117,8 @@ class InputValidator:
         if not extracted:
             return MolecularInputAnalysis(candidates=(), validation_available=True)
         chem = _load_rdkit_chem()
+        if chem is not None:
+            from rdkit import rdBase
         candidates: dict[str, MolecularInputCandidate] = {}
         for value, source in extracted:
             validation: ValidationStatus
@@ -124,7 +126,8 @@ class InputValidator:
                 validation = "unavailable"
             else:
                 try:
-                    validation = "valid" if chem.MolFromSmiles(value) else "invalid"
+                    with rdBase.BlockLogs():
+                        validation = "valid" if chem.MolFromSmiles(value) else "invalid"
                 except Exception:
                     validation = "unavailable"
 
@@ -132,9 +135,10 @@ class InputValidator:
                 inner = self._square_delimited_inner(value)
                 if inner:
                     try:
-                        if chem.MolFromSmiles(inner):
-                            value = inner
-                            validation = "valid"
+                        with rdBase.BlockLogs():
+                            if chem.MolFromSmiles(inner):
+                                value = inner
+                                validation = "valid"
                     except Exception:
                         validation = "unavailable"
 
@@ -160,9 +164,17 @@ class InputValidator:
     def _extract_candidates_with_sources(
         self, text: str
     ) -> list[tuple[str, CandidateSource]]:
+        from src.system.molecular_input_parser import LABELED_ACTIVITY_COMPARISON, _PDB_REFERENCE
+        comparison = LABELED_ACTIVITY_COMPARISON.fullmatch(text)
+        if comparison:
+            return [(comparison.group('first'), 'labeled'), (comparison.group('second'), 'labeled')]
         candidates: dict[str, CandidateSource] = {}
         for match in self._label_pattern.finditer(text):
             remainder = text[match.end() :]
+            if text[:match.start()].rstrip().endswith('（') and '）' in remainder:
+                field, following = remainder.split('）', 1)
+                if not following or not re.match(r'[A-Za-z0-9_]', following):
+                    remainder = field
             value = self._read_labeled_candidate(remainder)
             normalized = self._normalize_candidate(value) or value.strip()
             if normalized:
@@ -175,7 +187,9 @@ class InputValidator:
                     break
                 candidates[normalized] = "labeled"
 
-        for match in self._token_pattern.finditer(text):
+        prose = _PDB_REFERENCE.sub(lambda match: match.group()[:match.start('id') - match.start()]
+                                   + ' ' * len(match.group('id')), text)
+        for match in self._token_pattern.finditer(prose):
             normalized = self._normalize_candidate(match.group(0))
             if not normalized or not self._is_contextual_unlabeled_candidate(
                 normalized,
@@ -257,6 +271,10 @@ class InputValidator:
     @classmethod
     def _is_contextual_unlabeled_candidate(cls, token: str, text: str) -> bool:
         """Classify an unlabeled token using structure evidence and nearby cues."""
+        # Attached endpoint equations are prose. Explicit SMILES fields and
+        # their comma-separated candidates were collected independently above.
+        if re.fullmatch(r'(?:p?IC50|p?EC50)=[+-]?\d+(?:\.\d+)?', token, re.I):
+            return False
         if cls._is_non_molecular_notation(token):
             return cls._has_explicit_molecular_cue(token, text)
         if not cls._looks_like_smiles(token):

@@ -24,6 +24,8 @@ from src.agent.contracts.decision import (
     parse_decision_json, MAX_DECISION_BYTES, MAX_DECISION_DEPTH,
 )
 from src.agent.decision_transport import DecisionResponse
+from src.agent.contracts.response_length import THREE_SENTENCE_FEEDBACK, sentence_count, three_sentence_range
+from src.agent.contracts.evaluation_claims import SPLIT_SCOPE_FEEDBACK, evaluation_review, unsupported_split_claim
 from src.agent.contracts.ordinary_admission import (
     loop_admission, admission_metadata, validate_exchange, restored_deadline,
     WaitingCheckpoint, binding_digest,
@@ -116,6 +118,8 @@ def web_result_step_ref(result, records):
 def _decision_failure_message(reason: str) -> str:
     """Expose only safe, actionable guidance for model-loop failures."""
     messages = {
+        'answer_length_mismatch': '模型未能按要求的句数完成回答，请重试。',
+        'unsupported_split_claim': '现有信息不足以断定训练与测试样本的重叠或新骨架的覆盖情况，本次解释未通过核对。',
         'decision_runtime_failed': (
             '智能体决策未完成；请先在模型设置中运行连接测试，并确认模型支持工具调用或结构化输出。'
         ),
@@ -138,7 +142,7 @@ def _decision_failure_message(reason: str) -> str:
             '模型决策超时；请检查本地模型服务是否运行，或稍后重试。'
         ),
         'activity_target_conflict_or_unknown': (
-            '活性预测的靶点不受支持或存在冲突；本次未进行活性预测。'
+            '活性预测的靶点或物种不受支持、存在冲突或不明确；本次未进行活性预测。'
         ),
     }
     return messages.get(reason, 'Decision run did not complete')
@@ -576,7 +580,14 @@ class ScientificSession:
                     error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Binding admission rejected'),
                     outcome=RunOutcome.REJECTED,
                     metadata={'backend': 'pi', 'stop_reason': str(exc)})
-        system_message = decision_system_message(request_kind, required_tools, catalog, requirement_payload,
+        from src.agent.contracts.concept_request import selectivity_planning_model_query
+        model_query = (selectivity_planning_model_query(context.query)
+                       if binding and policy.is_web and request_kind == 'chat' else None)
+        model_requirements = requirement_payload
+        if model_query is not None:
+            model_requirements = {**requirement_payload, 'request': {
+                **requirement_payload['request'], 'query': model_query, 'memory': []}}
+        system_message = decision_system_message(request_kind, required_tools, catalog, model_requirements,
             ordinary_capabilities=ordinary_capabilities if request_kind == 'chat' else None,
             binding_profile=self.runtime.binding_profile)
         if binding and not policy.is_web:
@@ -587,9 +598,9 @@ class ScientificSession:
         # Preserve legacy history semantics without reapplying its JSON-string
         # query ceiling to the independently admitted B content.
         prefix = history_prefix(system_message, '' if binding else context.query,
-                                context.memory, request_kind=request_kind)
+                                [] if model_query is not None else context.memory, request_kind=request_kind)
         if binding:
-            prefix[-1]['content'] = context.query
+            prefix[-1]['content'] = model_query or context.query
         replay = None
         if binding and (continuation_id is not None or clarified_query is not None):
             from .decision_binding_continuation import validate_continuation, LIMIT as binding_snapshot_limit
@@ -788,7 +799,30 @@ class ScientificSession:
             bus.emit(context.trace_id, event, message, payload=payload, event_id=(
                 context.trace_id + ':' + state.decision_id + ':' + event.value))
 
+        sentence_range = (three_sentence_range(context.query)
+                          if binding and policy.is_web and request_kind == 'chat' else None)
+        review_draft = None
+        content_revision_requested = False
+
+        def schedule_correction(feedback, reason, *, content_revision=False):
+            nonlocal content_revision_requested
+            if state.intent_requests + state.model_requests >= self.runtime.max_model_requests:
+                raise DecisionBoundaryError('model_budget_exhausted')
+            if content_revision:
+                content_revision_requested = True
+            else:
+                state.protocol_repairs += 1
+            # Only trusted instructions travel on this channel, never the rejected answer.
+            state.protocol_feedback = feedback
+            persist('protocol_correction_scheduled')
+            emit(TaskEventType.PLANNING_COMPLETED, 'Model decision rejected; one correction scheduled',
+                 {'round': state.model_requests, 'decision_id': state.decision_id,
+                  'accepted': False, 'reason': reason})
+            return {'toolCall': {'id': 'repair-' + state.decision_id,
+                'name': 'protocol_feedback', 'arguments': {'feedback': feedback}}}
+
         async def request_model(payload):
+            nonlocal review_draft
             await boundary()
             if binding:
                 state.task_acceptance = await acceptance()
@@ -829,6 +863,8 @@ class ScientificSession:
                     ModelProviderAdapter(self.runtime.model, self.runtime.mode).request(
                         payload['messages'], timeout_seconds=min(60, remaining),
                         system_message=system_message,
+                        **({'review_draft': review_draft, 'review_in_three_sentences': sentence_range is not None}
+                           if review_draft is not None else {}),
                         **({'temperature': context.temperature,
                             'compact_observations': True,
                             'max_tokens': context.metadata.get('decision_output_limit', 1500),
@@ -850,20 +886,9 @@ class ScientificSession:
                         and response.error.details.get('reason') == 'decision_input_budget_exceeded'):
                     raise DecisionBoundaryError('decision_input_budget_exceeded')
                 feedback = schema_correction(response)
-                if feedback is not None and state.protocol_repairs == 0:
-                    if state.intent_requests + state.model_requests >= self.runtime.max_model_requests:
-                        raise DecisionBoundaryError('model_budget_exhausted')
-                    state.protocol_repairs += 1
-                    # Preserve paired native observations. Do not replay malformed
-                    # assistant calls or echo provider text into history/state.
-                    state.protocol_feedback = feedback
-                    persist('protocol_correction_scheduled')
-                    emit(TaskEventType.PLANNING_COMPLETED, 'Model decision rejected; one protocol correction scheduled',
-                         {'round': state.model_requests, 'decision_id': state.decision_id,
-                          'accepted': False, 'reason': 'invalid_decision_schema'})
-                    return {'toolCall': {'id': 'repair-' + state.decision_id,
-                        'name': 'protocol_feedback', 'arguments': {'feedback': feedback}}}
-                raise DecisionBoundaryError('model_decision_unavailable')
+                if feedback is None or state.protocol_repairs:
+                    raise DecisionBoundaryError('model_decision_unavailable')
+                return schedule_correction(feedback, response.error.details['reason'])
             if binding:
                 if type(response.decision) not in (ToolDecision, ClarifyDecision, FinishDecision):
                     raise DecisionBoundaryError('invalid_decision_schema')
@@ -881,6 +906,19 @@ class ScientificSession:
                 decision = parse_decision_json(json.dumps(proposal, ensure_ascii=False, allow_nan=False))
             else:
                 decision = parse_decision_json(encode_observation(proposal))
+            if (binding and policy.is_web and request_kind == 'chat' and isinstance(decision, FinishDecision)
+                    and decision.response_kind == 'chat' and not decision.evidence_ids):
+                review = evaluation_review(context.query, decision.text)
+                if review and not content_revision_requested:
+                    review_draft = decision.text
+                    return schedule_correction(review, 'evaluation_evidence_review', content_revision=True)
+                if sentence_range is not None and sentence_count(decision.text) not in sentence_range:
+                    if content_revision_requested:
+                        raise DecisionBoundaryError('answer_length_mismatch')
+                    return schedule_correction(THREE_SENTENCE_FEEDBACK, 'answer_length_mismatch', content_revision=True)
+                if (content_revision_requested and review == SPLIT_SCOPE_FEEDBACK
+                        and unsupported_split_claim(decision.text)):
+                    raise DecisionBoundaryError('unsupported_split_claim')
             if (binding and policy.is_web and request_kind == 'scientific'
                     and context.metadata.get('allow_molecular_clarification') is True):
                 # Compiler-admitted missing-input requests retain their frozen
@@ -1258,7 +1296,7 @@ class ScientificSession:
             pi_result = await self.runtime.run_session({
                 'model': {'id': 'medchat-controlled', 'contextWindow': 128000, 'maxTokens': 1500},
                 'systemPrompt': system_message['content'],
-                'prompt': clarified_query if restored is not None else context.query,
+                'prompt': clarified_query if restored is not None else (model_query or context.query),
                 'tools': tool_definitions(sorted(adapters)),
                 'maxModelCalls': self.runtime.max_model_requests - state.intent_requests - state.model_requests,
                 **({'entries': restored['pi_entries']} if restored is not None else

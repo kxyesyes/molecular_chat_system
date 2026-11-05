@@ -37,6 +37,110 @@ def configured(setup_loop, actions, **kwargs):
     return b
 
 
+def ambiguous_calls(count=2):
+    return DecisionResponse(None, AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, 'private-provider-text',
+        {'reason': 'ambiguous_decision_response'}), None,
+        {'mode': 'native', 'request_attempts': 1, 'native_response_shape': {
+            'call_count': count, 'content_present': False,
+            'function_name_valid': True, 'call_id_valid': True}})
+
+
+def malformed_native_json():
+    return DecisionResponse(None, AgentExecutionError(AgentErrorCode.INVALID_OUTPUT,
+        'private-provider-text', {'reason': 'invalid_decision_json'}), None,
+        {'mode': 'native', 'request_attempts': 1, 'native_response_shape': {
+            'call_count': 1, 'content_present': False,
+            'function_name_valid': True, 'call_id_valid': True}})
+
+
+@pytest.mark.parametrize('after_tool', [False, True])
+def test_single_native_json_failure_gets_one_new_proposal_without_replaying_content(setup_loop, after_tool):
+    actions = ([tool(), malformed_native_json(), finish_last] if after_tool
+               else [malformed_native_json(), tool(), finish_last])
+    b = configured(setup_loop, actions, mode='native')
+    result = run(b)
+    assert result.success, result.metadata
+    assert len(b.tools[0].inputs) == 1
+    assert result.metadata['protocol_repairs'] == 1
+    assert result.metadata['model_requests'] == 3
+    assert 'private-provider-text' not in repr(b.model.messages)
+    assert any('invalid_decision_json' in m['content'] for messages in b.model.messages
+               for m in messages if m['role'] == 'system')
+
+
+@pytest.mark.parametrize('change', [
+    {'call_count': 0}, {'call_count': 2}, {'call_count': True},
+    {'content_present': True}, {'function_name_valid': False}, {'call_id_valid': False},
+])
+def test_json_failure_without_verified_single_native_call_stops(setup_loop, change):
+    response = malformed_native_json()
+    response.metadata['native_response_shape'].update(change)
+    b = configured(setup_loop, [response, tool()], mode='native')
+    result = run(b)
+    assert not result.success and result.metadata['protocol_repairs'] == 0
+    assert len(b.model.messages) == 1 and not b.tools[0].inputs
+
+
+def test_native_json_correction_shares_existing_attempt_and_model_budgets(setup_loop):
+    repeated = configured(setup_loop, [malformed_native_json(), invalid(), tool()], mode='native')
+    result = run(repeated)
+    assert not result.success and result.metadata['protocol_repairs'] == 1
+    assert len(repeated.model.messages) == 2 and not repeated.tools[0].inputs
+    exhausted = configured(setup_loop, [malformed_native_json(), tool()], mode='native', max_model_requests=1)
+    result = run(exhausted)
+    assert result.metadata['stop_reason'] == 'model_budget_exhausted'
+    assert len(exhausted.model.messages) == 1 and not exhausted.tools[0].inputs
+
+
+def test_multiple_native_calls_recover_without_executing_rejected_proposals(setup_loop):
+    b = configured(setup_loop, [ambiguous_calls(), tool(), finish_last], mode='native')
+    result = run(b)
+    assert result.success, result.metadata
+    assert len(b.tools[0].inputs) == 1
+    assert result.metadata['protocol_repairs'] == 1
+    assert 'private-provider-text' not in repr(b.model.messages)
+    assert any('exactly one' in m['content'] for messages in b.model.messages
+               for m in messages if m['role'] == 'system')
+
+
+@pytest.mark.parametrize('change', [
+    {'call_count': 1}, {'call_count': True}, {'content_present': True},
+    {'function_name_valid': False}, {'call_id_valid': False},
+])
+def test_ambiguous_response_without_verified_multiple_call_shape_is_not_retried(setup_loop, change):
+    response = ambiguous_calls()
+    response.metadata['native_response_shape'].update(change)
+    b = configured(setup_loop, [response, tool()], mode='native')
+    result = run(b)
+    assert not result.success and result.metadata['protocol_repairs'] == 0
+    assert len(b.model.messages) == 1 and not b.tools[0].inputs
+
+
+def test_multiple_call_repair_survives_clarification_resume(setup_loop):
+    b = configured(setup_loop, [ambiguous_calls(), clarify(), tool(), finish_last], mode='native')
+    context = AgentContext('Please provide properties', 'multi-repair', user_id='owner', session_id='session')
+    options = dict(request_kind='scientific', allowed_tools={'property_calculator'},
+                   required_tools={'property_calculator'})
+    waiting = asyncio.run(b.loop.run(context, **options))
+    assert waiting.metadata.get('waiting_for_input'), waiting.metadata
+    result = asyncio.run(b.loop.run(context, **options,
+        continuation_id=waiting.metadata['continuation_id'], clarified_query='SMILES: CCO'))
+    assert result.success, result.metadata
+    assert result.metadata['protocol_repairs'] == 1
+    assert len(b.tools[0].inputs) == 1
+
+
+def test_multiple_call_repair_is_bounded_by_one_attempt_and_model_budget(setup_loop):
+    repeated = configured(setup_loop, [ambiguous_calls(), ambiguous_calls(), tool()], mode='native')
+    result = run(repeated)
+    assert not result.success and result.metadata['protocol_repairs'] == 1
+    assert len(repeated.model.messages) == 2 and not repeated.tools[0].inputs
+    exhausted = configured(setup_loop, [ambiguous_calls(), tool()], mode='native', max_model_requests=1)
+    result = run(exhausted)
+    assert result.metadata['stop_reason'] == 'model_budget_exhausted'
+    assert len(exhausted.model.messages) == 1 and not exhausted.tools[0].inputs
+
+
 @pytest.mark.parametrize('mode', ['json', 'native'])
 def test_one_schema_correction_before_tool_or_after_observation(setup_loop, mode):
     for actions in ([invalid(), tool(), finish_last], [tool(), invalid(), finish_last]):
@@ -92,8 +196,9 @@ def test_only_schema_output_failure_is_correctable(setup_loop, reason, code):
     (tool(arguments={'query': 'CCN'}), 'untrusted_tool_input'),
     (finish(['fabricated-evidence']), 'evidence_not_usable_in_this_trace'),
 ])
-def test_schema_correction_does_not_relax_scientific_boundaries(setup_loop, proposal, stop_reason):
-    b = configured(setup_loop, [invalid(), proposal, tool()])
+@pytest.mark.parametrize('failure', [invalid, malformed_native_json])
+def test_schema_correction_does_not_relax_scientific_boundaries(setup_loop, proposal, stop_reason, failure):
+    b = configured(setup_loop, [failure(), proposal, tool()], mode='native')
     result = run(b)
     assert not result.success
     assert result.metadata['stop_reason'] == stop_reason

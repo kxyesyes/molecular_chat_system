@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 
 
 _PREFLIGHT_MESSAGES = {
+    'source_context_unsupported': (
+        '实验结构文件已获取，但其中的结构语境暂不受当前核验流程支持；本次未启动对接。'
+        '请尝试其他实验结构。'),
+    'source_dns_restricted': (
+        '结构文件下载已停止：官方结构网站的域名解析到了受限制的网络地址；本次未启动对接。'
+        '请检查 DNS 或代理配置后重试。'),
     'source_preparation_unavailable': (
         '结构来源已通过认证，但无法获取并验证实验结构文件；本次未启动对接。'
         '请检查网络，或在分子对接页面选择已缓存且通过完整性检查的结构。'),

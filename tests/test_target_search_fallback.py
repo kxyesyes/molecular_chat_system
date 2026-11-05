@@ -2901,6 +2901,21 @@ class _ManualMonotonic:
         self.value += seconds
 
 
+def test_local_search_respects_requested_organism(tmp_path, monkeypatch):
+    from src.target_search.service import TargetSearchService
+    from src.target_search.database import get_connection
+    monkeypatch.setenv('TARGET_DB_PATH', str(tmp_path / 'targets.sqlite'))
+    monkeypatch.setenv('TARGET_CACHE_DIR', str(tmp_path / 'cache'))
+    with TargetSearchService(tmp_path, auto_seed=False, organism='Mus musculus') as service:
+        conn = get_connection(tmp_path)
+        try:
+            conn.execute('INSERT INTO targets (gene_symbol, uniprot_id, organism) VALUES (?, ?, ?)',
+                         ('EGFR', 'P00533', 'Homo sapiens'))
+            conn.commit()
+        finally:
+            conn.close()
+        assert service._search_local('EGFR') == []
+
 class _CapturingAdapter(requests.adapters.BaseAdapter):
     def __init__(self, payload=b"{}"):
         self.payload = payload
@@ -3072,7 +3087,7 @@ def test_uniprot_resolve_constructs_exact_human_query_and_normalizes_record():
                     "query": "(gene_exact:EGFR) AND (organism_id:9606)",
                     "format": "json",
                     "size": 5,
-                    "fields": "accession,id,gene_names,protein_name,organism_name,organism_id,reviewed",
+                    "fields": "accession,id,gene_names,protein_name,organism_name,organism_id,reviewed,cc_function",
                 },
                 "headers": {
                     "Accept": "application/json",
@@ -4327,6 +4342,43 @@ def test_uniprot_ranks_all_gene_names_and_collects_deterministic_aliases():
     assert result["match_reason"] == "exact_gene"
 
 
+def test_uniprot_preserves_function_comment_from_selected_record():
+    from src.target_search.remote_clients import UniProtClient
+
+    session = _FakeRemoteSession(_FakeRemoteResponse(payload={"results": [{
+        "primaryAccession": "P00533",
+        "genes": [{"geneName": {"value": "EGFR"}}],
+        "organism": {"scientificName": "Homo sapiens", "taxonId": 9606},
+        "comments": [
+            {"commentType": "FUNCTION", "texts": [{"value": "A receptor tyrosine kinase."}]},
+            {"commentType": "SUBUNIT", "texts": [{"value": "Not a function annotation."}]},
+        ],
+    }]}))
+    result = UniProtClient(_bounded_remote_client(session)).resolve("EGFR")
+    assert result["function"] == "A receptor tyrosine kinase."
+    assert "cc_function" in session.calls[0][2]["params"]["fields"]
+
+
+def test_target_evidence_retains_uniprot_function(tmp_path):
+    from src.target_search.service import TargetSearchService
+    with TargetSearchService(tmp_path, auto_seed=False) as service:
+        target = {"gene_symbol": "EGFR", "uniprot_id": "P00533", "organism": "Homo sapiens",
+                  "source": "UniProt", "source_record_id": "P00533",
+                  "source_url": "https://www.uniprot.org/uniprotkb/P00533/entry",
+                  "function": "A receptor tyrosine kinase."}
+        assert service._normalize_target_evidence(target)["function"] == target["function"]
+
+
+def test_function_request_uses_authoritative_source_even_when_local_target_exists(tmp_path, monkeypatch):
+    from src.target_search.service import TargetSearchService
+    with TargetSearchService(tmp_path, auto_seed=False) as service:
+        monkeypatch.setattr(service, '_search_local', lambda *args, **kwargs: [{'gene_symbol': 'EGFR'}])
+        calls = []
+        monkeypatch.setattr(service, '_search_authoritative', lambda query, **kwargs: calls.append((query, kwargs)) or {'status': 'resolved'})
+        service.search_targets('EGFR', include_function=True)
+        assert calls[0][0] == 'EGFR' and calls[0][1]['include_function'] is True
+
+
 def test_uniprot_rejects_taxon_mismatch_in_plausible_human_record():
     from src.target_search.remote_clients import RemoteSourceError, UniProtClient
 
@@ -4482,6 +4534,86 @@ def test_uniprot_preserves_ambiguity_across_secondary_gene_names():
         UniProtClient(_bounded_remote_client(session)).resolve("EGFR")
 
     assert raised.value.code == "ambiguous_match"
+
+
+def test_rcsb_reads_ligands_from_nonpolymer_entities_when_summary_is_absent():
+    from src.target_search.remote_clients import RcsbClient
+    entry = _rcsb_graphql_entry('1ABC')
+    entry['nonpolymer_entities'] = [{
+        'rcsb_nonpolymer_entity_container_identifiers': {'entry_id': '1ABC'},
+        'nonpolymer_comp': {'chem_comp': {'id': 'AQ4'}},
+    }]
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(payload={'result_set': [{'identifier': '1ABC_1'}]}),
+        _FakeRemoteResponse(payload={'data': {'entries': [entry]}}))
+    result = RcsbClient(_bounded_remote_client(session)).search('P00533', pdb_id='1ABC')
+    assert result[0]['ligand_evidence'] == ['AQ4']
+    assert 'nonpolymer_entities' in session.calls[1][2]['json']['query']
+
+
+def test_rcsb_component_lookup_binds_identifier_and_name():
+    from src.target_search.remote_clients import RcsbClient
+    session = _FakeRemoteSession(_FakeRemoteResponse(payload={'data': {'chem_comp': {
+        'chem_comp': {'id': 'AQ4', 'name': 'Example chemical name'},
+        'rcsb_chem_comp_descriptor': {'InChIKey': 'AAKJLRGGTJKAMG-UHFFFAOYSA-N'},
+        'rcsb_chem_comp_container_identifiers': {'comp_id': 'AQ4'}}}}))
+    result = RcsbClient(_bounded_remote_client(session)).lookup_component('AQ4')
+    assert result == {'id': 'AQ4', 'name': 'Example chemical name', 'inchikey': 'AAKJLRGGTJKAMG-UHFFFAOYSA-N',
+                      'source_url': 'https://www.rcsb.org/ligand/AQ4'}
+
+
+def test_chembl_mechanism_binds_exact_chemical_and_uniprot():
+    from src.target_search.remote_clients import ChemblClient
+    key = 'AAKJLRGGTJKAMG-UHFFFAOYSA-N'
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(payload={'page_meta': {'total_count': 1, 'next': None}, 'molecules': [{
+            'molecule_chembl_id': 'CHEMBL553', 'pref_name': 'ERLOTINIB',
+            'molecule_structures': {'standard_inchi_key': key}}]}),
+        _FakeRemoteResponse(payload={'page_meta': {'total_count': 1, 'next': None}, 'mechanisms': [{
+            'parent_molecule_chembl_id': 'CHEMBL553', 'target_chembl_id': 'CHEMBL203',
+            'action_type': 'INHIBITOR', 'mechanism_of_action': 'Epidermal growth factor receptor inhibitor'}]}),
+        _FakeRemoteResponse(payload={'target_chembl_id': 'CHEMBL203', 'target_type': 'SINGLE PROTEIN',
+            'organism': 'Homo sapiens', 'target_components': [{'accession': 'P00533'}]}))
+    result = ChemblClient(_bounded_remote_client(session)).lookup_mechanism(key, 'P00533')
+    assert result['name'] == 'ERLOTINIB' and result['action'] == 'INHIBITOR'
+    assert result['molecule_id'] == 'CHEMBL553' and result['target_id'] == 'CHEMBL203'
+
+
+def test_chembl_mechanism_does_not_bind_another_uniprot():
+    from src.target_search.remote_clients import ChemblClient
+    key = 'AAKJLRGGTJKAMG-UHFFFAOYSA-N'
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(payload={'page_meta': {'total_count': 1}, 'molecules': [{
+            'molecule_chembl_id': 'CHEMBL553', 'pref_name': 'ERLOTINIB',
+            'molecule_structures': {'standard_inchi_key': key}}]}),
+        _FakeRemoteResponse(payload={'page_meta': {'total_count': 1}, 'mechanisms': [{
+            'parent_molecule_chembl_id': 'CHEMBL553', 'target_chembl_id': 'CHEMBL203', 'action_type': 'INHIBITOR'}]}),
+        _FakeRemoteResponse(payload={'target_chembl_id': 'CHEMBL203', 'target_type': 'SINGLE PROTEIN',
+            'organism': 'Homo sapiens', 'target_components': [{'accession': 'P06276'}]}))
+    assert ChemblClient(_bounded_remote_client(session)).lookup_mechanism(key, 'P00533') is None
+
+
+def test_rcsb_component_lookup_rejects_mismatched_identity():
+    from src.target_search.remote_clients import RcsbClient, RemoteSourceError
+    session = _FakeRemoteSession(_FakeRemoteResponse(payload={'data': {'chem_comp': {
+        'chem_comp': {'id': 'OTHER', 'name': 'Example'},
+        'rcsb_chem_comp_container_identifiers': {'comp_id': 'AQ4'}}}}))
+    with pytest.raises(RemoteSourceError, match='invalid_response'):
+        RcsbClient(_bounded_remote_client(session)).lookup_component('AQ4')
+
+
+def test_rcsb_rejects_ligands_attached_to_another_entry():
+    from src.target_search.remote_clients import RcsbClient, RemoteSourceError
+    entry = _rcsb_graphql_entry('1ABC')
+    entry['nonpolymer_entities'] = [{
+        'rcsb_nonpolymer_entity_container_identifiers': {'entry_id': '2DEF'},
+        'nonpolymer_comp': {'chem_comp': {'id': 'AQ4'}},
+    }]
+    session = _FakeRemoteSession(
+        _FakeRemoteResponse(payload={'result_set': [{'identifier': '1ABC_1'}]}),
+        _FakeRemoteResponse(payload={'data': {'entries': [entry]}}))
+    with pytest.raises(RemoteSourceError, match='invalid_response'):
+        RcsbClient(_bounded_remote_client(session)).search('P00533', pdb_id='1ABC')
 
 
 def test_rcsb_uses_bounded_polymer_entity_search_and_one_graphql_batch():

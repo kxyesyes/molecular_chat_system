@@ -48,12 +48,427 @@ def synthetic_rows():
     return rows
 
 
+def test_generated_activity_evidence_requires_exact_candidate_and_target_alignment():
+    from src.agent.evidence_followup import accepted_generated_activity_evidence
+    raw = accepted_result(synthetic_rows())
+    raw['tool_result_sequence'][0].update(status='partial', success=False)
+    candidates = {'session_id': SESSION, 'trace_id': raw['trace_id'], 'generation_scope_verified': True,
+                  'candidates': [{'canonical_smiles': 'CCO'}, {'canonical_smiles': 'CCN'}]}
+    query = '请为 BuChE 设计候选分子并计算性质。'
+    evidence = accepted_generated_activity_evidence(raw, candidates, query, SESSION)
+    assert evidence is not None and set(evidence['smiles']) == {'CCO', 'CCN'}
+    assert evidence['observations'][0]['data'][1]['classification_regression_consistent'] is False
+    assert accepted_generated_activity_evidence(raw, candidates, query, 'foreign') is None
+    assert accepted_generated_activity_evidence(raw, candidates, query.replace('BuChE', 'PDE5A'), SESSION) is None
+    altered = deepcopy(candidates)
+    altered['candidates'][1]['canonical_smiles'] = 'CCC'
+    assert accepted_generated_activity_evidence(raw, altered, query, SESSION) is None
+    altered = deepcopy(raw)
+    altered['tool_result_sequence'][0]['quality']['validated'] = False
+    assert accepted_generated_activity_evidence(altered, candidates, query, SESSION) is None
+
+
+def test_requested_prediction_limitations_are_explained_with_the_result(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCO', 4.3)])
+    complete, _ = turn(handler, '预测 CCO 对 BuChE 的活性，并说明预测结果的局限。', [])
+    assert len(activity.calls) == 1
+    assert complete['status'] == 'completed'
+    assert '局限' in complete['content'] and '实验' in complete['content']
+    assert '阈值' in complete['content'] and '适用域' in complete['content']
+
+
+def test_requested_activity_applicability_is_not_silently_omitted(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCO', 4.3)])
+    complete, _ = turn(handler,
+        '预测 SMILES: CCO 对丁酰胆碱酯酶（BuChE）的活性，给出 pIC50 和模型适用范围。', [])
+    assert len(activity.calls) == 1
+    assert complete['status'] == 'partial'
+    assert '4.3' in complete['content'] and '适用范围' in complete['content']
+    assert '未' in complete['content'] and ('评估' in complete['content'] or '提供' in complete['content'])
+
+
+def test_activity_model_information_and_scope_marks_missing_domain(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCO', 4.3)])
+    complete, _ = turn(handler, '请预测 SMILES: CCO 对人 BuChE 的抑制活性，给出模型信息与适用范围。', [])
+    assert len(activity.calls) == 1 and complete['status'] == 'partial'
+    assert '4.3' in complete['content'] and '适用域' in complete['content']
+    assert '无法判断' in complete['content']
+
+
+def test_activity_domain_followup_uses_same_session_evidence_without_guessing():
+    query = '预测 CCO 对 BuChE 的活性。'
+    evidence = accepted_activity_evidence(accepted_result([prediction('CCO', 4.3)]), query, SESSION)
+    question = '刚才这个分子是否在 BuChE 模型的适用域内？依据是什么？'
+    answer = followup_answer(question, [{'activity_evidence': evidence}], SESSION)
+    assert answer['status'] == 'partial'
+    assert all(term in answer['final_answer'] for term in ('CCO', 'BuChE', '未', '适用域', '无法判断'))
+    assert 'CCO' not in followup_answer(question, [{'activity_evidence': evidence}], 'foreign')['final_answer']
+    assert followup_answer(question + '再预测 CCN 的活性。', [{'activity_evidence': evidence}], SESSION) is None
+
+
+def test_limitations_do_not_hide_partial_activity_results(tmp_path):
+    handler, _, _ = handler_for(tmp_path, [prediction('CCO', 6.7, consistent=False)])
+    complete, _ = turn(handler, '预测 CCO 对 BuChE 的活性，并说明预测结果的局限。', [])
+    assert complete['status'] == 'partial'
+    assert '局限' in complete['content'] and '不一致' in complete['content']
+
+
+def test_missing_activity_structure_waits_without_calling_tool(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCO', 4.3)])
+    complete, frames = turn(handler, '预测分子对 BuChE 的活性。', [])
+    assert complete['status'] == 'waiting_for_input'
+    assert 'SMILES' in complete['content']
+    assert not activity.calls
+
+
+def test_missing_activity_structure_resumes_with_supplied_smiles(tmp_path):
+    from src.web.decision_runtime import _Sender
+    from tests.agent.pi_web_support import WebSocket
+    from tests.agent.test_web_decision_runtime import result_of
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCO', 4.3)])
+
+    async def drive():
+        sender = _Sender(WebSocket('activity-clarification'))
+        sender._runtime = handler.decision_runtime
+        first = _Turn({'message': '预测分子对 BuChE 的活性。', 'enable_tools': True, 'enable_rag': False})
+        handler.decision_runtime.active_owners.add(first)
+        await handler.decision_runtime._execute(handler, sender, first)
+        assert result_of(sender.websocket.messages)['status'] == 'waiting_for_input'
+        assert not activity.calls
+        second = _Turn({'message': 'CCO', 'enable_tools': True, 'enable_rag': False},
+                       trace_id=sender.waiting.context.trace_id, waiting=sender.waiting)
+        handler.decision_runtime.active_owners.add(second)
+        start = len(sender.websocket.messages)
+        await handler.decision_runtime._execute(handler, sender, second)
+        return result_of(sender.websocket.messages[start:])
+
+    result = asyncio.run(drive())
+    assert result['status'] == 'completed'
+    assert len(activity.calls) == 1
+    assert 'CCO' in json.dumps(activity.calls[0])
+
+
+@pytest.mark.parametrize('matching_provenance', [False, True])
+def test_activity_clarification_preserves_new_species_in_tool_input(tmp_path, matching_provenance):
+    from src.web.decision_runtime import _Sender
+    from tests.agent.pi_web_support import WebSocket
+    from tests.agent.test_web_decision_runtime import result_of
+    row = prediction('CCO', 4.3)
+    if matching_provenance:
+        from src.activity.request_selection import ActivityModelRequest, request_identity
+        provenance = row['provenance']
+        provenance['request']['species'] = 'human'
+        provenance['request']['identity'] = request_identity(
+            ActivityModelRequest(family_id='buche-family', species='human'),
+            provenance['bundle_id'], provenance['models'])
+    handler, activity, _ = handler_for(tmp_path, [row])
+
+    async def drive():
+        sender = _Sender(WebSocket('activity-species-clarification'))
+        sender._runtime = handler.decision_runtime
+        first = _Turn({'message': '预测分子对 BuChE 的活性。', 'enable_tools': True, 'enable_rag': False})
+        handler.decision_runtime.active_owners.add(first)
+        await handler.decision_runtime._execute(handler, sender, first)
+        assert sender.waiting is not None
+        second = _Turn({'message': 'CCO；物种为人', 'enable_tools': True, 'enable_rag': False},
+                       trace_id=sender.waiting.context.trace_id, waiting=sender.waiting)
+        handler.decision_runtime.active_owners.add(second)
+        start = len(sender.websocket.messages)
+        await handler.decision_runtime._execute(handler, sender, second)
+        frames = sender.websocket.messages[start:]
+        return result_of(frames), frames
+
+    result, frames = asyncio.run(drive())
+    assert len(activity.calls) == 1
+    assert activity.calls[0]['model_request']['species'] == 'human'
+    assert (result['status'] == 'completed') is matching_provenance
+    if not matching_provenance:
+        assert '4.3' not in result.get('display_answer', '')
+        assert '4.3' not in json.dumps(result.get('tool_result_sequence', []), ensure_ascii=False)
+        from src.web.result_details_projection import project_result_details
+        details = project_result_details(handler.web_results[-1], summary='', status='partial', error=None, warnings=[])
+        assert '4.3' not in json.dumps(details, ensure_ascii=False)
+        # Timestamps can coincidentally contain the prediction's decimal text.
+        # Inspect the event content, retaining both messages and payloads.
+        events = [{key: value for key, value in frame['event'].items() if key != 'timestamp'}
+                  for frame in frames if frame.get('type') == 'agent_event']
+        assert '4.3' not in json.dumps(events, ensure_ascii=False)
+
+
+@pytest.mark.parametrize('initial,reply', [
+    ('预测分子对 BuChE 的活性。', 'CCO；物种为人；物种为小鼠'),
+    ('预测分子对 BuChE 的活性，物种为人。', 'CCO；物种为小鼠'),
+])
+def test_activity_clarification_conflicting_species_never_calls_tool(tmp_path, initial, reply):
+    from src.web.decision_runtime import _Sender
+    from tests.agent.pi_web_support import WebSocket
+    from tests.agent.test_web_decision_runtime import result_of
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCO', 4.3)])
+
+    async def drive():
+        sender = _Sender(WebSocket('activity-conflicting-species'))
+        sender._runtime = handler.decision_runtime
+        first = _Turn({'message': initial, 'enable_tools': True, 'enable_rag': False})
+        handler.decision_runtime.active_owners.add(first)
+        await handler.decision_runtime._execute(handler, sender, first)
+        assert sender.waiting is not None
+        second = _Turn({'message': reply, 'enable_tools': True, 'enable_rag': False},
+                       trace_id=sender.waiting.context.trace_id, waiting=sender.waiting)
+        handler.decision_runtime.active_owners.add(second)
+        start = len(sender.websocket.messages)
+        await handler.decision_runtime._execute(handler, sender, second)
+        return result_of(sender.websocket.messages[start:])
+
+    result = asyncio.run(drive())
+    assert result['status'] in {'rejected', 'failed'}
+    assert not activity.calls
+
+
+def test_named_activity_subject_is_not_replaceable_by_a_generic_smiles(tmp_path):
+    handler, _, _ = handler_for(tmp_path, [prediction('CCO', 4.3)])
+    complete, _ = turn(handler, '预测阿司匹林对 BuChE 的活性。', [])
+    assert complete['status'] != 'waiting_for_input'
+
+
 def accepted_snapshot():
     result = accepted_result(synthetic_rows())
     result["tool_result_sequence"][0].update(status="partial", success=False)
     evidence = accepted_activity_evidence(result, FIRST, SESSION)
     assert evidence is not None, "Synthetic setup must satisfy real evidence acceptance"
     return evidence
+
+
+CONVERT = '把刚才预测的 pIC50 换算为 IC50（nM），并说明结果代表什么。'
+CONVERT_CCO = '把上一轮 CCO 的 pIC50 换算为 IC50（nM），并说明结果代表什么。'
+
+
+def test_conversion_to_micromolar_explains_disagreement_without_repredicting():
+    query = '预测 CCN 对 BuChE 的活性'
+    raw = accepted_result([prediction('CCN', 6.7, consistent=False)])
+    raw['tool_result_sequence'][0].update(status='partial', success=False)
+    evidence = accepted_activity_evidence(raw, query, SESSION)
+    question = '请把刚才的 pIC50 换算为 IC50（微摩尔），并解释为什么分类和回归结果不一致。'
+    answer = followup_answer(question, [{'activity_evidence': evidence}], SESSION)
+    assert answer['status'] == 'partial'
+    assert all(part in answer['final_answer'] for part in ('CCN', '0.1995', '微摩尔', '不一致', '实验'))
+    assert '0.21' in answer['final_answer'] or '活性概率' in answer['final_answer']
+    assert followup_answer(question + '再预测 CCO 的活性。', [{'activity_evidence': evidence}], SESSION) is None
+
+
+def test_previous_single_activity_conversion_uses_verified_prediction():
+    query = '预测 CCO 对 BuChE 的活性'
+    evidence = accepted_activity_evidence(accepted_result([prediction('CCO', 4.3)]), query, SESSION)
+    assert evidence is not None
+    answer = followup_answer(CONVERT, [{'activity_evidence': evidence}], SESSION)
+    assert answer['status'] == 'completed'
+    assert '50119' in answer['final_answer'] or '5.012' in answer['final_answer']
+    assert '预测' in answer['final_answer'] and '实验' in answer['final_answer']
+    assert 'CCO' in answer['final_answer'] and 'BuChE' in answer['final_answer']
+
+
+def test_conversion_question_reuses_evidence_after_safety_followup():
+    from src.web.web_business import WebTurnProjection
+    evidence = accepted_activity_evidence(accepted_result([prediction('CCO', 4.3)]),
+        '预测 CCO 对 BuChE 的活性', SESSION)
+    previous = followup_answer('这是否证明 CCO 对 BuChE 没有活性？',
+        [{'activity_evidence': evidence}], SESSION)
+    history = [{'activity_evidence': previous['activity_evidence']}]
+    query = '把刚才预测的 pIC50 换算成 IC50（nM）是多少？'
+    answer = WebTurnProjection(query, SESSION, history).followup(enable_tools=True)
+    assert answer['status'] == 'completed'
+    assert all(part in answer['content'] for part in ('CCO', 'BuChE', '5.012', 'nM', '实验'))
+    foreign = WebTurnProjection(query, 'other-session', history).followup(enable_tools=True)
+    assert foreign['status'] == 'not_calculated' and '5.012' not in foreign['content']
+    assert WebTurnProjection(query + '再预测 CCN 的活性。', SESSION, history).followup(enable_tools=True) is None
+
+
+def test_previous_activity_conversion_never_guesses_between_molecules_or_sessions():
+    evidence = accepted_snapshot()
+    for history, session in [([{'activity_evidence': evidence}], SESSION),
+                             ([{'activity_evidence': evidence}], 'other-session'), ([], SESSION)]:
+        answer = followup_answer(CONVERT, history, session)
+        assert answer['status'] == 'not_calculated'
+        assert 'nM' not in answer['final_answer'] or '无法' in answer['final_answer']
+
+
+def test_conversion_marks_disagreement_and_rejects_unverified_history():
+    query = '预测 CCO 对 BuChE 的活性'
+    raw = accepted_result([prediction('CCO', 6.7, consistent=False)])
+    raw['tool_result_sequence'][0].update(status='partial', success=False)
+    evidence = accepted_activity_evidence(raw, query, SESSION)
+    assert evidence is not None
+    answer = followup_answer(CONVERT, [{'activity_evidence': evidence}], SESSION)
+    assert answer['status'] == 'partial' and '需复核' in answer['final_answer']
+    altered = deepcopy(evidence)
+    altered['observations'][0]['data'][0]['predicted_pIC50'] = float('nan')
+    answer = followup_answer(CONVERT, [{'activity_evidence': altered}], SESSION)
+    assert answer['status'] == 'not_calculated' and '无法确认' in answer['final_answer']
+
+
+def test_conversion_of_selected_molecule_never_substitutes_another():
+    evidence = accepted_snapshot()
+    answer = followup_answer(CONVERT_CCO, [{'activity_evidence': evidence}], SESSION)
+    assert answer['status'] == 'completed'
+    assert 'CCO' in answer['final_answer'] and '4.3' in answer['final_answer']
+    assert '6.7' not in answer['final_answer']
+    review = followup_answer(CONVERT_CCO.replace('CCO', 'CCN'), [{'activity_evidence': evidence}], SESSION)
+    assert review['status'] == 'partial' and 'CCN' in review['final_answer']
+    assert '6.7' in review['final_answer'] and '需复核' in review['final_answer']
+    assert '4.3' not in review['final_answer']
+    unknown = CONVERT_CCO.replace('CCO', 'CCC')
+    answer = followup_answer(unknown, [{'activity_evidence': evidence}], SESSION)
+    assert answer['status'] == 'not_calculated'
+    assert '4.3' not in answer['final_answer'] and '6.7' not in answer['final_answer']
+
+
+def test_web_selected_molecule_conversion_does_not_rerun_predictor(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+    first, _ = turn(handler, FIRST, history)
+    assert first['status'] == 'partial'
+    second, _ = turn(handler, CONVERT_CCO, history)
+    assert second['status'] == 'completed', second
+    assert 'CCO' in second['content'] and 'nM' in second['content']
+    assert len(activity.calls) == 1
+
+
+def test_web_micromolar_conversion_with_disagreement_does_not_rerun_predictor(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCN', 6.7, consistent=False)])
+    history = []
+    first, _ = turn(handler, '预测 CCN 对 BuChE 的活性', history)
+    assert first['status'] == 'partial'
+    second, _ = turn(handler, '请把刚才的 pIC50 换算为 IC50（微摩尔），并解释为什么分类和回归结果不一致。', history)
+    assert second['status'] == 'partial', second
+    assert all(part in second['content'] for part in ('CCN', '0.1995', '微摩尔', '不一致'))
+    assert len(activity.calls) == 1
+
+
+def test_web_previous_activity_conversion_does_not_rerun_model(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCO', 4.3)])
+    history = []
+    first, _ = turn(handler, '预测 CCO 对 BuChE 的活性', history)
+    assert first['status'] == 'completed'
+    second, _ = turn(handler, CONVERT, history)
+    assert second['status'] == 'completed', second
+    assert 'CCO' in second['content'] and 'nM' in second['content']
+    assert len(activity.calls) == 1
+
+
+def test_web_natural_pic50_conversion_reuses_previous_prediction(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCO', 4.3)])
+    history = []
+    turn(handler, '预测 CCO 对 BuChE 的活性', history, SESSION)
+    answer, _ = turn(handler, '这个 pIC50 换算成多少微摩尔？', history, SESSION)
+    assert answer['status'] == 'completed'
+    assert all(part in answer['content'] for part in ('CCO', 'BuChE', '50.12', 'μM', '预测', '实验'))
+    assert len(activity.calls) == 1
+
+
+def test_natural_pic50_conversion_requires_unique_same_session_evidence():
+    question = '这个 pIC50 换算成多少微摩尔？'
+    evidence = accepted_snapshot()
+    assert followup_answer(question, [{'activity_evidence': evidence}], SESSION)['status'] == 'not_calculated'
+    assert followup_answer(question, [{'activity_evidence': evidence}], 'foreign')['status'] == 'not_calculated'
+    assert followup_answer(question + '再预测 CCN 的活性。', [{'activity_evidence': evidence}], SESSION) is None
+
+
+def test_proof_question_reuses_exact_activity_evidence_without_experimental_claim():
+    evidence = accepted_snapshot()
+    answer = followup_answer('这是否证明 CCO 对 BuChE 没有活性？', [{'activity_evidence': evidence}], SESSION)
+    assert answer['status'] == 'completed'
+    assert '不能证明' in answer['final_answer'] and '实验' in answer['final_answer']
+    assert 'CCO' in answer['final_answer'] and 'BuChE' in answer['final_answer']
+
+
+def test_inactive_class_followup_reuses_single_verified_activity_result(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, [prediction('CCO', 4.3)])
+    history = []
+    turn(handler, '请预测 SMILES: CCO 对 BuChE 的抑制活性。', history, SESSION)
+    complete, _ = turn(handler, '预测分类为无活性，是否意味着这个分子一定没有 BuChE 抑制作用？',
+                       history, SESSION)
+    assert complete['status'] == 'completed'
+    assert all(word in complete['content'] for word in ('不能', '实验', 'CCO', 'BuChE'))
+    assert len(activity.calls) == 1
+
+
+@pytest.mark.parametrize('mode', ['other_target', 'multiple', 'foreign', 'wrong_class', 'absent'])
+def test_inactive_class_followup_does_not_guess_evidence(mode):
+    evidence = accepted_snapshot()
+    if mode != 'multiple':
+        evidence['observations'][0]['data'] = evidence['observations'][0]['data'][:1]
+        evidence['smiles'] = evidence['smiles'][:1]
+        evidence['query'] = '预测 CCO 对 BuChE 的活性'
+    if mode == 'wrong_class':
+        evidence['observations'][0]['data'][0]['activity_class'] = '有活性'
+    query = '预测分类为无活性，是否意味着这个分子一定没有 BuChE 抑制作用？'
+    if mode == 'other_target':
+        query = query.replace('BuChE', 'PDE5A')
+    answer = followup_answer(query, [] if mode == 'absent' else [{'activity_evidence': evidence}],
+                             'foreign' if mode == 'foreign' else SESSION)
+    assert answer['status'] == 'not_calculated'
+    assert '未重新计算' in answer['final_answer']
+
+
+def test_species_activity_question_uses_previous_prediction_without_conflating_scope():
+    raw = accepted_result([prediction('CCN', 6.7, consistent=False)])
+    raw['tool_result_sequence'][0].update(status='partial', success=False)
+    raw['tool_result_sequence'][0]['data'][0]['provenance']['scope'] = {'species': 'mixed'}
+    evidence = accepted_activity_evidence(raw, '预测 CCN 对 BuChE 的活性', SESSION)
+    question = '这个结果能说明 CCN 对人源 BuChE 有活性吗？请说明依据和限制。'
+    answer = followup_answer(question, [{'activity_evidence': evidence}], SESSION)
+    assert answer['status'] == 'partial'
+    assert all(part in answer['final_answer'] for part in ('CCN', 'BuChE', '混合物种', '不能', '实验', '不一致'))
+    assert followup_answer(question + '再预测 CCO 的活性。', [{'activity_evidence': evidence}], SESSION) is None
+    for altered in (question.replace('CCN', 'CCC'), question.replace('BuChE', 'PDE5A')):
+        assert followup_answer(altered, [{'activity_evidence': evidence}], SESSION)['status'] == 'not_calculated'
+    assert followup_answer(question, [{'activity_evidence': evidence}], 'other-session')['status'] == 'not_calculated'
+
+
+def test_web_species_question_about_previous_value_reuses_unique_prediction(tmp_path):
+    row = prediction('CCO', 4.3)
+    row['provenance']['scope'] = {'species': 'mixed'}
+    handler, activity, _ = handler_for(tmp_path, [row])
+    history = []
+    turn(handler, '预测 CCO 对 BuChE 的活性', history, SESSION)
+    result, _ = turn(handler, '这个预测值能否说明该分子对人源 BuChE 有活性？', history, SESSION)
+    assert all(word in result['content'] for word in ('CCO', 'BuChE', '混合物种', '不能', '实验'))
+    assert len(activity.calls) == 1
+
+
+def test_species_question_about_previous_value_requires_unique_result():
+    question = '这个预测值能否说明该分子对人源 BuChE 有活性？'
+    answer = followup_answer(question, [{'activity_evidence': accepted_snapshot()}], SESSION)
+    assert answer['status'] == 'not_calculated'
+
+
+@pytest.mark.parametrize(('scope', 'expected'), [
+    ('human', '模型范围标注为人源'),
+    (None, '物种范围未明确为人源'),
+])
+def test_species_activity_question_reports_only_declared_scope(scope, expected):
+    raw = accepted_result([prediction('CCN', 4.3)])
+    if scope:
+        raw['tool_result_sequence'][0]['data'][0]['provenance']['scope'] = {'species': scope}
+    evidence = accepted_activity_evidence(raw, '预测 CCN 对 BuChE 的活性', SESSION)
+    answer = followup_answer('这个结果能说明 CCN 对人源 BuChE 有活性吗？',
+                             [{'activity_evidence': evidence}], SESSION)
+    assert expected in answer['final_answer']
+    assert '不能' in answer['final_answer'] and '实验' in answer['final_answer']
+    assert '混合物种' not in answer['final_answer']
+
+
+@pytest.mark.parametrize('query', [
+    '这是否证明 CCC 对 BuChE 没有活性？',
+    '这是否证明 CCO 对 PDE5A 没有活性？',
+])
+def test_proof_question_does_not_reuse_other_molecule_or_target(query):
+    answer = followup_answer(query, [{'activity_evidence': accepted_snapshot()}], SESSION)
+    assert answer['status'] == 'not_calculated'
+
+
+def test_proof_question_without_history_does_not_guess():
+    answer = followup_answer('这是否证明 CCO 对 BuChE 没有活性？', [], SESSION)
+    assert answer['status'] == 'not_calculated'
 
 
 def assert_conflict_report(text):

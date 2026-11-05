@@ -1,8 +1,10 @@
 """Opt-in server transport; no routes, model fallback or production activation."""
 import asyncio
+from html import escape
 import inspect
 import json
 import math
+import re
 from collections import deque
 from contextlib import suppress
 from threading import Lock
@@ -38,7 +40,7 @@ def _display_prediction_value(value):
     return _display_cell(value)
 
 
-def scientific_display_answer(results, *, concise=False):
+def scientific_display_answer(results, *, concise=False, metrics=None):
     """Render verified property observations for people while retaining JSON audit data.
 
     The decision policy deliberately stores scientific answers as allowlisted JSON.
@@ -69,24 +71,27 @@ def scientific_display_answer(results, *, concise=False):
             versions.append(version)
     if not rows:
         return None
+    columns = (
+        ('formula', '分子式', 'molecular_formula'),
+        ('mw', '分子量 (Da)', 'molecular_weight'),
+        ('logp', 'logP', 'logp'),
+        ('tpsa', 'TPSA (Å²)', 'tpsa'),
+        ('hbd', 'HBD', 'hbd'),
+        ('hba', 'HBA', 'hba'),
+        ('qed', 'QED', 'qed'),
+        ('rotatable_bonds', '可旋转键数', 'rotatable_bonds'),
+    )
+    selected = [column for column in columns if not metrics or column[0] in metrics]
     lines = [
         '## 分子性质计算结果',
         '',
-        '| SMILES | 分子式 | 分子量 (Da) | logP | TPSA (Å²) | HBD | HBA | QED | 可旋转键数 |',
-        '|---|---|---:|---:|---:|---:|---:|---:|---:|',
+        '| SMILES | ' + ' | '.join(column[1] for column in selected) + ' |',
+        '|---|' + '|'.join('---' if column[0] == 'formula' else '---:' for column in selected) + '|',
     ]
     for smiles, props in rows:
-        lines.append('| ' + ' | '.join(_display_cell(value) for value in (
-            smiles,
-            props.get('molecular_formula'),
-            props.get('molecular_weight'),
-            props.get('logp'),
-            props.get('tpsa'),
-            props.get('hbd'),
-            props.get('hba'),
-            props.get('qed'),
-            props.get('rotatable_bonds'),
-        )) + ' |')
+        structure = f'`{_display_cell(smiles)}`'
+        lines.append('| ' + ' | '.join((structure, *(_display_cell(props.get(column[2]))
+            for column in selected))) + ' |')
     if not concise:
         lines.extend(['', '来源：property_calculator（结构化工具结果）。'])
         if versions:
@@ -96,7 +101,74 @@ def scientific_display_answer(results, *, concise=False):
     return '\n'.join(lines)
 
 
-def _admet_display_answer(data, evidence_id=None, *, concise=False):
+def _requested_admet_endpoints(query):
+    from src.agent.planning.request_parsing import positive_intent_text
+    from .scientific_obligations import (_BBB_REQUEST, _CYP3A4_INHIBITION,
+                                         _CYP3A4_SUBSTRATE, _FOCUSED_ADMET_ENDPOINTS,
+                                         _ADMET_ENDPOINT_PREDICTION, solubility_prediction_requested)
+    if not isinstance(query, str):
+        return ()
+    positive = positive_intent_text(query)
+    matches = re.finditer(
+        r'(?:重点(?:给出|关注|查看)|给出|显示|列出|查看)\s*(?:各自的)?\s*'
+        r'([A-Za-z][A-Za-z0-9_-]{0,63}(?:\s*(?:、|，|,|和|与|及|and)\s*'
+        r'[A-Za-z][A-Za-z0-9_-]{0,63})*)\s*'
+        r'(?:端点|(?:的)?(?:预测结果|预测值|数值|结果))|'
+        r'的\s*([A-Za-z][A-Za-z0-9_-]{0,63}(?:\s*(?:、|，|,|和|与|及|and)\s*'
+        r'[A-Za-z][A-Za-z0-9_-]{0,63})*)\s*(?:的\s*)?(?:毒性|风险|端点|预测)',
+        positive, re.I)
+    names = [name for match in matches
+        for name in re.findall(r'[A-Za-z][A-Za-z0-9_-]{0,63}', match.group(1) or match.group(2))
+        if name.casefold() not in {'adme', 'admet', 'and'}]
+    for match in _ADMET_ENDPOINT_PREDICTION.finditer(positive):
+        names.extend({'herg': 'hERG', 'dili': 'DILI', 'bbb': 'BBB_Martins'}[name.casefold()]
+                     for name in re.findall(r'hERG|DILI|BBB', match['names'], re.I))
+    focused_lists = re.finditer(
+        r'重点(?:列出|查看|关注|给出)\s*(?:各自的)?\s*'
+        r'([A-Za-z][A-Za-z0-9_-]{0,63}(?:\s*(?:、|，|,|和|与|及|and)\s*'
+        r'[A-Za-z][A-Za-z0-9_-]{0,63})*)\s*(?=[，,。；;！？!?]|$)', positive, re.I)
+    names.extend(name for match in focused_lists
+                 for name in re.findall(r'[A-Za-z][A-Za-z0-9_-]{0,63}', match.group(1))
+                 if name.casefold() not in {'adme', 'admet', 'and'})
+    included_lists = re.finditer(
+        r'(?:包括|包含)\s*([A-Za-z][A-Za-z0-9_-]{0,63}'
+        r'(?:\s*(?:、|和|与|及|and)\s*[A-Za-z][A-Za-z0-9_-]{0,63})*)'
+        r'(?=\s*[，,。；;！？!?]|\s*$)', positive, re.I)
+    names.extend(name for match in included_lists
+                 for name in re.findall(r'[A-Za-z][A-Za-z0-9_-]{0,63}', match.group(1))
+                 if name.casefold() not in {'adme', 'admet', 'and'})
+    direct_pair = re.search(r'的\s*((?:hERG\s*(?:和|与|、|,)\s*DILI|'
+                            r'DILI\s*(?:和|与|、|,)\s*hERG))(?=\s*[，,。；;！？!?]|\s*$)', positive, re.I)
+    if direct_pair:
+        names.extend(re.findall(r'hERG|DILI', direct_pair.group(1), re.I))
+    comparisons = re.finditer(
+        r'(?:比较|对比)\s*(?:(?:它们|两者|这两个分子|两个分子)的\s*)?'
+        r'([A-Za-z][A-Za-z0-9_-]{0,63}(?:\s*(?:、|，|,|和|与|及|and)\s*'
+        r'[A-Za-z][A-Za-z0-9_-]{0,63})*)\s*(?:的)?(?:风险|预测值|预测结果)',
+        positive, re.I)
+    names.extend(name for match in comparisons
+                 for name in re.findall(r'[A-Za-z][A-Za-z0-9_-]{0,63}', match.group(1))
+                 if name.casefold() not in {'adme', 'admet', 'and'})
+    if _BBB_REQUEST.search(positive):
+        names.append('BBB_Martins')
+    if _CYP3A4_INHIBITION.search(positive):
+        names.append('CYP3A4_Veith')
+    if _CYP3A4_SUBSTRATE.search(positive):
+        names.append('CYP3A4_Substrate_CarbonMangels')
+    if solubility_prediction_requested(positive):
+        names.append('Solubility_AqSolDB')
+    focused = _FOCUSED_ADMET_ENDPOINTS.search(positive)
+    if focused:
+        for pattern, endpoint in ((r'溶解度', 'Solubility_AqSolDB'),
+                                  (r'肝毒性', 'DILI'), (r'\bhERG\b', 'hERG')):
+            if re.search(pattern, focused.group(1), re.I):
+                names.append(endpoint)
+    # Direct endpoint lists and prediction phrases may both match. Canonicalize
+    # the BBB shorthand before deduplication so it cannot become a missing row.
+    return tuple(dict.fromkeys('BBB_Martins' if name.casefold() == 'bbb' else name for name in names))
+
+
+def _admet_display_answer(data, evidence_id=None, *, concise=False, requested_endpoints=(), focused_only=False):
     """Render only validated ADMET-AI fields for the Web result card."""
     rows = []
     for row in data or ():
@@ -113,6 +185,44 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False):
     if not rows:
         return ''
 
+    if focused_only and concise and requested_endpoints:
+        lines = ['## ADMET 预测结果', '',
+                 '| 端点 | ' + ' | '.join(f"`{_display_cell(row.get('smiles'))}`" for row, _, _ in rows) + ' |',
+                 '|---|' + '---|' * len(rows)]
+        for name in requested_endpoints:
+            values = []
+            for _, admet, endpoints in rows:
+                endpoint = next((value for key, value in endpoints.items() if key.casefold() == name.casefold()), None)
+                if not isinstance(endpoint, dict) or endpoint.get('source') != 'admet_ai_model':
+                    values.append('未返回可用预测')
+                elif endpoint.get('validity') == 'out_of_range':
+                    values.append('超出物理范围，预测不可用')
+                else:
+                    kind = {'classification': '分类', 'regression': '回归'}.get(endpoint.get('task_type'), '未标明')
+                    number = endpoint.get('value')
+                    display_value = _display_prediction_value(number)
+                    if name.casefold() in {'herg', 'dili'} and endpoint.get('task_type') == 'classification':
+                        threshold = admet.get('risk_threshold')
+                        if (type(threshold) in (int, float) and math.isfinite(threshold) and 0 <= threshold <= 1
+                                and type(number) in (int, float) and math.isfinite(number) and 0 <= number <= 1):
+                            hit = number >= threshold
+                            if (float(display_value) >= threshold) != hit:
+                                display_value = str(number)
+                            verdict = ('命中（≥ ' if hit else '未命中（< ') + str(threshold) + '）'
+                        else:
+                            verdict = '阈值判定未提供'
+                        values.append(f'{display_value}；{verdict}')
+                    else:
+                        values.append(f"{display_value} ({_display_cell(endpoint.get('unit'))}, {kind})")
+            label = {'Solubility_AqSolDB': '水溶解度',
+                     'BBB_Martins': '血脑屏障通透性（分类分数）'}.get(name, name)
+            lines.append('| ' + _display_cell(label) + ' | ' + ' | '.join(values) + ' |')
+        toxicity_names = [name for name in requested_endpoints if name.casefold() in {'herg', 'dili'}]
+        if toxicity_names:
+            lines.append('\n' + '、'.join(toxicity_names) + ' 数值为模型分类分数，不是人体发生率；阈值命中仅表示筛查信号。')
+        lines.append('\n其他预测及异常见明细。')
+        return '\n'.join(lines)
+
     first = rows[0][1]
     model_name = _display_cell(first.get('model_name'))
     model_version = _display_cell(first.get('model_version'))
@@ -120,14 +230,49 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False):
     if not concise:
         lines.extend([f'模型：{model_name} {model_version}',
                       '结果来自本地 ADMET-AI 模型；模型预测不等于实验结果。'])
+    batch_comparison = concise and len(rows) > 1
+    if batch_comparison:
+        endpoint_ids = list(dict.fromkeys(
+            endpoint_id for _, _, endpoints in rows
+            for endpoint_id, endpoint in endpoints.items()
+            if isinstance(endpoint, dict) and endpoint.get('source') == 'admet_ai_model'
+        ))
+        requested = {name.casefold() for name in requested_endpoints}
+        risk_ids = {endpoint_id for _, admet, _ in rows
+                    for endpoint_id in (admet.get('risk_endpoint_ids') or ())}
+        endpoint_ids.sort(key=lambda name: (name.casefold() not in requested, name not in risk_ids))
+        lines.extend(['', '| 端点 | ' + ' | '.join(f"`{_display_cell(row.get('smiles'))}`" for row, _, _ in rows) + ' |',
+                      '|---|' + '---|' * len(rows)])
+        for endpoint_id in endpoint_ids[:max(8, len(requested_endpoints))]:
+            values = []
+            for _, _, endpoints in rows:
+                endpoint = endpoints.get(endpoint_id)
+                if not isinstance(endpoint, dict):
+                    values.append('未返回')
+                    continue
+                if endpoint.get('validity') == 'out_of_range':
+                    values.append('超出物理范围，预测不可用')
+                    continue
+                kind = {'classification': '分类', 'regression': '回归'}.get(endpoint.get('task_type'), '未标明')
+                source = '' if endpoint.get('source') == 'admet_ai_model' else ', 非模型端点'
+                values.append(f"{_display_prediction_value(endpoint.get('value'))} "
+                              f"({_display_cell(endpoint.get('unit'))}, {kind}{source})")
+            label = '血脑屏障通透性' if endpoint_id == 'BBB_Martins' and endpoint_id.casefold() in requested else endpoint_id
+            lines.append('| ' + _display_cell(label) + ' | ' + ' | '.join(values) + ' |')
+        if len(endpoint_ids) > max(8, len(requested_endpoints)):
+            lines.extend(['', '完整端点请展开“查看明细”。'])
     for row, admet, endpoints in rows:
         lines.extend([
             '',
-            f"SMILES：{_display_cell(row.get('smiles'))}",
+            f"SMILES：`{_display_cell(row.get('smiles'))}`",
             f"返回端点：{sum(isinstance(endpoint, dict) for endpoint in endpoints.values())}；"
             f"风险筛查分类端点：{_display_cell(admet.get('total_endpoints'))}；"
             f"阈值命中项：{_display_cell(admet.get('risk_count'))}",
         ])
+        invalid = [name for name, endpoint in endpoints.items()
+                   if isinstance(endpoint, dict) and endpoint.get('validity') == 'out_of_range']
+        if invalid:
+            lines.append('以下端点的原始模型输出超出物理范围，预测不可用：' + '、'.join(map(_display_cell, invalid)) + '。')
         risk_ids = admet.get('risk_endpoint_ids')
         if isinstance(risk_ids, list) and all(isinstance(value, str) and value for value in risk_ids):
             hit_names = []
@@ -137,13 +282,13 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False):
                 hit_names.append(_display_cell(name or endpoint_id))
             if hit_names:
                 lines.append('阈值命中端点：' + '、'.join(hit_names))
+            threshold = admet.get('risk_threshold')
+            if type(threshold) in (int, float) and math.isfinite(threshold) and 0 <= threshold <= 1:
+                lines.append(f'风险分类筛查阈值：{_display_prediction_value(threshold)}')
         elif admet.get('risk_count'):
             lines.append('阈值命中端点：请展开完整端点明细')
-        lines.extend([
-            '',
-            '| 端点 | 数值 | 单位 |' if concise else '| 端点 | 预测值 | 单位 | 类别 | 来源 |',
-            '|---|---:|---|' if concise else '|---|---:|---|---|---|',
-        ])
+        if batch_comparison:
+            continue
         endpoint_rows = [(name, endpoint) for name, endpoint in endpoints.items()
                          if isinstance(endpoint, dict)]
         if concise:
@@ -153,12 +298,28 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False):
             predicted_rows = [(name, endpoint) for name, endpoint in endpoint_rows
                               if endpoint.get('source') == 'admet_ai_model']
             endpoint_rows = predicted_rows or endpoint_rows
+            requested = {name.casefold() for name in requested_endpoints}
+            endpoint_rows.sort(key=lambda item: (item[0].casefold() not in requested,
+                                                item[0] not in risk_ids if isinstance(risk_ids, list) else True))
+        value_label = '模型预测值' if concise and endpoint_rows and all(
+            endpoint.get('source') == 'admet_ai_model' for _, endpoint in endpoint_rows) else '数值'
+        lines.extend([
+            '',
+            f'| 端点 | {value_label} | 单位 | 类型 |' if concise else '| 端点 | 预测值 | 单位 | 类别 | 来源 |',
+            '|---|---:|---|---|' if concise else '|---|---:|---|---|---|',
+        ])
         shown = 0
         for endpoint_id, endpoint in endpoint_rows:
-            if concise and shown == 8:
+            if concise and shown == max(8, len(requested_endpoints)):
                 break
-            values = (endpoint_id, _display_prediction_value(endpoint.get('value')), endpoint.get('unit'))
-            if not concise:
+            label = ('血脑屏障通透性' if concise and endpoint_id == 'BBB_Martins'
+                     and endpoint_id.casefold() in requested else endpoint_id)
+            value = ('超出物理范围，预测不可用' if endpoint.get('validity') == 'out_of_range'
+                     else _display_prediction_value(endpoint.get('value')))
+            values = (label, value, endpoint.get('unit'))
+            if concise:
+                values += ({'classification': '分类', 'regression': '回归'}.get(endpoint.get('task_type'), '未标明'),)
+            else:
                 values += (endpoint.get('category'), endpoint.get('source'))
             lines.append('| ' + ' | '.join(
                 value if index == 1 else _display_cell(value)
@@ -167,6 +328,12 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False):
             shown += 1
         if concise and sum(isinstance(endpoint, dict) for endpoint in endpoints.values()) > shown:
             lines.extend(['', '完整端点请展开“查看明细”。'])
+    if ('bbb_martins' in {name.casefold() for name in requested_endpoints}
+            and any(isinstance(endpoints.get('BBB_Martins'), dict)
+                    and endpoints['BBB_Martins'].get('source') == 'admet_ai_model'
+                    and endpoints['BBB_Martins'].get('task_type') == 'classification'
+                    for _, _, endpoints in rows)):
+        lines.extend(['', '血脑屏障通透性数值是模型分类分数，不是实测通透率。'])
     if evidence_id and not concise:
         lines.extend(['', f'证据 ID：{_display_cell(evidence_id)}。'])
     if not concise:
@@ -196,12 +363,18 @@ def _activity_display_answer(data, *, concise=False):
         target = row.get('requested_target') or row.get('target')
         if target is not None:
             lines.append(f"靶点：{_display_cell(target)}")
+        provenance = row.get('provenance')
+        scope = provenance.get('scope') if isinstance(provenance, dict) else None
+        species = scope.get('species') if isinstance(scope, dict) else None
+        species_name = {'mixed': '混合物种', 'human': '人源', 'mouse': '小鼠',
+                        'rat': '大鼠', 'dog': '犬', 'pig': '猪'}.get(species, '未标明') if isinstance(species, str) else '未标明'
+        lines.append(f'模型物种范围：{species_name}' + ('；不能视为人源特异预测。' if species == 'mixed' else '。'))
         if row.get('predicted_pIC50') is not None:
             lines.append(f"预测 pIC50：{_display_prediction_value(row.get('predicted_pIC50'))}")
         if row.get('activity_probability') is not None:
             lines.append(f"活性概率：{_display_prediction_value(row.get('activity_probability'))}")
         if row.get('activity_class') is not None:
-            lines.append(f"分类：{_display_cell(row.get('activity_class'))}")
+            lines.append(f"预测分类：{_display_cell(row.get('activity_class'))}")
         if row.get('label_threshold') is not None:
             lines.append(f"pIC50 分类阈值：{_display_prediction_value(row.get('label_threshold'))}")
         if row.get('probability_threshold') is not None:
@@ -217,7 +390,7 @@ def _activity_display_answer(data, *, concise=False):
     return '\n'.join(lines).rstrip()
 
 
-def _target_display_answer(data, evidence_id=None, *, concise=False):
+def _target_display_answer(data, evidence_id=None, *, concise=False, experimental_only=False, include_function=True):
     """Render the bounded target lookup rows without exposing audit JSON."""
     if not isinstance(data, list):
         return ''
@@ -260,17 +433,41 @@ def _target_display_answer(data, evidence_id=None, *, concise=False):
         )) + ' |')
 
     for row in rows:
+        function = row.get('function')
+        if include_function and isinstance(function, str) and function.strip():
+            target = _display_cell(row.get('gene_symbol', row.get('target_name', '靶点')))
+            description = re.sub(r'\s*\(PubMed:\d+(?:,\s*PubMed:\d+)*\)', '', function.strip())
+            lines.extend(['', f'**{target} 功能**', '', escape(description)])
+
+    for row in rows:
         structures = row.get('recommended_structures')
-        if not isinstance(structures, list) or not structures:
+        if not isinstance(structures, list):
+            if not experimental_only:
+                continue
+            structures = []
+        if not structures and not experimental_only:
             continue
         target = _display_cell(row.get('gene_symbol', row.get('target_name', '靶点')))
-        lines.extend(['', f'**{target} 推荐结构预览**'])
-        for structure in structures[:3]:
+        lines.extend(['', f'**{target} 检索到的结构记录**'])
+        if experimental_only:
+            structures = [structure for structure in structures if isinstance(structure, dict)
+                          and structure.get('structure_type') == 'experimental']
+            if not structures:
+                lines.append('已返回的记录中未返回实验结构记录。')
+                continue
+        for structure in structures[:20]:
             if not isinstance(structure, dict):
                 continue
             structure_id = _display_cell(structure.get('structure_id'))
             source = _display_cell(structure.get('source'))
-            level = _display_cell(structure.get('recommendation_level'))
+            resolution = structure.get('resolution')
+            resolution_text = (f'{resolution:g} Å' if type(resolution) in (int, float)
+                               and math.isfinite(resolution) and resolution > 0 else '未记录')
+            structure_type = {'experimental': '实验结构', 'predicted': '预测结构',
+                              'alphafold': '预测结构'}.get(structure.get('structure_type'), '结构类型未标明')
+            method = structure.get('method')
+            method_text = method.strip() if isinstance(method, str) and method.strip() not in {'', '-'} else '未记录'
+            method_display = f'解析方法：{_display_cell(method_text)}；' if structure.get('structure_type') == 'experimental' else ''
             ligand_ids = structure.get('ligand_ids')
             if isinstance(ligand_ids, list) and all(isinstance(value, str) for value in ligand_ids):
                 ligand_text = ', '.join(ligand_ids) if ligand_ids else '无记录'
@@ -278,16 +475,24 @@ def _target_display_answer(data, evidence_id=None, *, concise=False):
                 ligand_text = '不可用'
             lines.append(
                 f'- 结构 ID：{structure_id}；' + ('' if concise else f'来源：{source}；')
-                + f'推荐级别：{level}；'
+                + f'{structure_type}；{method_display}分辨率：{resolution_text}；'
                 f'配体 ID：{_display_cell(ligand_text)}。'
             )
+        count = row.get('structure_count')
+        if experimental_only:
+            lines.append('结构记录总数包括其他类型；此处仅展示已返回的实验结构。')
+        elif type(count) is int and count > len(structures[:20]):
+            lines.append(f'当前展示 {len(structures[:20])} 条，记录总数为 {count}；结构列表未完整展示。')
+        if any(isinstance(structure, dict) and structure.get('cache_status') == 'unverified'
+               for structure in structures[:20]):
+            lines.append('本地结构记录尚未核验；用于对接前，请按靶点和 PDB 编号重新查询结构。')
         lines.append('配体角色和对接口袋尚未核实，不能仅凭配体记录确认结构适合对接。')
 
     return '\n'.join(lines)
 
 
 def _compiled_display_observations(result):
-    """Read accepted compiled-ADMET observations, without manufacturing an audit.
+    """Read accepted compiled property/ADMET observations without inventing an audit.
 
     Compiled workflows retain ordinary tool prose rather than the Pi cited-answer
     JSON. This presentation-only adapter uses their existing validated records;
@@ -297,10 +502,11 @@ def _compiled_display_observations(result):
     required = metadata.get('required_tools')
     allowed = {'property_calculator', 'drug_likeness_assessment', 'admet_predictor'}
     if (metadata.get('scientific_plan_status') != 'ready'
-            or metadata.get('workflow_version') != 'web-admet-v1'
             or type(required) is not list or not required
             or any(type(name) is not str or name not in allowed for name in required)
-            or 'admet_predictor' not in required
+            or not ((metadata.get('workflow_version') in {'web-admet-v1', 'web-admet-batch-v1', 'web-property-admet-batch-v1'} and 'admet_predictor' in required)
+                    or (metadata.get('workflow_version') in {'web-property-v1', 'web-property-batch-v1'}
+                        and 'drug_likeness_assessment' in required and 'admet_predictor' not in required))
             or any(type(item) is not ToolResult or item.tool_name not in required
                    for item in result.tool_results)):
         return None
@@ -342,7 +548,8 @@ def _bound_activity_display_observations(result):
     return blocks or None
 
 
-def web_scientific_display(result, *, concise=False):
+def web_scientific_display(result, *, concise=False, requested_admet_endpoints=(), experimental_only=False,
+                           focused_admet_only=False, include_target_function=True):
     """Project cited answers or reviewed compiled records, never raw tool prose."""
     if (result.metadata.get('binding_profile') != 'medchat-web-v1'
             or result.metadata.get('waiting_for_input')
@@ -364,6 +571,17 @@ def web_scientific_display(result, *, concise=False):
     if observations is None:
         return None
     from types import SimpleNamespace
+    metrics = None
+    if concise:
+        if (result.metadata.get('workflow_version') in {'web-admet-v1', 'web-property-batch-v1', 'web-property-admet-batch-v1'}
+                and 'property_calculator' in result.metadata.get('required_tools', [])):
+            metrics = result.metadata.get('metrics')
+        requirements = result.metadata.get('task_requirements') or {}
+        request = requirements.get('request') or {}
+        query = request.get('query')
+        if metrics is None and isinstance(query, str):
+            from .scientific_obligations import _requested_metrics
+            metrics = _requested_metrics(query)
     lines = []
     for block in observations:
         name, data = block['tool'], block.get('data')
@@ -371,25 +589,83 @@ def web_scientific_display(result, *, concise=False):
             view = SimpleNamespace(tool_name=name, data=data, error=None,
                 status=SimpleNamespace(value=block['status']),
                 quality={'evidence_id': block['evidence_id']}, provenance=None)
-            lines.append(scientific_display_answer([view], concise=concise) or '')
+            lines.append(scientific_display_answer([view], concise=concise, metrics=metrics) or '')
         elif name == 'drug_likeness_assessment' and data:
+            if concise and result.metadata.get('workflow_version') == 'web-property-batch-v1':
+                section = ['## Lipinski 五规则', '',
+                           '| SMILES | 分子量 (Da) | logP | HBA | HBD | 规则判断 |',
+                           '|---|---:|---:|---:|---:|---|']
+                for row in data:
+                    assessment = row['assessment']
+                    properties = assessment['molecular_properties']
+                    rules = assessment['lipinski_rule_of_five']
+                    verdict = '符合' if rules['compliance'] else '不符合'
+                    section.append('| ' + ' | '.join(_display_cell(value) for value in (
+                        row['smiles'], properties['molecular_weight'], properties['logp'],
+                        properties['hba'], properties['hbd'],
+                        f"{verdict}（违反 {rules['violation_count']} 项，允许至多 1 项）")) + ' |')
+                section.append('规则筛选不能证明口服生物利用度或疗效。')
+                lines.append('\n'.join(section))
+                continue
             lines.append('## 类药性评估结果')
             for row in data:
                 assessment = row['assessment']
                 lines.append('SMILES: ' + _display_cell(row['smiles']))
                 lines.append('QED评分: ' + _display_cell(assessment.get('qed_score')))
+                lipinski = assessment.get('lipinski_rule_of_five', {})
+                if (isinstance(lipinski, dict) and type(lipinski.get('violation_count')) is int
+                        and type(lipinski.get('compliance')) is bool):
+                    verdict = '符合' if lipinski['compliance'] else '不符合'
+                    lines.append(f"Lipinski 五规则：{verdict}本工具判定，违反 {lipinski['violation_count']} 项（允许至多 1 项）。")
+                    properties = assessment.get('molecular_properties', {})
+                    if isinstance(properties, dict):
+                        fields = (('分子量 (Da)', 'molecular_weight'), ('logP', 'logp'),
+                                  ('HBA', 'hba'), ('HBD', 'hbd'))
+                        values = [(label, properties.get(key)) for label, key in fields]
+                        if all(type(value) in (int, float) and math.isfinite(value) for _, value in values):
+                            lines.append('规则依据：' + '；'.join(f'{label} {_display_cell(value)}' for label, value in values) + '。')
                 score = assessment.get('overall_assessment', {}).get('score')
                 if score is not None:
-                    lines.append('总体评分: ' + _display_cell(score))
+                    lines.append('规则综合评分: ' + _display_cell(score))
             if not concise:
                 lines.append('本结果来自 RDKit 描述符计算与启发式规则判断；综合评分为既有加权规则评分，'
                              '不是成药成功概率，不能确定口服生物利用度或疗效。')
         elif name == 'admet_predictor' and data:
-            lines.append(_admet_display_answer(data, block.get('evidence_id'), concise=concise))
+            lines.append(_admet_display_answer(data, block.get('evidence_id'), concise=concise,
+                                               requested_endpoints=requested_admet_endpoints,
+                                               focused_only=focused_admet_only))
         elif name == 'activity_predictor' and data:
             lines.append(_activity_display_answer(data, concise=concise))
+        elif (name == 'lead_optimization_verifier' and block.get('status') == 'succeeded'
+              and block.get('scientific_usable') is not False and isinstance(data, dict)):
+            candidates = data.get('candidates', [])
+            section = ['## 优化目标检查', '',
+                       f"基线结构：`{_display_cell(data.get('baseline_smiles'))}`", '',
+                       '| 候选 SMILES | 指标 | 基线 | 候选 | 检查结果 |', '|---|---|---:|---:|---|']
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                comparisons = candidate.get('comparisons') or []
+                for comparison in comparisons:
+                    metric = comparison.get('metric')
+                    baseline, value = comparison.get('baseline_value'), comparison.get('candidate_value')
+                    if (not isinstance(metric, str) or type(baseline) not in (int, float)
+                            or type(value) not in (int, float) or not math.isfinite(baseline)
+                            or not math.isfinite(value) or type(comparison.get('satisfied')) is not bool):
+                        continue
+                    status = '满足比较目标' if comparison['satisfied'] else '未满足比较目标'
+                    if candidate.get('status') == 'unverified':
+                        status += '；其他要求未验证'
+                    section.append('| ' + ' | '.join(_display_cell(item) for item in (
+                        candidate.get('smiles'), 'logP' if metric == 'logp' else metric,
+                        baseline, value, status)) + ' |')
+                if not comparisons:
+                    section.append(f"| {_display_cell(candidate.get('smiles'))} | 未验证 | — | — | 缺少可比较的证据 |")
+            section.append('比较基于计算或预测结果，不代表实验验证。')
+            lines.append('\n'.join(section))
         elif name == 'candidate_ranker' and any(reason in block.get('reason_codes', []) for reason in
-                ('ranking_evidence_mismatch', 'ranking_candidate_mismatch', 'invalid_scientific_observation')):
+                ('ranking_evidence_mismatch', 'ranking_candidate_mismatch', 'invalid_scientific_observation',
+                 'required_ranking_evidence_missing', 'ranking_count_mismatch')):
             lines.append('候选排序结果未通过校验，未展示排名。')
         elif name == 'candidate_ranker' and isinstance(data, dict):
             rows = data.get('top_candidates', [])
@@ -404,7 +680,9 @@ def web_scientific_display(result, *, concise=False):
                     section.append('排序依据：0.5 ×（0.7 × QED + 0.3 × LogP 区间评分）；仅使用分子性质。')
                 lines.append('\n'.join(section))
         elif name == 'target_database_search' and data:
-            lines.append(_target_display_answer(data, block.get('evidence_id'), concise=concise))
+            lines.append(_target_display_answer(data, block.get('evidence_id'), concise=concise,
+                                                experimental_only=experimental_only,
+                                                include_function=include_target_function))
         elif (name == 'target_database_search' and (data is None or data == [])
               and block.get('lookup_status') == 'not_found'
               and block.get('status') == 'succeeded'
@@ -524,6 +802,12 @@ def _durable_admission_facts(store, trace_id, carry):
 def _event_frame(handler, event):
     raw = event.to_dict()
     compacted = False
+    if (raw.get('event') == 'tool_completed' and raw.get('tool') == 'activity_predictor'
+            and type(raw.get('payload')) is dict):
+        payload = raw['payload']
+        raw['payload'] = {key: payload.get(key) for key in ('success', 'status')}
+        raw['message'] = '活性预测已运行，结果正在校验。'
+        compacted = True
     if raw['event'] in _TERMINAL_EVENTS and type(raw['payload']) is dict:
         payload = raw['payload']
         if 'tool_result_sequence' in payload:
@@ -553,7 +837,8 @@ def _result_frame(handler, result, display_changed, *, business_view=None,
         raise _DeliveryError('result_display_invalid')
     envelope = result.to_legacy_dict()
     from .result_details_projection import (accepted_ranking_ids, hide_unaccepted_ranking,
-                                            scrub_unaccepted_ranking_failure, scrub_run_error)
+                                            scrub_unaccepted_ranking_failure, scrub_run_error,
+                                            species_mismatch_ids, hide_species_mismatch)
     accepted = accepted_ranking_ids(result)
     if accepted is not None:
         rejected_aggregate = {'evidence': [], 'artifacts': []}
@@ -583,6 +868,25 @@ def _result_frame(handler, result, display_changed, *, business_view=None,
                 envelope[key] = [item for item in envelope[key]
                     if item not in rejected_aggregate[key]]
         envelope['error'] = scrub_run_error(result, envelope.get('error'))
+    species_rejected = species_mismatch_ids(result)
+    if species_rejected:
+        discarded = {'evidence': [], 'artifacts': []}
+        for value in envelope.get('tool_result_sequence', []):
+            if (value.get('tool_name') == 'activity_predictor'
+                    and value.get('quality', {}).get('evidence_id') in species_rejected):
+                for key in discarded:
+                    discarded[key].extend(value.get(key) or [])
+                hide_species_mismatch(value)
+        for value in envelope.get('tool_results_by_step', {}).values():
+            if (value.get('tool_name') == 'activity_predictor'
+                    and value.get('quality', {}).get('evidence_id') in species_rejected):
+                hide_species_mismatch(value)
+        for name, value in envelope.get('tool_results', {}).items():
+            if name == 'activity_predictor' and value.get('quality', {}).get('evidence_id') in species_rejected:
+                hide_species_mismatch(value)
+        for key in discarded:
+            if isinstance(envelope.get(key), list):
+                envelope[key] = [item for item in envelope[key] if item not in discarded[key]]
     envelope.update(type='agent_result', trace_id=result.trace_id,
                     final_answer=result.final_answer or result.message)
     terminal_status = envelope.get('status')

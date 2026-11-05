@@ -87,6 +87,165 @@ def execute(case, step):
     return case.session.results[-1]
 
 
+@pytest.mark.parametrize('query', [
+    '对 SMILES: CC(=O)Oc1ccccc1C(=O)O 进行反向寻靶。',
+    '请对分子 SMILES: CC(=O)Oc1ccccc1C(=O)O 进行反向寻靶，列出前 5 个候选及其支持证据。',
+])
+def test_reverse_target_binds_labeled_smiles_before_chinese_action(make, query):
+    from src.agent.tools.reverse_target_tool import ReverseTargetTool
+    tool = ReverseTargetTool()
+    case = make(query=query, skill='reverse_target_prediction', custom_tools=[tool])
+    step = next(step for step in case.steps if step.tool_name == 'reverse_target_predictor')
+    action = case.resolver.resolve(decision(step))
+    assert 'CC(=O)Oc1ccccc1C(=O)O' in str(action.input_data)
+
+
+@pytest.mark.parametrize('structure', ['CCO$bad', 'CCO; CCN'])
+def test_reverse_target_rejects_invalid_or_multiple_labeled_structures(make, structure):
+    from src.agent.tools.reverse_target_tool import ReverseTargetTool
+    case = make(query=f'对 SMILES: {structure} 进行反向寻靶。',
+                skill='reverse_target_prediction', custom_tools=[ReverseTargetTool()])
+    step = next(step for step in case.steps if step.tool_name == 'reverse_target_predictor')
+    with pytest.raises((ValueError, DecisionBoundaryError)):
+        case.resolver.resolve(decision(step))
+
+
+def test_web_target_function_intent_reaches_service(make):
+    from src.agent.tools.target_database_tool import TargetDatabaseTool
+    class Service:
+        def search_targets(self, query, **kwargs):
+            self.options = kwargs
+            return {'status': 'not_found', 'results': [], 'warnings': [], 'lookup_path': []}
+        def close(self):
+            pass
+    tool = TargetDatabaseTool()
+    tool._service = Service()
+    case = make(query='请查询人 EGFR 靶点，给出 UniProt 编号和功能信息。',
+                skill='target_database_search', custom_tools=[tool])
+    execute(case, next(step for step in case.steps if step.tool_name == 'target_database_search'))
+    assert tool._service.options == {'include_function': True}
+
+
+def test_web_target_lookup_binds_explicit_mouse_species(make):
+    from src.agent.tools.target_database_tool import TargetDatabaseTool
+    tool = TargetDatabaseTool()
+    case = make(query='请查询小鼠 EGFR 的蛋白信息和实验结构，列出物种、UniProt 和 PDB 编号。',
+                skill='target_database_search', custom_tools=[tool])
+    action = case.resolver.resolve(decision(case.steps[0]))
+    assert action.input_data == {'query': 'EGFR', 'organism': 'Mus musculus'}
+
+
+def test_web_target_lookup_does_not_silently_default_unsupported_species(make):
+    from src.agent.tools.target_database_tool import TargetDatabaseTool
+    case = make(query='请查询大鼠 EGFR 的蛋白结构。', skill='target_database_search',
+                custom_tools=[TargetDatabaseTool()])
+    with pytest.raises(DecisionBoundaryError):
+        case.resolver.resolve(decision(case.steps[0]))
+
+
+@pytest.mark.parametrize('species', ['鸡源', '牛源', '斑马鱼源', '鸡', '牛', '斑马鱼', 'chicken', 'zebrafish', 'Gallus gallus', '雪貂', 'ferret', 'Mustela putorius'])
+def test_unknown_target_species_never_defaults_to_human(make, species):
+    from src.agent.tools.target_database_tool import TargetDatabaseTool
+    case = make(query=f'请查询{species} EGFR 的蛋白信息和实验结构。',
+                skill='target_database_search', custom_tools=[TargetDatabaseTool()])
+    with pytest.raises(DecisionBoundaryError):
+        case.resolver.resolve(decision(case.steps[0]))
+
+
+@pytest.mark.parametrize('prefix', ['蛋白', '靶点', 'protein', '人', '人源', 'human', '小鼠', 'mouse'])
+def test_target_lookup_accepts_known_nonconflicting_qualifiers(make, prefix):
+    from src.agent.tools.target_database_tool import TargetDatabaseTool
+    case = make(query=f'请查询{prefix} EGFR 的蛋白信息和实验结构。',
+                skill='target_database_search', custom_tools=[TargetDatabaseTool()])
+    action = case.resolver.resolve(decision(case.steps[0]))
+    assert action.input_data['query'] == 'EGFR'
+
+
+def test_web_target_lookup_preserves_explicit_uniprot_and_species(make):
+    from src.agent.tools.target_database_tool import TargetDatabaseTool
+    query = '请查询小鼠 EGFR（UniProt P00533）的蛋白信息和实验结构。'
+    case = make(query=query, skill='target_database_search', custom_tools=[TargetDatabaseTool()])
+    action = case.resolver.resolve(decision(case.steps[0]))
+    assert action.input_data['query'] == query
+    assert action.input_data['organism'] == 'Mus musculus'
+
+
+@pytest.mark.parametrize('suffix', ['给出 pIC50', '给出 pIC50 和模型适用范围', '给出 pIC50 和模型物种范围'])
+def test_activity_pic50_request_binds_supported_target_and_species(make, suffix):
+    tool = CountingTool('activity_predictor', ToolResult.error_result(
+        'activity_predictor', AgentErrorCode.MODEL_UNAVAILABLE, 'model unavailable'))
+    query = f'预测 SMILES: CCO 对人丁酰胆碱酯酶（BuChE）的活性，{suffix}。'
+    case = make(query=query, skill='activity_prediction', custom_tools=[tool])
+    step = next(step for step in case.steps if step.tool_name == 'activity_predictor')
+    action = case.resolver.resolve(decision(step))
+    from src.activity.family_contract import resolve_activity_family
+    assert resolve_activity_family(action.input_data['query']['target']) == 'buche-family'
+    assert action.input_data['query']['model_request']['species'] == 'human'
+    assert action.input_data['query']['query'] == query
+
+
+def test_activity_short_human_target_binds_to_tool(make):
+    tool = CountingTool('activity_predictor', ToolResult.error_result(
+        'activity_predictor', AgentErrorCode.MODEL_UNAVAILABLE, 'model unavailable'))
+    query = '请预测 SMILES：CCO 对人源 BuChE 的活性，并给出模型信息与适用范围。'
+    case = make(query=query, skill='activity_prediction', custom_tools=[tool])
+    step = next(step for step in case.steps if step.tool_name == 'activity_predictor')
+    action = case.resolver.resolve(decision(step))
+    assert action.input_data['query']['target'].lower() == 'buche'
+    assert action.input_data['query']['model_request']['species'] == 'human'
+
+
+def test_activity_pic50_request_rejects_invalid_complete_structure(make):
+    tool = CountingTool('activity_predictor', ToolResult.error_result(
+        'activity_predictor', AgentErrorCode.MODEL_UNAVAILABLE, 'model unavailable'))
+    query = '预测 SMILES: CCO$bad 对人丁酰胆碱酯酶（BuChE）的活性，给出 pIC50。'
+    case = make(query=query, skill='activity_prediction', custom_tools=[tool])
+    step = next(step for step in case.steps if step.tool_name == 'activity_predictor')
+    with pytest.raises(ValueError):
+        case.resolver.resolve(decision(step))
+
+
+def test_composite_cannot_finish_when_required_admet_fails(make):
+    from src.agent.scientific_session.web_acceptance import evaluate_web_acceptance
+    from tests.agent.test_target_driven_design_workflow import FakeTool
+    unavailable = CountingTool('admet_predictor', ToolResult.error_result(
+        'admet_predictor', AgentErrorCode.MODEL_UNAVAILABLE, 'Synthetic fixture unavailable'))
+    case = make(query='查询人 EGFR 的生物学功能和 UniProt 编号，并预测 CCO 的 ADMET。',
+                skill='target_structure_molecule_analysis',
+                custom_tools=[FakeTool('target_database_search'), unavailable])
+    results = [execute(case, step) for step in case.steps]
+    assert not results[-1].success
+    report = evaluate_web_acceptance(case.resolver, evidence_ids=[results[0].quality['evidence_id']])
+    assert not report['finish_eligible']
+
+
+def test_three_task_composite_cannot_finish_when_property_fails(make):
+    from src.agent.scientific_session.web_acceptance import evaluate_web_acceptance
+    from tests.agent.test_analysis_contract import producer_fixture_result
+    from tests.agent.test_target_driven_design_workflow import FakeTool
+    admet = CountingTool('admet_predictor', producer_fixture_result('admet_predictor'))
+    unavailable = CountingTool('property_calculator', ToolResult.error_result(
+        'property_calculator', AgentErrorCode.MODEL_UNAVAILABLE, 'Synthetic fixture unavailable'))
+    case = make(query='预测 CCO 的 ADMET，并查询人 EGFR 的生物学功能和 UniProt 编号，再计算 CCN 的 LogP。',
+                skill='target_structure_molecule_analysis',
+                custom_tools=[FakeTool('target_database_search'), admet, unavailable])
+    results = [execute(case, step) for step in case.steps]
+    assert not results[-1].success
+    cited = [result.quality['evidence_id'] for result in results[:-1] if result.success]
+    assert not evaluate_web_acceptance(case.resolver, evidence_ids=cited)['finish_eligible']
+
+
+def test_ranker_workflow_metadata_is_json_serializable():
+    from src.agent.scientific_session.decision_bounds import validate_json
+    step = WorkflowStep('ranking', 'candidate_ranker', input_binding='$.workflow',
+        metadata={'workflow_metadata_keys': ('required_evidence',),
+                  'workflow_output_keys': (), 'required_evidence': ('properties', 'activity')})
+    context = AgentContext('rank', 'rank-test')
+    payload = WorkflowOrchestrator._resolve_input(context, step, {})
+    assert payload['metadata']['required_evidence'] == ['properties', 'activity']
+    validate_json(payload, max_bytes=65536, reason='invalid_dynamic_binding')
+
+
 def test_real_properties_are_bound_and_sealed(make):
     case = make()
     result = execute(case, case.steps[0])
@@ -245,14 +404,31 @@ def test_lead_optimization_binds_repeated_tools_and_real_verification(make):
     assert len(case.resolver.verify_binding_closure()) == 8
 
 
-def test_target_design_preserves_target_evidence_and_real_ranking(make):
+def test_lead_baseline_property_uses_structure_in_target_activity_request(make):
+    from src.agent.tools.lead_optimization_verifier import LeadOptimizationVerifier
+    unavailable = [CountingTool(name, ToolResult.error_result(name,
+        AgentErrorCode.MODEL_UNAVAILABLE, 'fixture unavailable'))
+        for name in ('admet_predictor', 'activity_predictor')]
+    case = make(query='优化 CC(=O)Oc1ccccc1C(=O)O，降低 logP，生成 1 个候选分子，并预测候选分子对人源 BChE 的活性。',
+        skill='hit_to_lead_optimization', custom_tools=[PropertyCalculator(), *unavailable,
+            CountingTool(GEN, output(GEN)), LeadOptimizationVerifier()])
+    result = execute(case, next(step for step in case.steps if step.name == 'baseline_properties'))
+    assert result.success
+    assert result.data[0]['smiles'] == 'CC(=O)Oc1ccccc1C(=O)O'
+
+
+@pytest.mark.parametrize('query', [
+    '针对 PDE5A 设计 1 个候选分子并筛选前 1 个',
+    '针对 PDE5A 设计 1 个候选分子，预测活性并筛选前 1 个',
+])
+def test_target_design_preserves_target_evidence_and_real_ranking(make, query):
     from src.agent.tools.candidate_ranker import CandidateRanker
     from tests.agent.test_target_driven_design_workflow import FakeTool
     unavailable = [CountingTool(name, ToolResult.error_result(name,
         AgentErrorCode.MODEL_UNAVAILABLE, 'Explicit fixture has no prediction model'))
         for name in ('admet_predictor', 'activity_predictor')]
     generator = CountingTool(GEN, output(GEN))
-    case = make(query='针对 PDE5A 设计 1 个候选分子并筛选前 1 个', skill='target_driven_design',
+    case = make(query=query, skill='target_driven_design',
         custom_tools=[FakeTool('target_database_search'), generator, PropertyCalculator(),
                       *unavailable, CandidateRanker()])
     results = {step.name: execute(case, step) for step in case.steps}

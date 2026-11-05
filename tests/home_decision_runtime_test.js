@@ -74,7 +74,7 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
   const body = new Element("body"); body.root = true;
   const composer = body.appendChild(new Element("div")); composer.className = "chat-composer";
   const fill = composer.appendChild(new Element("div")); fill.className = "fill";
-  const input = fill.appendChild(new Element("input")), send = fill.appendChild(new Element("button"));
+  const input = fill.appendChild(new Element("textarea")), send = fill.appendChild(new Element("button"));
   const toolbar = composer.appendChild(new Element("div")); toolbar.className = "tool";
   const chat = body.appendChild(new Element("div"));
   const timers = new Map(), sockets = [], logs = [], requests = [], detailsMounts = [], formatCalls = [];
@@ -834,10 +834,18 @@ async function run() {
     assert(newer.sent.every(f => f.type === "ping"));
     h.ready("pi"); h.send(); assert.equal(newer.sent.at(-1).type, "chat");
   });
-  await test("active main script cache version includes scientific result display", () => {
+  for (const mode of ["legacy", "pi"]) await test(`${mode} sends multiline candidate lists without merging structures`, () => {
+    const h = loadHome(); h.ready(mode);
+    const message = "比较以下两个分子的性质：\nCCO\nCCN";
+    h.input.value = message; h.send();
+    assert.equal(h.socket.sent.at(-1).type, "chat");
+    assert.equal(h.socket.sent.at(-1).message, message);
+    assert.equal(h.input.value, "", "successful send clears the textarea");
+  });
+  await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261028-quick-actions-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261104-multiline-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");

@@ -162,7 +162,12 @@ def prepare_summary(handler, result, *, business_view=None):
         elif (status == 'completed' and result.success and not result.warnings
               and all(item.tool_name == 'property_calculator' and not item.warnings
                       for item in result.tool_results)):
-            body = scientific_display_answer(result.tool_results, concise=True)
+            body = (web_scientific_display(result, concise=True)
+                    or scientific_display_answer(result.tool_results, concise=True,
+                        metrics=(result.metadata.get('metrics')
+                                 if result.metadata.get('scientific_plan_status') == 'ready'
+                                 and result.metadata.get('workflow_version') in {'web-property-v1', 'web-property-batch-v1'}
+                                 else None)))
         else:
             try:
                 body = web_scientific_display(result, concise=True) if result.outcome is not None else None
@@ -250,7 +255,7 @@ def prepare_summary(handler, result, *, business_view=None):
     generic_partial_issue = False
     if status == 'partial':
         if result.metadata.get('stop_reason') == 'activity_target_conflict_or_unknown':
-            issues.append('活性预测的靶点不受支持或存在冲突；本次未进行活性预测。')
+            issues.append('活性预测的靶点或物种不受支持、存在冲突或不明确；本次未进行活性预测。')
         for step in diagnostic['failed_steps']:
             name = TOOL_LABELS.get(step.get('tool_name'), '计算步骤')
             state = _STATUS_LABELS.get(step.get('status'), '未完成')

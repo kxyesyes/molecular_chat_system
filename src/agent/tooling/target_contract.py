@@ -47,6 +47,8 @@ TargetQuery = str | RecordInput | list[str | RecordInput] | tuple[str | RecordIn
 
 class TargetSearchInput(_View):
     query: TargetQuery
+    include_function: bool = False
+    organism: Literal['Homo sapiens', 'Mus musculus'] | None = None
 
 
 class ReverseTargetInput(_View):
@@ -103,6 +105,7 @@ class StructureFields(SourceFields):
 
 
 class TargetRecord(TargetRecordInput, SourceFields):
+    function: str | None = None
     target_id: int | str | None = None
     target_identifier: str | None = None
     target_chembl_id: str | None = None
@@ -286,6 +289,9 @@ class TargetToolAdapter(LegacyPythonToolAdapter):
         wrapped = isinstance(input_data, Mapping) and "query" in input_data
         view = input_data if wrapped else {"query": input_data}
         self.spec.input_schema.model_validate(view)
+        if wrapped and self.spec.name == 'target_database_search' and (
+                input_data.get('include_function') is True or input_data.get('organism') is not None):
+            return {key: input_data[key] for key in ('query', 'include_function', 'organism') if key in input_data}
         return input_data["query"] if wrapped else input_data
 
     def _input_validation_error(self, exc: ValidationError) -> ToolResult:

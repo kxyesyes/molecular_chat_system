@@ -21,6 +21,32 @@ def context(query, *, rag=True, tools=True, **kwargs):
         metadata={'capabilities': {'rag': rag, 'scientific_tools': tools}}, **kwargs)
 
 
+def test_target_function_lookup_with_uniprot_identifier_is_covered():
+    query = '查询人 EGFR 的生物学功能和 UniProt 编号。'
+    req = compile_web_requirements(context(query), allowed_tools=WEB_TOOLS)
+    assert required_web_tools(req) == {'target_database_search'}
+
+
+def test_target_function_and_admet_require_both_tools():
+    from src.agent.scientific_session.web_requirements import workflow_steps
+    query = '查询人 EGFR 的生物学功能和 UniProt 编号，并预测 CCO 的 ADMET。'
+    req = compile_web_requirements(context(query), allowed_tools=WEB_TOOLS)
+    assert required_web_tools(req) == {'target_database_search', 'admet_predictor'}
+    assert all(step.required for step in workflow_steps(req))
+    assert {step.tool_name: step.input_data for step in workflow_steps(req)} == {
+        'target_database_search': 'EGFR', 'admet_predictor': 'CCO'}
+
+
+def test_target_admet_and_property_require_separate_subjects():
+    from src.agent.scientific_session.web_requirements import workflow_steps
+    query = '预测 CCO 的 ADMET，并查询人 EGFR 的生物学功能和 UniProt 编号，再计算 CCN 的 LogP。'
+    req = compile_web_requirements(context(query), allowed_tools=WEB_TOOLS)
+    assert required_web_tools(req) == {'target_database_search', 'admet_predictor', 'property_calculator'}
+    assert all(step.required for step in workflow_steps(req))
+    assert {step.tool_name: step.input_data for step in workflow_steps(req)} == {
+        'target_database_search': 'EGFR', 'admet_predictor': 'CCO', 'property_calculator': 'CCN'}
+
+
 @pytest.mark.parametrize('query', [
     '计算阿司匹林的分子性质', 'Calculate molecular properties of aspirin',
     '计算这个分子的分子量', '预测候选的 ADMET',
@@ -115,6 +141,20 @@ def test_explicit_property_and_generated_property_obligations_are_preserved():
             assert req.dependencies['properties'] == ('molecular_design',)
 
 
+@pytest.mark.parametrize('query,expected', [
+    ('请预测 CCO 的 ADMET，不需要说明模型局限。', {'admet_predictor'}),
+    ('请预测 CCO 的 ADMET 性质，不需要说明模型局限。', {'admet_predictor'}),
+    ('请预测 CCO 的 ADMET 属性，并计算分子量，不需要说明模型局限。', {'property_calculator', 'admet_predictor'}),
+    ('请计算 CCO 的分子量并预测 ADMET，不需要说明模型局限。', {'property_calculator', 'admet_predictor'}),
+    ('请评估 CCO 的类药性并预测 ADMET，不需要说明模型局限。', {'drug_likeness_assessment', 'admet_predictor'}),
+])
+def test_admet_request_with_excluded_explanation_executes_only_requested_tools(query, expected):
+    req = compile_web_requirements(context(query), allowed_tools=WEB_TOOLS)
+    assert required_web_tools(req) == expected
+    admet = next(step for step in req.steps if step.tool_name == 'admet_predictor')
+    assert admet.required is True and admet.continue_on_error is not True
+
+
 def test_confirmed_server_molecule_remains_valid_without_rewriting_question():
     query = '只计算刚才第二个分子的分子量和 logP，不要 ADMET 或活性'
     selected = ResolvedScientificMolecule('source', 'presentation', 'a' * 64,
@@ -156,6 +196,8 @@ def test_actual_pi_missing_molecule_stops_before_model_or_tool(tmp_path, rag, qu
     assert terminal['error']['code'] == 'invalid_input'
     assert terminal['error']['details'] == {'reason': 'molecular_input_required'}
     assert 'SMILES' in terminal['content'] and '提供' in terminal['content']
+    assert '完整请求' in terminal['content']
+    assert '一起重新提交' in terminal['content']
     assert '未调用模型或科学工具' in terminal['content']
     result = next(frame for frame in frames if frame['type'] == 'agent_result')
     assert result['error'] == terminal['error']

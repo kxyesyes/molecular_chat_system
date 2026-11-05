@@ -6,14 +6,16 @@ import re
 # new endpoint. Match complete clauses; never discard these words globally.
 _DISPLAY_ITEM_ZH = (
     r'(?:(?:所有|全部)\s*)?(?:原始(?:预测)?(?:结果|数据)|原始预测|'
-    r'一致性检查(?:结果)?|排除原因|预测分歧)'
+    r'一致性检查(?:结果)?|排除原因|预测分歧|单位|预测局限(?:性)?)'
 )
 _DISPLAY_ITEM_EN = (
     r'(?:(?:all|the)\s+)?(?:(?:raw|original)\s+(?:predictions?|results?|data)|'
     r'consistency\s+checks?(?:\s+results)?|exclusion\s+reasons|prediction\s+disagreements)'
 )
 _PRESENTATION_CLAUSE = re.compile(
-    r'(?:按可用结果给出比较|如果预测存在分歧请明确指出|'
+    r'(?:(?:并|并且|以及)?\s*(?:列出|展示|显示|给出)\s*各自(?:的)?(?:数值|结果)|'
+    r'按可用结果给出比较|如果预测存在分歧请明确指出|(?:只|仅)比较这一项|'
+    r'(?:请\s*)?(?:只|仅)列出这(?:些|[一二三四五六七八九十两\d]+(?:个|项))指标|'
     r'按(?:可用且通过检查的证据|活性证据|预测\s*pIC50\s*降序)排序|'
     rf'(?:请\s*)?(?:保留|展示|显示|列出|提供)\s*{_DISPLAY_ITEM_ZH}'
     rf'(?:\s*(?:以及|和|与|及|、)\s*{_DISPLAY_ITEM_ZH})*|'

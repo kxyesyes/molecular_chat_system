@@ -26,6 +26,71 @@ def _canonical(value):
     return Chem.MolToSmiles(molecule) if molecule is not None else None
 
 
+def generation_scope_matches(result, evidence):
+    """Confirm the detached property records cover exactly the generated set."""
+    if not isinstance(evidence, dict):
+        return False
+    sequence = result.get('tool_result_sequence', [])
+    generators = [item for item in sequence if _accepted(item, 'llm_molecular_generator')]
+    properties = [item for item in sequence if _accepted(item, 'property_calculator')]
+    if len(generators) != 1 or len(properties) != 1:
+        return False
+    generated = generators[0].get('data', {}).get('candidates')
+    rows = properties[0].get('data')
+    candidates = evidence.get('candidates')
+    if not isinstance(generated, list) or not 1 <= len(generated) <= 32 or not isinstance(rows, list) or not isinstance(candidates, list):
+        return False
+    identities = {}
+    for candidate in generated:
+        if not isinstance(candidate, dict):
+            return False
+        key, smiles = candidate.get('candidate_id'), _canonical(candidate.get('canonical_smiles'))
+        if not isinstance(key, str) or not _ID.fullmatch(key) or not smiles or key in identities or smiles in identities.values():
+            return False
+        identities[key] = smiles
+    if len(rows) != len(identities) or len(candidates) != len(identities):
+        return False
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        key = row.get('candidate_id')
+        if (key not in identities or key in seen or _canonical(row.get('smiles')) != identities[key]
+                or row.get('status', 'succeeded') != 'succeeded' or row.get('success', True) is not True
+                or row.get('error') is not None or row.get('error_code')):
+            return False
+        seen.add(key)
+    return {row.get('canonical_smiles') for row in candidates if isinstance(row, dict)} == set(identities.values())
+
+
+def property_constraint_report(query, rows):
+    """Evaluate explicit bounds only as precisely as the published descriptors allow."""
+    bounds, unknown = requested_property_bounds(query)
+    if not bounds and not unknown:
+        return None
+    labels = {'molecular_weight': '分子量', 'logp': 'logP', 'tpsa': 'TPSA',
+              'qed': 'QED', 'hba': 'HBA', 'hbd': 'HBD'}
+    lines = ['## 约束检查']
+    if bounds and rows:
+        lines.extend(['', '| SMILES | 约束 | 结果 |', '|---|---|---|'])
+    incomplete = bool(unknown) or not rows
+    for row in rows:
+        for check in check_property_bounds(bounds, row.get('properties'), rounded=True):
+            value = check['value']
+            uncertain = check['satisfied'] is None
+            incomplete |= uncertain
+            state = '未验证（舍入精度不足）' if value is not None and uncertain else (
+                '未验证（数值不可用）' if value is None else '满足' if check['satisfied'] else '不满足')
+            unit = '' if check['unit'] in ('dimensionless', 'count') else ' ' + check['unit']
+            lines.append(f"| `{row['smiles']}` | {labels[check['metric']]} {check['operator']} {check['threshold']}{unit} | {state} |")
+    if unknown:
+        names = '、'.join(labels.get(code.removesuffix('_bound'), code) for code in unknown)
+        lines.extend(['', f'部分约束无法识别或存在歧义，未验证：{names}。'])
+    if not rows:
+        lines.append('未取得可验证的性质结果，约束未验证。')
+    return '\n'.join(lines), incomplete
+
+
 def generation_constraint_report(result, query):
     bounds, unknown = requested_property_bounds(query)
     if not bounds and not unknown:
@@ -68,16 +133,20 @@ def generation_constraint_report(result, query):
                 valid = False
                 break
             by_id[row["candidate_id"]] = row["properties"]
-    lines = ["## 用户约束逐项检查", "", "| Candidate | Constraint | RDKit value | Result |", "|---|---|---|---|"]
-    for identity in expected:
-        for check in check_property_bounds(bounds, by_id.get(identity) if valid else None):
-            state = "未验证" if check["satisfied"] is None else "满足" if check["satisfied"] else "不满足"
+    labels = {'molecular_weight': '分子量', 'logp': 'logP', 'tpsa': 'TPSA',
+              'qed': 'QED', 'hba': 'HBA', 'hbd': 'HBD'}
+    lines = ["## 用户约束逐项检查", "", "| 候选 | 约束 | 计算值 | 结果 |", "|---|---|---|---|"]
+    for index, identity in enumerate(expected, 1):
+        for check in check_property_bounds(bounds, by_id.get(identity) if valid else None, rounded=True):
+            state = ("未验证（舍入精度不足）" if check["satisfied"] is None and check["value"] is not None
+                     else "未验证" if check["satisfied"] is None else "满足" if check["satisfied"] else "不满足")
             value = check["value"] if check["value"] is not None else "不可用"
-            lines.append(f"| {identity} | {check['metric']} {check['operator']} {check['threshold']} {check['unit']} | {value} | {state} |")
+            unit = '' if check['unit'] in ('dimensionless', 'count') else ' ' + check['unit']
+            lines.append(f"| 候选 {index} `{expected[identity]}` | {labels[check['metric']]} {check['operator']} {check['threshold']}{unit} | {value} | {state} |")
     if unknown:
         lines.append("未验证的约束语法：" + ", ".join(unknown))
     if valid:
-        lines.append(f"来源：{trace} / {item['quality']['evidence_id']}；独立 RDKit 描述符，不是实验验证。")
+        lines.append("数值为计算描述符。")
     else:
         lines.append("独立性质证据缺失或身份/来源检查未通过；未宣称约束已满足。")
     return "\n".join(lines)

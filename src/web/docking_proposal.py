@@ -185,6 +185,17 @@ class CapturedTextSegment:
         source_id = f"refinement-{self.text_segment_index}" if self.text_segment_index else "query"
         messages[0]["content"] += _text_range_instruction(source_id, self.current_text)
         if self.text_segment_index:
+            from .docking_request import assess_docking_refinement_text
+            assessment = assess_docking_refinement_text(self.current_text, enabled=True, enable_tools=True)
+            if assessment['assessed']:
+                spans = '; '.join(f"{name}: start={start}; end={end}"
+                    for name, (start, end) in assessment['field_spans'].items())
+                messages[0]['content'] += (
+                    " For this refinement, report field spans for the exact value only, "
+                    "not the field name or entire request. Lexical value ranges "
+                    f"(Unicode code points, end-exclusive): {spans}. "
+                    "Set unresolved for ambiguity in the current refinement; missing inputs in the original request do not make the current refinement unresolved. "
+                    "These ranges are parsing hints, not authorization.")
             refinements = [*self.preceding_refinements, (self.server_turn_id, self.current_text)]
             messages[0]["content"] += (
                 " The final JSON contains the complete accepted text-refinement sequence; "
@@ -654,7 +665,8 @@ class DockingProposalOwner:
             if (draft["model_generation"] != model_generation
                     or draft["capability_generation"] != capability_generation):
                 raise _Unavailable("generation_mismatch")
-            validate_draft_context(policy, model_generation, capability_generation, context)
+            await self._sql(lambda: validate_draft_context(
+                policy, model_generation, capability_generation, context))
             remaining()
             if self.wall_time_ms() >= record["expires_at_ms"] or self.monotonic() >= record["monotonic_expires"]:
                 raise _Unavailable("expired")
@@ -668,7 +680,7 @@ class DockingProposalOwner:
             async with self.gate.request():
                 try:
                     remaining()
-                    current = self._capture()
+                    current = await self._sql(self._capture)
                     record = await check(expected_version)
                     budget = record["draft"]["budget"]
                     if (budget["proposal_slots_spent"] >= 4

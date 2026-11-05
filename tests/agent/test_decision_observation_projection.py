@@ -76,7 +76,7 @@ def test_web_admet_projection_preserves_every_endpoint_in_a_lossless_table():
     projected = model_observation(result, {'profile': 'medchat-web-v1'})
     compact = projected['data'][0]['admet']
     table = compact['endpoint_table']
-    restored = {row[0]: dict(zip(table['columns'][1:], row[1:])) for row in table['rows']}
+    restored = _restore_table(table)
 
     assert table['columns'][0] == 'endpoint_id'
     assert restored == endpoints
@@ -90,8 +90,110 @@ def test_web_admet_projection_preserves_every_endpoint_in_a_lossless_table():
     assert model_observation(result, {})['data'] == before['data']
 
 
+def _restore_table(table):
+    restored = {}
+    for row in table['rows']:
+        fields = dict(zip(table['columns'][1:], row[1:]))
+        fields.update({key: values[fields[key]] for key, values in table.get('dictionaries', {}).items()})
+        restored[row[0]] = {**table.get('constant_fields', {}), **fields}
+    for endpoint, validity in table.get('validity_by_endpoint', {}).items():
+        restored[endpoint]['validity'] = validity
+    return restored
+
+
+def test_admet_projection_preserves_sparse_invalidity_without_losing_compaction():
+    endpoints = {f'endpoint_{i}': {'value': i / 100, 'unit': '-', 'task_type': 'regression',
+                 'category': 'Excretion', 'name': f'Endpoint {i}', 'source': 'admet_ai_model'}
+                 for i in range(49)}
+    endpoints['endpoint_3']['validity'] = 'out_of_range'
+    second = deepcopy(endpoints)
+    second['endpoint_7']['validity'] = 'out_of_range'
+    result = ToolResult.success_result('admet_predictor', data=[
+        {'smiles': name, 'admet': {'endpoints': source}} for name, source in
+        (('CCO', endpoints), ('CCN', second))])
+    before = deepcopy(result.to_legacy_dict())
+    projected = model_observation(result, {'profile': 'medchat-web-v1'})['data']
+    assert _restore_table(projected[0]['admet']['endpoint_table']) == endpoints
+    assert _restore_table(projected[1]['admet']['endpoint_table']) == second
+    assert len(json.dumps(projected)) < len(json.dumps(before['data'])) * .75
+    assert result.to_legacy_dict() == before
+
+
+def test_two_candidate_admet_model_projection_compacts_repeated_metadata_losslessly():
+    endpoints = {f'endpoint_{i}': {'value': i / 100, 'unit': '-', 'task_type': 'classification',
+                 'category': 'Toxicity' if i % 2 else 'Distribution', 'name': f'Endpoint {i}',
+                 'source': 'admet_ai_model' if i % 2 else 'rdkit_calculation'} for i in range(49)}
+    percentiles = {f'endpoint_{i}_drugbank_approved_percentile': float(i) for i in range(49)}
+    admet = {'endpoints': endpoints, 'units': {key: '-' for key in endpoints},
+             'reference_percentiles': percentiles}
+    result = ToolResult.success_result('admet_predictor', data=[
+        {'smiles': smiles, 'admet': deepcopy(admet)} for smiles in ('CCO', 'CCN')])
+    before = deepcopy(result.to_legacy_dict())
+    projected = model_observation(result, {'profile': 'medchat-web-v1'})['data']
+    for index, row in enumerate(projected):
+        compact = row['admet']
+        table = compact['endpoint_table']
+        if index == 0:
+            assert table['dictionaries']['category'] == ['Distribution', 'Toxicity']
+            restored = _restore_table(table)
+        else:
+            assert table['endpoint_metadata_from_row'] == 0
+            base = _restore_table(projected[0]['admet']['endpoint_table'])
+            restored = {endpoint_id: {**base[endpoint_id], 'value': value}
+                        for endpoint_id, value in zip(base, table['values'])}
+        assert restored == endpoints
+        if index == 0:
+            percentile_table = compact['reference_percentile_table']
+            assert {key + percentile_table['suffix']: value for key, value in percentile_table['rows']} == percentiles
+        else:
+            assert compact['reference_percentile_keys_from_row'] == 0
+            assert dict(zip(percentiles, compact['reference_percentile_values'])) == percentiles
+    assert len(json.dumps(projected)) < len(json.dumps(before['data'])) * 0.55
+    assert result.to_legacy_dict() == before
+
+
+def test_admet_shared_metadata_keeps_distinct_values_and_never_shares_different_schema():
+    endpoints = {f'endpoint_{i}': {'value': i / 100, 'unit': '-', 'task_type': 'classification',
+                 'category': 'Toxicity', 'name': f'Endpoint {i}', 'source': 'admet_ai_model'} for i in range(49)}
+    second = deepcopy(endpoints)
+    third = deepcopy(endpoints)
+    for item in second.values():
+        item['value'] += .01
+    third['endpoint_0']['unit'] = 'mg/L'
+    result = ToolResult.success_result('admet_predictor', data=[
+        {'smiles': name, 'admet': {'endpoints': source}} for name, source in
+        (('CCO', endpoints), ('CCN', second), ('CCC', third))])
+    original = deepcopy(result.to_legacy_dict())
+    rows = model_observation(result, {'profile': 'medchat-web-v1'})['data']
+    table = rows[1]['admet']['endpoint_table']
+    assert table['endpoint_metadata_from_row'] == 0
+    base = _restore_table(rows[0]['admet']['endpoint_table'])
+    restored = {key: {**base[key], 'value': value} for key, value in zip(base, table['values'])}
+    assert restored == second
+    assert 'endpoint_metadata_from_row' not in rows[2]['admet']['endpoint_table']
+    assert _restore_table(rows[2]['admet']['endpoint_table']) == third
+    assert result.to_legacy_dict() == original
+
+
 def test_admet_projection_keeps_nonuniform_endpoint_fields_and_distinct_units():
     admet = {'endpoints': {'a': {'value': 1, 'unit': 'mM'}, 'b': {'value': 2}},
              'units': {'a': 'unknown'}}
     result = ToolResult.success_result('admet_predictor', data=[{'admet': admet}])
     assert model_observation(result, {'profile': 'medchat-web-v1'})['data'] == result.data
+
+
+def test_activity_projection_deduplicates_only_identical_provenance_losslessly():
+    common = {'models': {'classification': {'model_id': 'fixture', 'metadata': 'x' * 1000}},
+              'scope': {'family': 'fixture'}}
+    data = [{'smiles': 'CCO', 'provenance': deepcopy(common), 'predicted_pIC50': 5.1},
+            {'smiles': 'CCN', 'provenance': deepcopy(common), 'predicted_pIC50': 5.2}]
+    result = ToolResult.success_result('activity_predictor', data=data,
+        quality={'model_provenance': [deepcopy(common), deepcopy(common)], 'evidence_id': 'e1'})
+    before = deepcopy(result.to_legacy_dict())
+    view = model_observation(result, {'profile': 'medchat-web-v1'})
+    assert view['data'][0]['provenance'] == common
+    assert view['data'][1]['provenance'] == {'data_row_provenance_ref': 0}
+    assert view['quality']['model_provenance'] == [{'data_row_provenance_ref': 0}] * 2
+    assert result.to_legacy_dict() == before
+    assert len(json.dumps(view['data']) + json.dumps(view['quality'])) < len(json.dumps(before['data']) + json.dumps(before['quality'])) / 2
+    assert model_observation(result, {})['data'] == before['data']

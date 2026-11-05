@@ -228,6 +228,8 @@ def test_full_web_comparison_coverage_rejects_unknown_metrics_directly(metric):
     "比较 CCO 和预测IC50 CCN 的性质和 BuChE 活性。",
     "比较 CCO 和分析量子轨道能量 CCN 的性质和 BuChE 活性。",
     "比较 CCO 和测定量子轨道能量 CCN 的性质和 BuChE 活性。",
+    "比较 CCO 和分析量子轨道能量（CCN）的性质和 BuChE 活性。",
+    "比较 CCO 和测定量子轨道能量（CCN）的性质和 BuChE 活性。",
     "比较 CCO 和 CCN预测量子轨道能量 的性质和 BuChE 活性。",
     "比较 CCO 和 CCN\u200b预测LogD 的性质和 BuChE 活性。",
 ])

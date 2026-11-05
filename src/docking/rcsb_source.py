@@ -598,7 +598,45 @@ def _sequences(cif, residues, annotations, components, target, pdb_id, model, bu
         _require(_field(entities[annotations[ident][0]], "type") == "non-polymer"
                  and components[ident[2]]["type"] == "non-polymer", "context_unsupported")
         residues[ident]["role"] = "deposited_ligand"
-    return list(proteins.values()), mappings, seq_by_entity, entities, limitations, explanation
+    # A site annotation can identify the deposited molecule around which a
+    # binding environment was described, without proving biological relevance.
+    # Only associate explicit identities with target-protein residues in the
+    # same asymmetric unit; the UI requires a separate scientific choice.
+    site_rows, generator_rows = cif.rows("struct_site"), cif.rows("struct_site_gen")
+    budget.reserve(1024 * (len(site_rows) + len(generator_rows)))
+    site_proteins = set()
+    for row in generator_rows:
+        if row.get("symmetry") != "1_555":
+            continue
+        ident = mappings.get((row.get("label_asym_id"), row.get("label_seq_id")))
+        if ident not in residues or residues[ident]["role"] != "protein":
+            continue
+        if (row.get("label_comp_id") != ident[2] or row.get("auth_comp_id") != ident[2] or row.get("auth_asym_id") != ident[1]
+                or row.get("auth_seq_id") != str(ident[3])
+                or _blank(row.get("pdbx_auth_ins_code", "?")) != ident[4]):
+            continue
+        protein = proteins.get(ident[:2])
+        if protein and (protein["uniprot_id"], protein["taxonomy_id"]) == target:
+            site_proteins.add((row.get("site_id"), ident[:2]))
+    site_evidence = []
+    site_counts = Counter(row.get("id") for row in site_rows)
+    for row in site_rows:
+        chain, comp, seq = row.get("pdbx_auth_asym_id"), row.get("pdbx_auth_comp_id"), row.get("pdbx_auth_seq_id")
+        site_id, code = row.get("id"), row.get("pdbx_evidence_code")
+        if (type(site_id) is not str or site_counts[site_id] != 1 or re.fullmatch(r"[A-Za-z0-9_.:+-]{1,128}", site_id) is None
+                or code not in {"Software", "Author"} or type(seq) is not str
+                or re.fullmatch(r"-?[0-9]{1,4}", seq) is None
+                or (site_id, (model, chain)) not in site_proteins):
+            continue
+        ident = (model, chain, comp, int(seq), _blank(row.get("pdbx_auth_ins_code", "?")))
+        if ident not in residues or residues[ident]["role"] != "unproven":
+            continue
+        entity = annotations[ident][0]
+        if _field(entities[entity], "type") != "non-polymer" or components[comp]["type"] != "non-polymer":
+            continue
+        residues[ident]["role"] = "site_candidate"
+        site_evidence.append({"site_id": site_id, "evidence_code": code, "residue": p2.identity_dict(ident)})
+    return list(proteins.values()), mappings, seq_by_entity, entities, limitations, explanation, site_evidence
 
 
 def _sequence_limitations(cif, residues, annotations, mappings, proteins, pdb_id, limitations, explanation):
@@ -1022,7 +1060,7 @@ def _compile(pdb_bytes, cif_bytes, component_files, pdb_id, target, *, budget=No
     latest = history[-1]["date"]
     components, component_evidence = _chemistry(cif, captured, latest, budget)
     residues, annotations, atoms = _inventory(cif, parsed, components, budget)
-    proteins, mappings, sequences, entities, limitations, sequence_evidence = _sequences(
+    proteins, mappings, sequences, entities, limitations, sequence_evidence, site_evidence = _sequences(
         cif, residues, annotations, components, target, pdb_id, parsed.model, budget)
     _sequence_limitations(cif, residues, annotations, mappings, proteins, pdb_id, limitations, sequence_evidence)
     chemical_evidence = []
@@ -1034,7 +1072,8 @@ def _compile(pdb_bytes, cif_bytes, component_files, pdb_id, target, *, budget=No
         "cif_sha256": hashlib.sha256(cif_bytes).hexdigest(), "revision_history": history,
         "latest_revision_date": latest, "revision_version": f'{history[-1]["major"]}.{history[-1]["minor"]}',
         "components": sorted(component_evidence, key=lambda row: row["id"]),
-        "sequence_context": sequence_evidence, "chemical_context": chemical_evidence}
+        "sequence_context": sequence_evidence, "site_context": site_evidence,
+        "chemical_context": chemical_evidence}
     resources = p2.check_projection_resources(evidence, budget=budget)
     budget.reserve(24 * resources.json_bytes + 128 * resources.nodes)
     proof = hashlib.sha256(json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()

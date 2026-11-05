@@ -35,3 +35,27 @@ def test_lookup_suitability_language_is_not_docking_execution():
 
     assert request is not None
     assert request.target == "PDE4A"
+
+
+@pytest.mark.parametrize('query', [
+    '查询人 EGFR 的生物学功能和 UniProt 编号，并预测 CCO 的 ADMET。',
+    '预测 CCO 的 ADMET，并查询人 EGFR 的生物学功能和 UniProt 编号。',
+])
+def test_target_function_and_admet_bind_separate_subjects(query):
+    request = parse(query)
+    assert request is not None
+    assert request.target == 'EGFR' and request.smiles == ('CCO',)
+
+
+def test_composite_binds_property_to_its_own_molecule():
+    query = '预测 CCO 的 ADMET，并查询人 EGFR 的生物学功能和 UniProt 编号，再计算 CCN 的 LogP。'
+    request = parse(query)
+    assert request is not None
+    assert request.target == 'EGFR' and request.smiles == ('CCO',)
+    assert request.property_smiles == 'CCN' and request.property_metric == 'LogP'
+
+
+def test_composite_does_not_drop_fourth_action():
+    query = ('预测 CCO 的 ADMET，并查询人 EGFR 的生物学功能和 UniProt 编号，'
+             '再计算 CCN 的 LogP，再预测 CCC 的活性。')
+    assert parse(query) is None

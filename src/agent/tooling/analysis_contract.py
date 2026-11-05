@@ -164,7 +164,8 @@ def _admet_ai(value):
             "task_type": _TEXT,
             "source": _IDENTIFIER,
         }, required=True)
-        _fields(endpoint, {"category": _TEXT, "name": _TEXT}, required=False)
+        _fields(endpoint, {"category": _TEXT, "name": _TEXT,
+                           "validity": TypeAdapter(Literal["out_of_range"])}, required=False)
     if value["risk_count"] > value["total_endpoints"]:
         raise ValueError("ADMET-AI risk count exceeds endpoint count")
 

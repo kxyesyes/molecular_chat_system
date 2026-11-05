@@ -21,6 +21,16 @@ REFERENCE_CLARIFICATION = "请重新选择一个已确认的候选集合及其�
 
 
 def scientific_intent(query):
+    from src.agent.planning.request_parsing import positive_intent_text, without_past_result_actions
+    from src.agent.contracts.concept_request import is_concept_explanation
+    from src.agent.target_structure_followup import is_resolution_docking_question
+    # Complete consultation grammars may require an explicit no-execution
+    # clause. Classify the original before removing prohibited operations.
+    if is_concept_explanation(query):
+        return False
+    query = without_past_result_actions(positive_intent_text(query))
+    if is_resolution_docking_question(query):
+        return False
     if re.search(r"什么是|是什么|是什么意思|解释|介绍|\b(?:explain|what\s+(?:is|are)|define)\b", query, re.I):
         return False
     # Generation can use a prior molecule. Resolve distinguishes source
@@ -33,7 +43,10 @@ def scientific_intent(query):
         "target_database_search", "rag_search", "molecular_design", "target_driven_design",
     }:
         return False
-    return (InputValidator().contains_calculation_request(query)
+    # Prediction-result nouns do not authorize another calculation. Keep the
+    # original words above for endpoint/workflow recognition.
+    action_text = re.sub(r'预测(?=\s*(?:值|数值|结果|分数))', '', query)
+    return (InputValidator().contains_calculation_request(action_text)
             or bool(re.search(r"对接|活性|性质|反向寻靶|体检|\b(?:dock(?:ing)?|admet|logp|qed)\b", query, re.I)))
 
 

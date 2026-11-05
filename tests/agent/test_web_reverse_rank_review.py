@@ -64,6 +64,9 @@ COUNT_REQUESTS = [
     ("don't show top five targets", 10),
     ('前五个候选靶点不要列出', 10),
     ('top five targets are not requested', 10),
+    ('请对分子 SMILES: CC(=O)Oc1ccccc1C(=O)O 进行反向寻靶，列出前 5 个候选及其支持证据。', 5),
+    ('反向寻靶 CCO，不要列出前 5 个候选及其支持证据。', 10),
+    ('反向寻靶 CCO，列出前 5 个候选分子。', 10),
 ]
 
 
@@ -72,7 +75,13 @@ def test_count_negation_governs_count_phrase_only(message, expected):
     assert ChatHandler._reverse_display_count(message) == expected
 
 
+def test_omitted_target_noun_does_not_bypass_explicit_no_display():
+    assert ChatHandler._reverse_display_restricted('反向寻靶 CCO，不要列出前 5 个候选及其支持证据。')
+
+
 REVIEW_COUNT_SCOPES = [
+    ('对 CCO 做反向寻靶，列出前 5 个候选及其支持证据。', 5),
+    ('对 CCO 做反向寻靶，不要列出前 5 个候选及其支持证据。', 10),
     ('Reverse target CCO; top five targets should not be shown', 10),
     ('Reverse target CCO; top five targets must not be displayed', 10),
     ('对 CCO 做反向寻靶，不要对接但列出前五个候选靶点', 5),

@@ -133,6 +133,48 @@ def test_report_uses_bound_workflow_when_persisted_skill_name_is_empty(tmp_path)
     assert all(row["state"] == "available" for row in report["property_rows"])
 
 
+@pytest.mark.parametrize('checks,reason', [
+    ([{'step_ref': 'rank', 'tool_name': 'candidate_ranker', 'passed': False,
+       'evidence_ids': ['e1'], 'reason_codes': ['required_ranking_evidence_missing']}], 'partial_source'),
+    ([{'step_ref': 'rank', 'tool_name': 'candidate_ranker', 'passed': True,
+       'evidence_ids': ['different'], 'reason_codes': []}], 'source_mismatch'),
+    ([], 'source_mismatch'),
+])
+def test_web_report_never_exposes_ranking_without_accepted_evidence(checks, reason):
+    from src.agent.presentation.evidence_report import _ranking
+    run = {'metadata': {'task_requirements': {'profile': 'medchat-web-v1'},
+                        'task_acceptance': {'profile': 'medchat-web-v1', 'checks': checks}}}
+    rank = {'source': {'tool_name': 'candidate_ranker', 'evidence_id': 'e1'},
+            'metadata': {'web_step_ref': 'rank'}}
+    result = _ranking({'rank': rank}, {}, [], run, set())
+    assert result['state'] == 'not_provided'
+    assert result['reason_code'] == reason
+    assert result['top_candidates'] == []
+
+
+def test_report_suppresses_real_rank_when_web_acceptance_rejects_it(tmp_path, monkeypatch):
+    from src.agent.presentation import evidence_report
+    store, execution, _ = execute_standard_plan(tmp_path)
+    before, _ = capture(store, execution)
+    assert next(f for f in before if f['type'] == 'scientific_report')['ranking']['top_candidates']
+    rank = next(item for item in execution['tool_result_sequence'] if item['tool_name'] == 'candidate_ranker')
+    original = evidence_report._ranking
+    def rejected_ranking(accepted, outputs, generators, run, displayed):
+        run = deepcopy(run)
+        run['metadata']['task_requirements'] = {'profile': 'medchat-web-v1', 'steps': []}
+        run['metadata']['task_acceptance'] = {'profile': 'medchat-web-v1', 'checks': [{
+            'step_ref': None, 'tool_name': 'candidate_ranker', 'passed': False,
+            'evidence_ids': [rank['quality']['evidence_id']],
+            'reason_codes': ['required_ranking_evidence_missing']}]}
+        return original(accepted, outputs, generators, run, displayed)
+    monkeypatch.setattr(evidence_report, '_ranking', rejected_ranking)
+    after, _ = capture(store, execution)
+    report = next(f for f in after if f['type'] == 'scientific_report')
+    assert report['ranking']['top_candidates'] == []
+    assert report['ranking']['reason_code'] == 'partial_source'
+    assert report['property_rows']
+
+
 def test_web_report_resolves_output_keys_from_persisted_plan():
     from src.agent.presentation.evidence_report import _property_input_key, _workflow_output_key
 
@@ -154,6 +196,51 @@ def test_web_report_resolves_output_keys_from_persisted_plan():
     assert _workflow_output_key(generator, run) == "molecules"
     assert _workflow_output_key(properties, run) == "properties"
     assert _property_input_key(properties, run) == "molecules"
+
+
+def test_web_ranking_authenticates_all_committed_dependencies():
+    from src.agent.evidence import EvidenceLedger
+    from src.agent.presentation.evidence_report import _web_ranking_dependencies
+
+    names = ['molecule_generation', 'properties', 'admet', 'activity']
+    tools = ['llm_molecular_generator', 'property_calculator', 'admet_predictor', 'activity_predictor']
+    outputs = ['molecules', 'properties', 'admet', 'activity']
+    steps = [dict(name=name, tool_name=tool, output_key=output, required=index < 2)
+             for index, (name, tool, output) in enumerate(zip(names, tools, outputs))]
+    steps.append(dict(name='candidate_ranking', tool_name='candidate_ranker', output_key='ranking'))
+    run = {'metadata': {'task_requirements': {'profile': 'medchat-web-v1',
+        'steps': steps, 'dependencies': {'candidate_ranking': names}}}}
+    sources = [dict(source={'tool_name': tool}, metadata={'web_step_ref': name},
+                    raw={'data': {'fixture': name}, 'quality': {'evidence_id': 'eid-' + name}})
+               for name, tool in zip(names, tools)]
+    roles = [dict(role='dependency', step_ref=name, evidence_id=source['raw']['quality']['evidence_id'],
+                  output_sha256=EvidenceLedger.output_digest(source['raw']['data']))
+             for name, source in zip(names, sources)]
+    rank = dict(source={'tool_name': 'candidate_ranker'}, metadata={'web_step_ref': 'candidate_ranking'},
+        raw={'quality': {'input_evidence_ids': [r['evidence_id'] for r in roles],
+                         'binding_proof': {'roles': roles}}})
+    accepted = {str(i): source for i, source in enumerate(sources)}
+    assert _web_ranking_dependencies(rank, accepted, run) == sources
+    optional_missing = deepcopy(rank)
+    optional_missing['raw']['quality']['binding_proof']['roles'] = roles[:2]
+    optional_missing['raw']['quality']['input_evidence_ids'] = [r['evidence_id'] for r in roles[:2]]
+    assert _web_ranking_dependencies(optional_missing, accepted, run) == sources[:2]
+    for change in ('hash', 'missing_source', 'reorder', 'missing_required', 'unplanned'):
+        altered, altered_accepted = deepcopy(rank), deepcopy(accepted)
+        proof = altered['raw']['quality']['binding_proof']['roles']
+        if change == 'hash':
+            proof[-1]['output_sha256'] = '0' * 64
+        elif change == 'missing_source':
+            altered_accepted.pop('3')
+        elif change == 'reorder':
+            proof[-1], proof[-2] = proof[-2], proof[-1]
+        elif change == 'unplanned':
+            proof[-1]['step_ref'] = 'unexpected_step'
+        else:
+            proof.pop(0)
+        altered['raw']['quality']['input_evidence_ids'] = [r['evidence_id'] for r in proof]
+        with pytest.raises(ValueError):
+            _web_ranking_dependencies(altered, altered_accepted, run)
 
 
 def test_report_derives_workflow_plan_from_bound_web_requirements(tmp_path):

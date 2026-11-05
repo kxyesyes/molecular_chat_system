@@ -59,6 +59,7 @@ _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _WORK_MS = 180000
 _CLAIM_KEY = "chat_docking_root"
 _PAGE_BYTES = 48 * 1024
+_INVENTORY_BYTES = 2 * 1024 * 1024
 _SECTIONS = frozenset({"protein_selection", "reference_residue", "hetero_choices",
     "conformer_choices", "residues", "conformer_constraints", "connections", "limitations"})
 
@@ -210,6 +211,7 @@ class _Root:
     draft: dict | None = None
     claim: _ClaimReceipt | None = None
     task: object = None
+    refresh_task: object = None
     durable: bool = False
     closed: bool = False
     cancel_requested: bool = False
@@ -700,16 +702,16 @@ class DockingRequestCoordinator:
     async def _run(self, root):
         try:
             async with self._gate.request():
-                root.current = self._capture(root)
+                root.current = await self._sql(self._capture, root=root)
                 receipt = await self._sql(self._claim_root, root=root)
                 if (type(receipt) is not _ClaimReceipt or receipt.root_id != root.root_id
                         or receipt.preparation_id != root.preparation_id):
                     raise _Unavailable("claim_unconfirmed")
                 root.durable = True
                 root.claim = receipt
-                self._capture(root)
+                await self._sql(self._capture, root=root)
                 await self._sql(self._check_root, root=root)
-                self._capture(root)
+                await self._sql(self._capture, root=root)
                 root.issuer = TextSegmentIssuer(root_id=root.root_id, owner_session_id=root.owner,
                     preparation_id=root.preparation_id, origin_turn_id=root.origin,
                     original_snapshot=root.snapshot, runtime_generation=root.current["policy"].runtime_generation)
@@ -728,17 +730,17 @@ class DockingRequestCoordinator:
                     current_context=lambda: self._context(root))
                 root.draft = self._validate_draft_record(root, draft_receipt, expected_version=1)
                 await self._sql(self._read_draft, root=root, expected_version=root.draft["version"])
-                self._capture(root)
+                await self._sql(self._capture, root=root)
             # Do NOT nest readers: a waiting model writer must be able to enter.
             result = await self._propose_segment(root, segment)
             async with self._gate.request():
                 await self._sql(self._check_root, root=root)
-                self._capture(root)
+                await self._sql(self._capture, root=root)
                 if not result.available:
                     raise _Unavailable("proposal_unavailable")
                 current_draft = await self._sql(self._read_waiting_draft, root=root,
                                                expected_version=result.reserved_version)
-                self._capture(root)  # The final draft SQL is inside the original work deadline too.
+                await self._sql(self._capture, root=root)  # Remains inside the original work deadline.
                 root.draft = current_draft
                 checked = validate_docking_text_proposal(root.snapshot.query, result.proposal,
                                                         enabled=self._enabled, enable_tools=True)
@@ -772,7 +774,8 @@ class DockingRequestCoordinator:
             gate=self._gate, capture_current=lambda: self._capture(root),
             wall_time_ms=self._wall, monotonic=self._mono)
         budget = root.draft["draft"]["budget"]
-        call_slice_ms = min(30000, self._remaining_ms(root), budget["limit_ms"] - budget["spent_ms"])
+        segment_limit = 90000 if segment.text_segment_index == 0 else 30000
+        call_slice_ms = min(segment_limit, self._remaining_ms(root), budget["limit_ms"] - budget["spent_ms"])
         if call_slice_ms <= 0:
             raise _Unavailable("budget_exhausted")
         return await owner.propose(root_id=root.root_id, preparation_id=root.preparation_id,
@@ -852,11 +855,11 @@ class DockingRequestCoordinator:
         try:
             async with self._gate.request():
                 await self._sql(self._read_refinement_context, root=root, require_source=False)
-                self._capture(root)
+                await self._sql(self._capture, root=root)
             result = await self._propose_segment(root, segment)
             async with self._gate.request():
                 await self._sql(self._read_refinement_context, root=root, require_source=False)
-                self._capture(root)
+                await self._sql(self._capture, root=root)
                 if not result.available or result.reserved_version != root.draft['version']:
                     raise _Unavailable('proposal_unavailable')
                 checked = validate_docking_refinement_proposal(segment.current_text, result.proposal,
@@ -888,7 +891,7 @@ class DockingRequestCoordinator:
         root = self._roots.get(root_id)
         return root if root is not None and root.owner == owner_session_id else None
 
-    async def status(self, *, root_id, owner_session_id):
+    async def status(self, *, root_id, owner_session_id, wait=True, wait_timeout=0.5):
         root = self._owned(root_id, owner_session_id)
         if root is None:
             return _view()
@@ -898,9 +901,24 @@ class DockingRequestCoordinator:
             await self._finish_closed(root)
             return _view(root)
         if root.task is not None and not root.task.done():
+            view = _view(root)
+            if not wait:
+                view.update(phase='BUSY', reason_code='context_validation_pending', input_ready=False)
+            return view
+        if not wait and root.task is not None and root.task is root.refresh_task:
+            root.refresh_task = None
             return _view(root)
         root.task = asyncio.create_task(self._refresh(root))
+        root.refresh_task = root.task
         self._gate.retain_task(root.task)
+        if not wait:
+            done, _ = await asyncio.wait({root.task}, timeout=wait_timeout)
+            if done:
+                root.refresh_task = None
+                return _view(root)
+            view = _view(root)
+            view.update(phase='BUSY', reason_code='context_validation_pending', input_ready=False)
+            return view
         if root.input_context is not None and root.input_context._execution is not None:
             return await self._wait_execution_root(root)
         return await self._wait_root(root)
@@ -915,17 +933,17 @@ class DockingRequestCoordinator:
             async with self._gate.request():
                 if root.phase == "READY":
                     await self._sql(root.input_context._check_ready_guarded)
-                    root.input_context._ready_current()
-                    self._capture(root)
+                    await self._sql(root.input_context._ready_current)
+                    await self._sql(self._capture, root=root)
                     return
                 await self._sql(self._check_root, root=root)
                 current_draft = await self._sql(self._read_waiting_draft, root=root,
                                                expected_version=root.draft["version"])
-                self._capture(root)
+                await self._sql(self._capture, root=root)
                 root.draft = current_draft
                 if root.source_reference is not None:
                     await self._sql(self._read_source_reference, root=root)
-                    self._capture(root)
+                    await self._sql(self._capture, root=root)
         except asyncio.CancelledError:
             self._stop(root, "cancelled")
             raise
@@ -983,19 +1001,26 @@ class DockingRequestCoordinator:
     async def _prepare_source(self, root):
         async with self._gate.request():
             reference = await self._sql(self._read_source_reference, root=root)
-            self._capture(root)
+            await self._sql(self._capture, root=root)
         root.source_reference = reference
         owner = chat_preparation.PreparationOwner()
         root.preparation_owners.append(owner)  # Before physical dispatch.
         result = await source_preparation.run_source_preparation(
             pdb_id=reference["pdb_id"], target=reference["target"],
             deadline=self._child_deadline(root), owner=owner)
+        if (owner.snapshot()["settled"] is True and type(result) is dict
+                and result.get("ok") is False and result.get("code") == "SOURCE_DNS_RESTRICTED"):
+            raise _Unavailable("source_dns_restricted")
+        if (owner.snapshot()["settled"] is True and type(result) is dict
+                and result.get("ok") is False and result.get("code") == "RCSB_SOURCE_INVALID"
+                and result.get("reason") == "context_unsupported"):
+            raise _Unavailable("source_context_unsupported")
         if (owner.snapshot()["settled"] is not True or type(result) is not dict
                 or result.get("ok") is not True):
             raise _Unavailable("source_preparation_unavailable")
         async with self._gate.request():
             await self._sql(self._read_source_reference, root=root)
-            self._capture(root)
+            await self._sql(self._capture, root=root)
         # Only the fixed canonical worker supplies these bytes/metadata. Neither
         # a model descriptor nor a caller hash can enter this path.
         source = result["source"]
@@ -1013,7 +1038,7 @@ class DockingRequestCoordinator:
             raise _Unavailable("source_inspection_unavailable")
         async with self._gate.request():
             await self._sql(self._read_source_reference, root=root)
-            self._capture(root)
+            await self._sql(self._capture, root=root)
             root.inspection = inspection
             counts = {section: len(inspection["limitations"] if section == "limitations"
                                    else inspection["choices"][section]) for section in _SECTIONS}
@@ -1052,6 +1077,26 @@ class DockingRequestCoordinator:
             offset=offset, next_offset=next_offset if next_offset < len(records) else None,
             items=items, input_ready=False, execution_authorized=False)))
 
+    async def source_inventory(self, *, root_id, owner_session_id, source_sha256):
+        """Return one bounded, owner-checked read-only structure snapshot."""
+        denied = dict(ok=False, reason_code="source_unavailable", input_ready=False, execution_authorized=False)
+        if type(source_sha256) is not str or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None:
+            return denied
+        view = await self.status(root_id=root_id, owner_session_id=owner_session_id)
+        root = self._owned(root_id, owner_session_id)
+        if (root is None or root.closed or root.inspection is None or "source_preview" not in view
+                or view["source_preview"]["source_sha256"] != source_sha256):
+            return denied
+        sections = {section: root.inspection["limitations"] if section == "limitations"
+                    else root.inspection["choices"][section] for section in _SECTIONS}
+        if sum(len(rows) for rows in sections.values()) > 4096:
+            return denied
+        try:
+            return json.loads(_small_json(dict(ok=True, source_sha256=source_sha256, sections=sections,
+                input_ready=False, execution_authorized=False), _INVENTORY_BYTES))
+        except (ValueError, TypeError, UnicodeError):
+            return denied
+
     async def select_source(self, *, root_id, owner_session_id, source_sha256, selection):
         """Explicit choices for this current preview; no C1 or execution grant.
 
@@ -1089,7 +1134,7 @@ class DockingRequestCoordinator:
     async def _check_source(self, root):
         async with self._gate.request():
             await self._sql(self._read_source_reference, root=root)
-            self._capture(root)
+            await self._sql(self._capture, root=root)
 
     async def _selected_child(self, root, name, inputs):
         owner = chat_preparation.PreparationOwner()
@@ -1124,7 +1169,7 @@ class DockingRequestCoordinator:
         # two-database read guard inside that TaskStore-first transaction.
         async with self._gate.request():
             await self._sql(self._read_refinement_context, root=root, require_source=require_source)
-            self._capture(root)
+            await self._sql(self._capture, root=root)
             slots = {key: dict(value) for key, value in root.accepted_slots.items()}
             for key, value in patch.items():
                 if slots[key]["state"] != "pending":
@@ -1144,7 +1189,7 @@ class DockingRequestCoordinator:
                 raise _Unavailable("draft_binding_mismatch")
             root.accepted_revision, root.accepted_slots, root.draft = revision, slots, confirmed
             await self._sql(self._read_refinement_context, root=root, require_source=require_source)
-            self._capture(root)
+            await self._sql(self._capture, root=root)
             root.missing = tuple(key for key in sorted(DRAFT_SLOT_NAMES) if slots[key]["state"] == "pending")
 
     async def _run_selection(self, root):
@@ -1315,8 +1360,8 @@ class DockingRequestCoordinator:
             root.ready_preview_json = _small_json(redacted)
             async with self._gate.request():
                 await self._sql(context._check_ready_guarded)
-                context._ready_current()
-                self._capture(root)
+                await self._sql(context._ready_current)
+                await self._sql(self._capture, root=root)
             root.phase, root.reason = "READY", "approval_required"
             return preview
         except asyncio.CancelledError:

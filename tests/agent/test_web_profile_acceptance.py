@@ -242,6 +242,7 @@ def test_ranking_missing_required_evidence_remains_incomplete():
 @pytest.mark.parametrize('constraint, passed, reason', [
     ('logP < -1', False, 'property_bounds_not_satisfied'),
     ('logP < 1', True, None),
+    ('logP <= -0.001', False, 'property_bounds_unverified'),
     ('logP = 1', False, 'property_bounds_unverified'),
 ])
 def test_generation_requested_bounds_use_real_property_evidence(make, constraint, passed, reason):
@@ -265,7 +266,7 @@ def test_generation_requested_bounds_use_real_property_evidence(make, constraint
     if constraint != 'logP = 1':
         check = bounds['candidates'][0]['checks'][0]
         assert check['value'] == properties.data[0]['properties']['logp']
-        assert check['satisfied'] is passed
+        assert check['satisfied'] is (None if reason == 'property_bounds_unverified' else passed)
         assert bounds['candidates'][0]['evidence_id'] == properties.quality['evidence_id']
     else:
         assert bounds['unverified_constraints'] == ['logp_bound']

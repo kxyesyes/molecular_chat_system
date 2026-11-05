@@ -104,13 +104,14 @@
 
   function displayCandidateCollections(element, payloads) {
     const report = evidenceReportLifecycle?.take(payloads[0]?.traceId);
+    const singleCandidate = payloads.reduce((count, payload) => count + payload.candidates.length, 0) === 1;
     if (report) {
       evidenceReportViews.set(element, report);
     }
     if (scientificReferences) {
-      void scientificReferences.present(payloads, payload => renderMoleculeCandidates(element, payload));
+      void scientificReferences.present(payloads, payload => renderMoleculeCandidates(element, payload, singleCandidate));
     } else {
-      payloads.forEach(payload => renderMoleculeCandidates(element, payload));
+      payloads.forEach(payload => renderMoleculeCandidates(element, payload, singleCandidate));
     }
     if (report) {
       try { window.HomeEvidenceReport.renderReport(element, report, payloads); } catch (_) {
@@ -163,7 +164,7 @@
     },
     request: async (path, body) => {
       const abort = new AbortController();
-      const deadline = setTimeout(() => abort.abort(), path === "/api/agent/docking/preparations" ? 32000 : 6000);
+      const deadline = setTimeout(() => abort.abort(), path === "/api/agent/docking/preparations" || path.endsWith("/source-inventory") ? 32000 : 6000);
       try {
         const response = await fetch(path, {method: "POST", credentials: "same-origin", cache: "no-store", signal: abort.signal,
           ...(body === undefined ? {} : {headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})});
@@ -398,6 +399,15 @@
       turn.result = {status: message.status, text, metadata: message.metadata || {},
         details: message.result_format === "summary_details_v1" && message.details_state === "available"
           ? message.details : null};
+      if (turn.taskPanel?.getAttribute("data-trace-id") === turn.traceId &&
+          agentTaskState.lastEventType === "task_completed") {
+        // A finished calculation can be followed by cancelled or incomplete
+        // interpretation; the final result owns the overall task status.
+        const progress = turn.taskPanel.querySelector(".agent-task-progress");
+        const heading = turn.taskPanel.querySelector(".agent-task-list")?.lastChild?.querySelector("strong");
+        if (progress) progress.textContent = decisionStatuses[message.status];
+        if (heading && message.status !== "completed") heading.textContent = "计算步骤完成";
+      }
       if (message.status === "waiting_for_input" && message.metadata?.waiting_for_input === true
           && /^[a-f0-9]{32}$/.test(message.metadata.continuation_id || "")) {
         // Cache the opaque pointer before complete can be lost. The active
@@ -470,7 +480,7 @@
     console.log("=== 初始化分子聊天系统 ===");
 
     // 获取DOM元素
-    elements.input = document.querySelector(".fill input");
+    elements.input = document.querySelector(".fill textarea");
     elements.sendBtn = document.querySelector(".fill .btn");
     elements.ragToggle = document.querySelector(
       ".tool .chose .item:nth-child(1) .icon"
@@ -2489,6 +2499,11 @@
   function handleAgentEvent(event) {
     const presentation = resolveAgentEventPresentation(event);
     const eventType = presentation.eventType;
+    if (decisionMode && eventType === "task_completed") {
+      // A workflow may finish before the model's explanation is delivered.
+      // The final result frame, not this intermediate event, owns overall status.
+      presentation.progressText = "计算完成";
+    }
     const message = window.HomeTaskStatus.message(event);
     if (eventType === "validation_warning" && !message) return;
     if (!agentTaskState.active && !(decisionMode && decisionTurn?.taskPanel)) {
@@ -2501,7 +2516,7 @@
     panel.setAttribute("data-trace-id", event.trace_id || "");
     const toolName = event.tool_name || event.tool || "";
     const rendered = window.HomeTaskPanel.appendEvent(panel, {
-      label: getAgentEventLabel(eventType, toolName, event.payload),
+      label: decisionMode && eventType === "task_completed" ? "计算步骤完成" : getAgentEventLabel(eventType, toolName, event.payload),
       message,
       itemClass: presentation.itemClass,
       progressText: presentation.progressText,
@@ -4029,7 +4044,7 @@
   }
 
   // 渲染后端已验证并规范化的候选分子。
-  function renderMoleculeCandidates(messageElement, payload) {
+  function renderMoleculeCandidates(messageElement, payload, singleCandidate = false) {
     if (!messageElement || !payload || payload.candidates.length === 0) return {mounted: false};
     const moleculesArray = payload.candidates.slice(0, 32);
     const moleculeCount = moleculesArray.length;
@@ -4272,6 +4287,7 @@
 
         // SMILES 折叠区域
         const smilesDetails = document.createElement("details");
+        smilesDetails.open = singleCandidate;
         smilesDetails.style.cssText = `margin-top: 4px;`;
         const smilesSummary = document.createElement("summary");
         smilesSummary.style.cssText =

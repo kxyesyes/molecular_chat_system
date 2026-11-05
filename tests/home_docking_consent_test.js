@@ -45,6 +45,9 @@ function success(patch = {}) { return view({sequence: 10, send_generation: 10, t
     score_kind: "vina_affinity", pose_count: 2, best_energy_kcal_mol: -7.2, energy_unit: "kcal/mol",
     pose: {artifact_id: "pose", size_bytes: 100, sha256: hash,
       download_path: `/api/agent/docking/tasks/${task}/artifacts/pose`}}, ...patch}); }
+const template = fs.readFileSync(path.join(__dirname, "../src/web/templates/index.html"), "utf8");
+assert(template.includes("/static/js/home/docking_consent.js?v=20261101-source-inventory-v1"),
+  "the changed docking feedback script needs its own cache version");
 const filename = path.join(__dirname, "../src/web/static/js/home/docking_consent.js");
 assert(fs.existsSync(filename), "D6 docking consent lifecycle module is absent");
 const source = fs.readFileSync(filename, "utf8");
@@ -70,6 +73,25 @@ function rig() {
     setNow: value => {now = value;}, respond: fn => {responder = fn;}};
 }
 async function run() {
+  {
+    const r = rig();
+    r.ui.handle(view(), r.socket);
+    await button(r.host, "取消本次请求").click();
+    assert(r.host.textContent.includes("等待后台清理确认"));
+    assert(r.timers.size > 0, "cancellation must keep checking even if the first watch has no reply");
+    r.ui.handle(view({sequence: 2, send_generation: 2, phase: "terminal", terminal: true,
+      view_status: "CANCELLED", reason_code: "cancelled", missing_fields: [],
+      cleanup_status: "pending", segment_complete: false}), r.socket);
+    assert(!r.host.textContent.includes("后台清理完成"));
+    assert(r.timers.size > 0, "cancellation cleanup must remain observable");
+    r.ui.handle(view({sequence: 3, send_generation: 3, phase: "terminal", terminal: true,
+      view_status: "CANCELLED", reason_code: "cancelled", missing_fields: []}), r.socket);
+    assert(r.host.textContent.includes("已取消"));
+    assert(r.host.textContent.includes("后台清理完成"));
+    assert(!r.host.textContent.includes("等待后台清理确认"));
+    r.ui.handle(success(), r.socket);
+    assert(!r.host.textContent.includes("-7.2"), "cancelled work must not display a late success");
+  }
   {
     const r = rig();
     r.ui.timeout(r.socket);
@@ -108,6 +130,24 @@ async function run() {
     assert.strictEqual(r.segments.length, 1);
     assert.strictEqual(r.requests.length, 0, "event alone must never prepare or approve");
     assert(button(r.host, "补充本次请求"));
+  }
+  {
+    const r = rig(); r.ui.handle(view(), r.socket);
+    all(r.host).find(node => node.tagName === "textarea").value = "exhaustiveness=8";
+    button(r.host, "补充本次请求").click();
+    assert(r.host.textContent.includes("正在核对补充信息"));
+    r.ui.handle(view({sequence: 2, send_generation: 2}), r.socket);
+    assert(!r.host.textContent.includes("正在核对补充信息"));
+    assert(r.host.textContent.includes("补充信息未能确认"));
+    assert(!r.ui.blocked());
+  }
+  {
+    const r = rig(); r.ui.handle(view(), r.socket);
+    all(r.host).find(node => node.tagName === "textarea").value = "exhaustiveness=8";
+    button(r.host, "补充本次请求").click();
+    r.ui.handle(view({revision: 1, sequence: 2, send_generation: 2}), r.socket);
+    assert(!r.host.textContent.includes("正在核对补充信息"));
+    assert(!r.host.textContent.includes("补充信息未能确认"));
   }
   {
     const r = rig();

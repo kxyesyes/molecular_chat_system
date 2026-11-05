@@ -56,6 +56,7 @@ assert.deepStrictEqual(JSON.parse(JSON.stringify(status.resolve({event: "unknown
 assert.strictEqual(status.label("activity_predictor"), "Agent 事件");
 assert.strictEqual(status.label("tool_started", "activity_predictor"), "调用 活性预测");
 assert.strictEqual(status.label('tool_started', 'candidate_ranker'), '调用 候选排序');
+assert.strictEqual(status.label('validation_warning'), '执行提醒');
 assert.strictEqual(status.className("task_partial"), "is-warning");
 assert.strictEqual(status.className("task_completed"), "is-complete");
 assert.strictEqual(status.className("tool_started"), "is-running");
@@ -63,6 +64,19 @@ assert.strictEqual(status.message({event:'tool_failed', tool:'admet_predictor', 
   '结果准备或校验失败，无法采用该结果。');
 assert.strictEqual(status.message({event:'task_failed', message:'Decision publication invalidated'}),
   '结果校验未通过，无法交付本次任务结果。');
+assert.strictEqual(status.message({event:'validation_warning', tool:'reverse_target_predictor',
+  message:'Tool result has validation warnings', payload:{warnings:[
+    'Optional step reverse (reverse_target_predictor) failed: 反向寻靶来源正在进行全量科学校验',
+    '反向寻靶来源正在进行全量科学校验',
+  ]}}), '反向寻靶：步骤未完成；具体原因见失败步骤。');
+const activityReason = '未找到与请求物种匹配的已登记活性模型；本次未生成预测值。';
+const activityWrapper = 'Optional step web-123 (activity_predictor) failed: 家族活性预测失败；模型预测不等同于实验结论。 ' + activityReason;
+assert.strictEqual(status.message({event:'validation_warning', tool:'activity_predictor',
+  message:'Tool result has validation warnings', payload:{warnings:[activityReason, activityWrapper]}}),
+  '活性预测：步骤未完成；具体原因见失败步骤。');
+assert.strictEqual(status.message({event:'validation_warning', tool:'activity_predictor',
+  message:'Tool result has validation warnings', payload:{warnings:[activityReason, activityWrapper, '另有适用域风险。']}}),
+  '另有适用域风险。');
 assert.strictEqual(status.message({event:'validation_warning', tool:'candidate_ranker',
   message:'Tool result has validation warnings', payload:{warnings:[
     'ADMET evidence was absent or unusable for 2 ranked candidate(s)',

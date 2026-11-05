@@ -84,6 +84,15 @@ def test_request_endpoint_mismatch_fails_without_loading_models(harness):
     assert not any(task == "load" for task, _ in calls)
 
 
+def test_mixed_species_scope_reports_specific_unavailable_reason(harness):
+    predictor, calls, _, _, _ = harness
+    row = predictor.predict('CCO', target='PDE5A',
+                            model_request={'target': 'PDE5A', 'species': 'human'})[0]
+    assert row['errors']['bundle'] == 'species_model_unavailable'
+    assert row['predicted_pIC50'] is None
+    assert not any(task == 'load' for task, _ in calls)
+
+
 def test_inactive_still_regresses_and_contradiction_not_clipped(harness, monkeypatch):
     predictor, calls, _, _, Stage = harness
     original = Stage.predict

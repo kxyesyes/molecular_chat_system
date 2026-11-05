@@ -56,6 +56,10 @@ class StructureDownloadError(RuntimeError):
     """Raised when a structure file cannot be prepared."""
 
 
+class RestrictedStructureDNS(StructureDownloadError):
+    """The trusted structure host resolved to a disallowed network address."""
+
+
 def _reject_source_pair_response(response, **kwargs):
     # Requests can consume redirect bodies to prepare Response.next even when
     # allow_redirects=False. A response hook runs BEFORE that preprocessing.
@@ -66,7 +70,7 @@ def _reject_source_pair_response(response, **kwargs):
     return response
 
 
-def fetch_rcsb_source_pair(pdb_id, *, deadline) -> dict:
+def fetch_rcsb_source_pair(pdb_id, *, deadline, pinned=False) -> dict:
     """Fetch an unauthenticated source candidate, without cache or filesystem I/O.
 
     ``deadline`` is an absolute monotonic time. Checks and socket timeouts are
@@ -95,7 +99,7 @@ def fetch_rcsb_source_pair(pdb_id, *, deadline) -> dict:
         candidate = {"pdb_id": pdb_id}
         aggregate = 0
         for extension in ("pdb", "cif"):
-            response = _request_structure(
+            response = (_request_pinned_structure if pinned else _request_structure)(
                 f"https://files.rcsb.org/download/{pdb_id}.{extension}",
                 {"files.rcsb.org"},
                 deadline=deadline,
@@ -153,9 +157,13 @@ def fetch_rcsb_source_pair(pdb_id, *, deadline) -> dict:
             remaining()
         remaining()  # Publication is all-or-nothing, after close and hashing.
         return candidate
+    except RestrictedStructureDNS:
+        restricted_dns = True
     except Exception:
-        pass
+        restricted_dns = False
     # Raise outside the handler: no raw exception retained as cause or context.
+    if restricted_dns:
+        raise RestrictedStructureDNS(failure)
     raise StructureDownloadError(failure)
 
 
@@ -168,7 +176,7 @@ def _reject_component_response(response, **kwargs):
     return response
 
 
-def fetch_rcsb_component_files(component_ids, *, deadline) -> dict[str, bytes]:
+def fetch_rcsb_component_files(component_ids, *, deadline, pinned=False) -> dict[str, bytes]:
     """Fetch bounded canonical CCD byte candidates, without persistence or retries.
 
     Accept only an exact tuple of exact strings: no caller-owned mutable list or
@@ -205,7 +213,7 @@ def fetch_rcsb_component_files(component_ids, *, deadline) -> dict[str, bytes]:
         candidate = {}
         aggregate = 0
         for component_id in component_ids:
-            response = _request_structure(
+            response = (_request_pinned_structure if pinned else _request_structure)(
                 f"https://files.rcsb.org/ligands/download/{component_id}.cif",
                 {"files.rcsb.org"},
                 deadline=deadline,
@@ -266,9 +274,13 @@ def fetch_rcsb_component_files(component_ids, *, deadline) -> dict[str, bytes]:
             candidate[component_id] = exact_bytes
         remaining()  # All-or-nothing publication, after every response is closed.
         return candidate
+    except RestrictedStructureDNS:
+        restricted_dns = True
     except Exception:
-        pass
+        restricted_dns = False
     # Outside the handler: no raw diagnostic retained as cause or context.
+    if restricted_dns:
+        raise RestrictedStructureDNS(failure)
     raise StructureDownloadError(failure)
 
 
@@ -665,7 +677,7 @@ def _resolve_structure_host(host: str, port: int = 443) -> tuple[str, ...]:
             or parsed.is_reserved
             or parsed.is_unspecified
         ):
-            raise StructureDownloadError("Structure download host resolves to a restricted network")
+            raise RestrictedStructureDNS("Structure download host resolves to a restricted network")
         addresses.add(address)
 
     if not addresses:
@@ -702,6 +714,20 @@ def _validate_structure_download_url(
     if resolve_host:
         _resolve_structure_host(host, port or 443)
     return url
+
+
+def _request_pinned_structure(url: str, allowed_hosts: set[str], *, deadline, **kwargs):
+    """Connect to one validated address without resolving the host a second time."""
+    from .pinned_transport import get_pinned
+
+    _validate_structure_download_url(url, allowed_hosts, resolve_host=False)
+    parsed = urlsplit(url)
+    addresses = _resolve_structure_host((parsed.hostname or '').lower().rstrip('.'), parsed.port or 443)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise StructureDownloadError('Structure download deadline exceeded')
+    kwargs['timeout'] = min(30, remaining)
+    return get_pinned(url, addresses[0], **kwargs)
 
 
 def _request_structure(url: str, allowed_hosts: set[str], *, deadline=None, **kwargs):

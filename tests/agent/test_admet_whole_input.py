@@ -68,6 +68,8 @@ def test_admet_receives_every_complete_input_not_just_known_ethanol(monkeypatch)
     "BBB invalid_suffix\nCCO", "BBB permeability invalid_suffix\nCCO",
     "BBB invalid_suffix\nPredict permeability for CCO",
     "SMILES: BBB permeability\nCCO",
+    "SMILES: CCO，CC(C)((",
+    "SMILES: CCO$bad，请继续",
     "Predict BBB permeability for CCO and CNS)INVALID",
     "Predict ADMET for CCO and BBBpermeability)INVALID",
     "Predict ADMET for CCO and CNSpenetration.CCN",

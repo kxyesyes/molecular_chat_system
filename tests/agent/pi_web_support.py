@@ -130,9 +130,11 @@ def run_web_turn(handler, query, history=None, session=None, **kwargs):
         if bound:
             handler.web_senders.append((history, session, sender))
     start = len(sender.websocket.messages)
+    result_format = kwargs.pop('result_format', None)
     payload = dict(message=query, enable_tools=True, enable_rag=False)
     payload.update(kwargs)
     turn = _Turn(payload)
+    turn.result_format = result_format
     handler.web_turns.append(turn)
 
     async def execute():

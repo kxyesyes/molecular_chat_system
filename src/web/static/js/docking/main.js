@@ -192,7 +192,7 @@ async function loadDockingDemo() {
         ? await loadSmilesPreview(ROFLUMILAST_DEMO_SMILES)
         : false;
     if (!previewLoaded) throw new Error("罗氟司特 3D 预览生成失败");
-    Utils.showToast("已载入 PDE4A apo（6FG5）和罗氟司特；请确认对接盒后再提交。", "success", 6000);
+    Utils.showToast("已载入曼氏血吸虫 PDE4A apo（6FG5）和罗氟司特；请确认对接盒后再提交。", "success", 6000);
   } catch (error) {
     Utils.showToast(`示例载入失败：${error.message || "未知错误"}`, "warning", 7000);
   } finally {

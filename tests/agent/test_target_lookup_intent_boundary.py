@@ -129,6 +129,51 @@ def test_explicitly_forbidden_docking_does_not_block_structure_lookup():
     assert [step.tool_name for step in req.steps] == ['target_database_search']
 
 
+def test_structure_lookup_for_future_docking_is_not_a_docking_action():
+    query = '请查找人 EGFR 的蛋白结构，用于后续分子对接，并列出 PDB 编号和分辨率。'
+    assert not explicit_docking_action(query)
+    req = compile_web_requirements(AgentContext(query, 'future-dock', session_id='lookup'),
+                                   allowed_tools=WEB_TOOLS)
+    assert [step.tool_name for step in req.steps] == ['target_database_search']
+
+
+def test_research_goal_followed_by_structure_lookup_does_not_run_docking():
+    query = ('我想针对人源 EGFR 做分子对接，请检索可用的实验蛋白结构，'
+             '列出 PDB 编号、分辨率和共结晶配体，并说明选择和准备受体时还需要核查什么。')
+    assert not explicit_docking_action(query)
+    req = compile_web_requirements(AgentContext(query, 'research-goal', session_id='lookup'),
+                                   allowed_tools=WEB_TOOLS)
+    assert [step.tool_name for step in req.steps] == ['target_database_search']
+    assert req.steps[0].input_data == 'EGFR'
+    assert explicit_docking_action(query + '然后对 CCO 运行分子对接。')
+
+
+def test_exact_structure_preparation_question_is_lookup_not_docking():
+    query = '请查询人源 EGFR 的 PDB 1M17 实验结构，列出共晶配体和分辨率，并说明用于对接前需要准备什么。'
+    assert not explicit_docking_action(query)
+    req = compile_web_requirements(AgentContext(query, 'preparation-question', session_id='lookup'),
+                                   allowed_tools=WEB_TOOLS)
+    assert [step.tool_name for step in req.steps] == ['target_database_search']
+    assert req.steps[0].input_data == query
+    assert explicit_docking_action(query + '请执行分子对接。')
+
+
+def test_structure_readiness_question_is_a_lookup_not_docking():
+    query = '请查询人源 EGFR 靶点，列出可用于分子对接的实验结构，并说明结构是否已准备好进行对接。'
+    assert not explicit_docking_action(query)
+    req = compile_web_requirements(AgentContext(query, 'readiness', session_id='lookup'), allowed_tools=WEB_TOOLS)
+    assert [step.tool_name for step in req.steps] == ['target_database_search']
+    assert explicit_docking_action(query + '然后用 CCO 进行对接。')
+
+
+def test_future_docking_purpose_does_not_hide_separate_execution():
+    query = '查找 EGFR 的蛋白结构，用于后续分子对接，然后对 CCO 执行分子对接。'
+    assert explicit_docking_action(query)
+    with pytest.raises(ValueError):
+        compile_web_requirements(AgentContext(query, 'future-and-dock', session_id='lookup'),
+                                 allowed_tools=WEB_TOOLS)
+
+
 def test_explicit_structure_then_ligand_execution_request_is_docking_action():
     query = (
         '使用 EGFR 的实验结构 1M17 与候选分子 '
@@ -136,3 +181,11 @@ def test_explicit_structure_then_ligand_execution_request_is_docking_action():
         '先确认结构和配体角色，若口袋不能由结构证据确认就先说明，不要猜坐标。'
     )
     assert explicit_docking_action(query)
+
+
+def test_lookup_accepts_consistent_species_qualified_chinese_target_alias():
+    from src.agent.contracts.target_request import unrecognized_lookup_qualifier
+    query = '请查询人丁酰胆碱酯酶 BCHE（UniProt P06276）的蛋白信息和实验结构。'
+    assert unrecognized_lookup_qualifier(query) is None
+    assert unrecognized_lookup_qualifier('请查询人丁酰胆碱酯酶 EGFR 的结构') is not None
+    assert unrecognized_lookup_qualifier('请查询突变体 BCHE 的结构') is not None

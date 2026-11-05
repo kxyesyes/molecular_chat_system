@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import re
 from typing import Any
 
 from src.agent.contracts import AgentContext
@@ -96,7 +97,10 @@ class TaskPlanner:
                     plan.metadata["message"] = "每次最多比较 5 个靶点，请缩小比较范围后重试。"
                     return plan
                 search_input = list(target_request.targets)
-            if has_pdb_constraint(lookup_query):
+            if has_pdb_constraint(lookup_query) or re.search(
+                r'(?<![A-Za-z0-9_-])UniProt(?:\s+(?:ID|accession))?\s*[:：=]?\s*(?=[A-Za-z0-9])',
+                lookup_query, re.I,
+            ):
                 # Preserve both the constraint and any qualification/conflict
                 # for deterministic tool validation, not only a target hint.
                 search_input = lookup_query
@@ -265,6 +269,25 @@ class TaskPlanner:
                 },
             )
         smiles = "\n".join(request.smiles)
+        if request.function_admet_only:
+            steps = [
+                WorkflowStep("target_search", "target_database_search", request.target,
+                             output_key="target", capability="target.structure.search",
+                             output_contract="TargetStructureSet@1"),
+                WorkflowStep("admet", "admet_predictor", smiles,
+                             output_key="admet", capability="molecule.admet",
+                             output_contract="AdmetAssessmentSet@1"),
+            ]
+            if request.property_smiles is not None:
+                steps.append(WorkflowStep("properties", "property_calculator", request.property_smiles,
+                    output_key="properties", capability="molecule.properties",
+                    output_contract="PropertyAssessmentSet@1"))
+            return WorkflowPlan(
+                workflow_name="target_structure_molecule_analysis",
+                steps=steps,
+                metadata={"input_type": "explicit_composite_request", "target": request.target,
+                          "smiles": list(request.smiles)},
+            )
         return WorkflowPlan(
             workflow_name="target_structure_molecule_analysis",
             steps=[

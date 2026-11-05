@@ -146,10 +146,17 @@ class TargetSearchService:
         has_ligand: Optional[bool] = None,
         *,
         pdb_id: Optional[str] = None,
+        include_function: bool = False,
     ) -> dict:
         query = (query or "").strip()
         if not query:
             return self._search_payload(query, [], status="not_found")
+
+        if include_function and pdb_id is None:
+            return self._search_authoritative(query, target_type=target_type,
+                source=source, has_experimental=has_experimental,
+                docking_recommended=docking_recommended, has_ligand=has_ligand,
+                include_function=True)
 
         if pdb_id is not None:
             try:
@@ -222,6 +229,8 @@ class TargetSearchService:
             docking_recommended=docking_recommended,
             has_ligand=has_ligand,
         )
+        filter_clause += ' AND lower(t.organism) = lower(?)'
+        filter_params.append(self._canonical_organism(self.organism))
         exact_where = """
             (
                 lower(t.gene_symbol) = lower(?)
@@ -313,9 +322,12 @@ class TargetSearchService:
         docking_recommended: Optional[bool],
         has_ligand: Optional[bool],
         pdb_id: Optional[str] = None,
+        include_function: bool = False,
     ) -> dict[str, Any]:
         target_key = self._target_cache_key(query)
         target_cached = self._read_target_cache(target_key)
+        if include_function and target_cached is not None and not target_cached.payload.get('function'):
+            target_cached = None
         if pdb_id is not None and target_cached is not None:
             cached = target_cached.payload
             if (self._canonical_organism(cached["organism"]) != self._canonical_organism(self.organism)
@@ -571,7 +583,7 @@ class TargetSearchService:
             pdb_id = normalize_pdb_id(pdb_id)
             identity = TargetSearchService._canonical_organism(organism).casefold()
             digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-            return f"structures:exact:{accession.strip().upper()}:{digest}:{pdb_id}"
+            return f"structures:exact:v2:{accession.strip().upper()}:{digest}:{pdb_id}"
         return f"structures:{accession.strip().upper()}"
 
     def _read_target_cache(self, cache_key: str) -> Optional[CachedEvidence]:
@@ -698,6 +710,8 @@ class TargetSearchService:
             "source_record_id": source_record_id,
             "source_url": f"https://www.uniprot.org/uniprotkb/{accession}/entry",
             "match_reason": self._optional_text(target.get("match_reason")) or "authoritative",
+            **({"function": target["function"].strip()} if isinstance(target.get("function"), str)
+               and target["function"].strip() else {}),
         }
 
     def _normalize_structure_evidence(
