@@ -244,6 +244,9 @@ def structure_followup(query, history, session_id, *, enable_tools=True):
             saved.pop('mechanism', None)
             saved.pop('binding_sites', None)
         saved['selected_structure_id'] = row['structure_id']
+        if not enable_tools:
+            return {'content': f"{row['structure_id']} 已有实验结构记录。当前工具未启用，未核验其激酶结构域覆盖范围。",
+                    'status': 'partial', 'evidence': saved}
         from src.agent.kinase_domain_evidence import kinase_domain_ranges
         comparison = kinase_domain_ranges(row['structure_id'], row.get('uniprot_id'))
         if comparison:
@@ -411,6 +414,10 @@ def structure_followup(query, history, session_id, *, enable_tools=True):
         if not ligands:
             return {'content': f"{row['structure_id']} 未返回配体 ID；这不代表不存在配体。",
                     'status': 'partial', 'evidence': deepcopy(evidence)}
+        if not enable_tools:
+            return {'content': f"{row['structure_id']} 的已检索配体 ID：{'、'.join(ligands)}。"
+                    '当前工具未启用，未进一步核实配体名称和抑制机制。',
+                    'status': 'partial', 'evidence': deepcopy(evidence)}
         from src.target_search.remote_clients import BoundedJsonClient, RcsbClient, ChemblClient, RemoteSourceError
         saved = deepcopy(evidence)
         for key in ('selected_structure_id', 'component', 'mechanism'):
@@ -535,6 +542,10 @@ def structure_followup(query, history, session_id, *, enable_tools=True):
         if len(rows) != 1:
             return {'content': '上一轮缺少可唯一核对的配体身份及结构标题，无法判断其抑制剂角色。',
                     'status': 'partial'}
+        if not enable_tools:
+            return {'content': f"上一轮 {rows[0]['structure_id']} 记录包含配体 ID {ligand}。"
+                    '当前工具未启用，未进一步核实配体身份和抑制机制。',
+                    'status': 'partial', 'evidence': deepcopy(evidence)}
         from src.target_search.remote_clients import BoundedJsonClient, RcsbClient, ChemblClient, RemoteSourceError
         saved = deepcopy(evidence)
         row = next(row for row in saved['structures'] if row['structure_id'] == rows[0]['structure_id'])

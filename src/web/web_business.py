@@ -2006,10 +2006,15 @@ class WebTurnProjection:
                 else:
                     with localcontext() as ctx:
                         ctx.prec = 6
-                        ratio = off / target
+                        ratio = (off / target).normalize()
                     display_ratio = format(ratio, 'f') if -4 <= ratio.adjusted() <= 6 else format(ratio, 'g')
+                    if target == off:
+                        affinity = '两者的结合亲和力相同'
+                    else:
+                        direction = '较强' if target < off else '较弱'
+                        affinity = f'{kd["target"]} 的结合亲和力{direction}，为 {kd["off"]} 的 {display_ratio} 倍'
                     answer = (f'按你提供的平衡结合实验数据，{kd["off"]} 的 Kd ÷ {kd["target"]} 的 Kd = {display_ratio} 倍。'
-                              f'若这些 Kd 是可比且可靠的平衡测量，{kd["target"]} 的结合亲和力对应较强 {display_ratio} 倍。'
+                              f'若这些 Kd 是可比且可靠的平衡测量，{affinity}。'
                               '同一缓冲体系并不能单独证明所有条件和数据质量可比；还需核对实验方法、重复和不确定度。')
             return {'final_answer': answer, 'summary_answer': answer,
                     'suppress_raw_answer': True, 'status': 'partial', 'warnings': []}

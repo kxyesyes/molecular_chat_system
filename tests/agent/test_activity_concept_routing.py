@@ -793,6 +793,26 @@ def test_clarified_measured_kd_is_not_sent_to_predictor(tmp_path):
         '均由同一缓冲体系下平衡结合实验测得。请据此回答刚才的问题。预测 CCO 的活性。')
 
 
+@pytest.mark.parametrize('other,ratio,conclusion', [
+    ('40 nM', '0.04', 'EGFR 的结合亲和力较弱'),
+    ('1000 nM', '1', '两者的结合亲和力相同'),
+    ('2 μM', '2', 'EGFR 的结合亲和力较强'),
+])
+def test_measured_kd_affinity_direction(other, ratio, conclusion):
+    from src.agent.contracts import AgentResult, RunOutcome
+    from src.web.web_business import WebTurnProjection
+
+    query = (f'化合物 B 的 Kd 是 EGFR 1 μM、HER2 {other}，'
+             '均由同一缓冲体系下平衡结合实验测得。请据此回答刚才的问题。')
+    prior = '这意味着它对 EGFR 的结合亲和力一定是 HER2 的 25 倍吗？'
+    context = AgentContext(query, 't', session_id='s', memory=[{'user': prior}])
+    result = AgentResult('t', True, '已收到测量值。', final_answer='已收到测量值。',
+                         outcome=RunOutcome.COMPLETED, metadata={'binding_profile': 'medchat-web-v1'})
+    view = WebTurnProjection(query, 's', []).capture(result, context=context)
+    assert f'HER2 的 Kd ÷ EGFR 的 Kd = {ratio} 倍' in view['final_answer']
+    assert conclusion in view['final_answer']
+
+
 def test_measured_kd_requires_matching_prior_question(tmp_path):
     handler, _, _ = handler_for(tmp_path, [])
     answer, _ = turn(handler, '化合物 B 的 Kd 是 EGFR 40 nM、HER2 1 μM，'
