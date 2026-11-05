@@ -90,12 +90,14 @@ def test_actual_web_scientific_default_and_durable_budget_are_pinned(actual_app)
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('history_cap', [0, 400, 4000])
-def test_outbound_budget_keeps_whole_question_and_atomic_recent_history(actual_app, history_cap):
+@pytest.mark.parametrize('history_cap,history_room,keep_old', [
+    (0, 500, False), (400, 500, False), (4000, 500, False), (4000, 3500, True),
+])
+def test_outbound_budget_keeps_whole_question_and_atomic_recent_history(actual_app, history_cap, history_room, keep_old):
     async def run():
         async with actual_app(ordinary_policy=None, respond=lambda payload: answer(payload)) as bundle:
             handler = bundle.app.chat_handler
-            handler.config = {'inference': {'external_input_max_chars':7000,
+            handler.config = {'inference': {'external_input_max_chars':24000,
                                             'history_input_max_chars':history_cap}}
             cookie = await cookie_for(bundle.app)
             async with ActualSocket(bundle.app, cookie) as socket:
@@ -103,16 +105,23 @@ def test_outbound_budget_keeps_whole_question_and_atomic_recent_history(actual_a
                 sender, = bundle.app.decision_runtime.sockets
                 old = {'user':'earlier-question', 'assistant':'earlier-answer-' + 'x' * 2500}
                 latest = {'user':'latest-question', 'assistant':'latest-answer-' + 'y' * 200}
-                sender.memory[:] = [old, latest]
                 query = '你好，这是当前完整问题。'
+                baseline = await socket.turn({'message':query, 'enable_rag':False, 'enable_tools':False})
+                assert baseline[-1]['status'] == 'completed'
+                # Measure the current mandatory protocol instead of coupling
+                # history behavior to the length of evolving domain guidance.
+                input_cap = sum(len(m.get('content') or '') for m in bundle.calls[-1]['messages']) + history_room
+                handler.config['inference']['external_input_max_chars'] = input_cap
+                bundle.calls.clear()
+                sender.memory[:] = [old, latest]
                 frames = await socket.turn({'message':query, 'enable_rag':False, 'enable_tools':False})
                 assert frames[-1]['status'] == 'completed'
                 payload, = bundle.calls
                 messages = payload['messages']
                 assert messages[-1] == {'role':'user', 'content':query}
-                assert sum(len(message.get('content') or '') for message in messages) <= 7000
+                assert sum(len(message.get('content') or '') for message in messages) <= input_cap
                 plain = json.dumps(messages, ensure_ascii=False)
-                if history_cap == 4000:
+                if keep_old:
                     assert old['assistant'] in plain
                     assert plain.index(old['user']) < plain.index(latest['user'])
                 else:
@@ -155,17 +164,25 @@ def test_budget_applies_to_schema_correction_with_history_omitted(actual_app, wi
             return chat_decision('repaired')
         async with actual_app(ordinary_policy=None, wire=wire, respond=answer) as bundle:
             bundle.app.chat_handler.config = {'inference': {
-                'external_input_max_chars':7000, 'history_input_max_chars':0}}
+                'external_input_max_chars':24000, 'history_input_max_chars':0}}
             async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
                 await socket.ready()
                 sender, = bundle.app.decision_runtime.sockets
                 pair = {'user':'earlier-question', 'assistant':'earlier-answer'}
+                baseline = await socket.turn({'message':'你好', 'enable_tools':False, 'enable_rag':False})
+                assert baseline[-1]['status'] == 'completed'
+                assert len(bundle.calls) == 2
+                input_cap = max(sum(len(m.get('content') or '') for m in p['messages'])
+                                for p in bundle.calls) + 200
+                bundle.app.chat_handler.config['inference']['external_input_max_chars'] = input_cap
+                bundle.calls.clear()
+                sender.memory.clear()
                 sender.memory.append(pair)
                 frames = await socket.turn({'message':'你好', 'enable_tools':False, 'enable_rag':False})
                 assert frames[-1]['status'] == 'completed'
                 assert len(bundle.calls) == 2
                 for payload in bundle.calls:
-                    assert sum(len(message.get('content') or '') for message in payload['messages']) <= 7000
+                    assert sum(len(message.get('content') or '') for message in payload['messages']) <= input_cap
                     assert pair['user'] not in json.dumps(payload)
                     assert payload['messages'][-1] == {'role':'user', 'content':'你好'}
                 assert sender.memory[0] == pair

@@ -275,6 +275,36 @@ def test_source_failure_is_not_model_retry_or_scientific_success(tmp_path, targe
     asyncio.run(run())
 
 
+def test_restricted_dns_exposes_specific_preparation_failure(tmp_path, target_case, monkeypatch):
+    rig, pointer = source_rig(tmp_path, target_case)
+    async def unavailable(**kwargs):
+        return {'ok': False, 'code': 'SOURCE_DNS_RESTRICTED'}
+    monkeypatch.setattr(source_preparation, 'run_source_preparation', unavailable)
+    async def run():
+        async with rig.client() as client:
+            coordinator = rig.coordinator(client)
+            view = await rig.begin(coordinator, structure_context=pointer)
+            assert view['phase'] == 'UNAVAILABLE'
+            assert view['reason_code'] == 'source_dns_restricted'
+            assert_not_ready(view)
+    asyncio.run(run())
+
+
+def test_unsupported_structure_context_is_not_misreported_as_download_failure(tmp_path, target_case, monkeypatch):
+    rig, pointer = source_rig(tmp_path, target_case)
+    async def unavailable(**kwargs):
+        return {'ok': False, 'code': 'RCSB_SOURCE_INVALID', 'reason': 'context_unsupported'}
+    monkeypatch.setattr(source_preparation, 'run_source_preparation', unavailable)
+    async def run():
+        async with rig.client() as client:
+            coordinator = rig.coordinator(client)
+            view = await rig.begin(coordinator, structure_context=pointer)
+            assert view['phase'] == 'UNAVAILABLE'
+            assert view['reason_code'] == 'source_context_unsupported'
+            assert_not_ready(view)
+    asyncio.run(run())
+
+
 def test_failed_source_retains_actual_cleanup_until_physical_close_settles(
         tmp_path, target_case, monkeypatch):
     from src.docking import chat_preparation as lifecycle
@@ -391,7 +421,7 @@ def test_duplicate_begin_cannot_republish_stale_source_preview(tmp_path, target_
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("phase", ["acquisition", "publication", "refresh", "page"])
+@pytest.mark.parametrize("phase", ["acquisition", "publication", "refresh", "page", "inventory"])
 def test_draft_revocation_during_source_read_cannot_dispatch_or_publish(
         tmp_path, target_case, monkeypatch, phase):
     rig, pointer = source_rig(tmp_path, target_case)
@@ -421,13 +451,17 @@ def test_draft_revocation_during_source_read_cannot_dispatch_or_publish(
             if phase in {"acquisition", "publication"}:
                 monkeypatch.setattr(OwnedDockingStructureEvidence, "resolve", revoked)
             view = await rig.begin(coordinator, structure_context=pointer)
-            if phase in {"refresh", "page"}:
+            if phase in {"refresh", "page", "inventory"}:
                 assert view["reason_code"] == "scientific_selection_required"
                 monkeypatch.setattr(OwnedDockingStructureEvidence, "resolve", revoked)
                 if phase == "page":
                     page = await coordinator.source_page(root_id="root-1", owner_session_id="owner-session",
                         source_sha256=view["source_preview"]["source_sha256"], section="residues")
                     assert page["ok"] is False
+                if phase == "inventory":
+                    snapshot = await coordinator.source_inventory(root_id="root-1", owner_session_id="owner-session",
+                        source_sha256=view["source_preview"]["source_sha256"])
+                    assert snapshot["ok"] is False
                 view = await coordinator.status(root_id="root-1", owner_session_id="owner-session")
             assert attempted
             if phase == "acquisition":

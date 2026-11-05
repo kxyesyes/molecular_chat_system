@@ -29,6 +29,8 @@ _AGENT_FAILURE_CONTENT_MAX_CHARS = 1024
 _AGENT_FAILURE_WARNING_MAX_CHARS = 256
 _AGENT_FAILURE_WARNING_LIMIT = 20
 _DECISION_FAILURE_MESSAGES = {
+    "answer_length_mismatch": "模型未能按要求的句数完成回答，请重试。",
+    "unsupported_split_claim": "现有信息不足以断定训练与测试样本的重叠或新骨架的覆盖情况，本次解释未通过核对。",
     "rag_disabled": (
         "本次请求需要知识库检索，请先开启页面上的“RAG检索”开关后重试。当前请求未执行检索。"
     ),

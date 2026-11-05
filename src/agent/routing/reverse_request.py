@@ -37,10 +37,13 @@ def reverse_rank_routing_query(message):
 
 
 def reverse_molecular_input_query(message):
-    """Recognize a Chinese display-clause boundary, not a molecular suffix.
+    """Recognize reverse-action and display boundaries, not molecular suffixes.
 
     The complete structure before this boundary still passes the strict
     parser. No text is discarded and no arbitrary comma is a delimiter.
     """
+    message = re.sub(r'(SMILES\s*[:：=][ \t]*[^\s\u4e00-\u9fff，。；！？]+)[ \t]+'
+                     r'(?=(?:做|进行|运行)\s*(?:反向寻靶|反向靶点预测|反向预测靶点)'
+                     r'(?=[，,。;；!?！？\s]|$))', r'\1;', message, flags=re.I)
     return re.sub(r'，(?=(?:列出|展示|显示)\s*(?:排名第[一1]|第[一1]名)的'
                   r'(?:候选)?靶点(?:[，,;；。]|$))', ';', message)

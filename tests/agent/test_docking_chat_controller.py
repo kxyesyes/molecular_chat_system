@@ -83,6 +83,42 @@ def test_original_chat_creates_one_owned_root_with_exact_source_and_no_execution
     asyncio.run(run())
 
 
+def test_initial_view_is_delivered_while_context_check_is_slow(tmp_path):
+    import threading
+    rig = Rig(tmp_path)
+    async def run():
+        runtime, sender = runtime_sender(socket_for())
+        entered, release = threading.Event(), threading.Event()
+        async with rig.client() as client:
+            coordinator = rig.coordinator(client)
+            original = coordinator._capture_current
+            first = True
+            def slow_capture():
+                nonlocal first
+                if first:
+                    first = False
+                    entered.set()
+                    release.wait(2)
+                return original()
+            coordinator._capture_current = slow_capture
+            c = controller(runtime, coordinator, enabled=True)
+            watchdog = threading.Timer(1, release.set)
+            watchdog.start()
+            try:
+                await c.handle(sender, dict(type='chat', message=QUERY, enable_tools=True))
+                assert await asyncio.to_thread(entered.wait, .5)
+                await asyncio.sleep(.05)
+                assert not release.is_set(), 'context check blocked the event loop'
+                assert any(frame.get('type') == 'docking_event' for frame in frames(sender.websocket))
+            finally:
+                release.set()
+                watchdog.cancel()
+                await settle(runtime)
+                await c.disconnect(sender)
+                await settle(runtime)
+    asyncio.run(run())
+
+
 def test_refinement_uses_same_original_root_and_issuer(tmp_path):
     rig = Rig(tmp_path)
     async def run():

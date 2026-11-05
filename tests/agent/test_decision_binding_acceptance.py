@@ -51,6 +51,21 @@ def target_tool(status='resolved'):
     return tool
 
 
+def test_target_function_request_binds_flag_from_original_user_query(build):
+    class FunctionService(Service):
+        def search_targets(self, query, **kwargs):
+            self.function_options = kwargs
+            return super().search_targets(query)
+    tool = TargetDatabaseTool()
+    tool._service = FunctionService('resolved')
+    query = '请查询人 EGFR 靶点，给出 UniProt 编号和功能信息。'
+    case = build(query, tools=[tool], requirements=requirements(
+        target_result=dict(input='user', query='EGFR', require_resolved=True)))
+    result = execute(case, decision('target_database_search'))
+    assert result.success
+    assert tool._service.function_options == {'include_function': True}
+
+
 def admet_tool(*, empty=False, smiles='CCO'):
     # Synthetic sparse adme_py fixture; no backend/model initialization.
     value = dict(prediction_method='adme_py', backend_version='synthetic-fixture')
@@ -501,6 +516,15 @@ def test_single_model_reuses_complete_endpoint_target_contract_without_assets(bu
         assert 'activity_target_mismatch' in report['reason_codes']
     elif mode != 'complete':
         assert 'insufficient_target_evidence' in report['reason_codes']
+
+
+def test_activity_acceptance_rejects_species_not_bound_to_model_request():
+    from src.agent.scientific_session.decision_binding_acceptance import _activity_reasons
+    result = ToolResult('activity_predictor', True, '', data=[family_row()],
+                        status=ObservationStatus.SUCCEEDED)
+    record = {'input_data': {'query': {'target': 'PDE5A', 'smiles': ['CCO'],
+                                     'model_request': {'species': 'human'}}}}
+    assert 'activity_species_mismatch' in _activity_reasons(result, record, None)
 
 
 @pytest.mark.parametrize('name', sorted(B1_TOOLS))

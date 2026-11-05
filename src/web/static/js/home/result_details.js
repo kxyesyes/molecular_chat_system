@@ -40,7 +40,7 @@
     target: "靶点", target_name: "靶点名称", pic50: "pIC50", pIC50: "pIC50", score: "评分",
     binding_energy: "结合能", model_version: "模型版本", source: "来源", message: "信息",
     code: "代码", trace_id: "运行标识", view_id: "快照标识", revision: "版本", byte_length: "字节数",
-    format: "格式", endpoint: "预测端点", exclusion_reason: "排除原因", disagreement: "预测分歧"});
+    format: "格式", endpoint: "预测端点", task_type: "类型", exclusion_reason: "排除原因", disagreement: "预测分歧"});
   const MESSAGES = Object.freeze({network: "网络异常，未能加载明细。", not_found: "明细不存在或已不可用。",
     auth: "会话验证失败，请重新登录后重试。",
     invalid: "明细格式无效，无法显示。", too_large: "明细过大，无法显示。", aborted: "明细加载已取消。"});
@@ -380,6 +380,26 @@
   function renderData(state, data) {
     state.body.replaceChildren();
     const p = data.payload;
+    for (const step of p.tool_result_sequence) {
+      if (step.tool_name !== "admet_predictor" || step.status !== "succeeded" || step.success !== true
+          || step.error !== null || !record(step.quality) || step.quality.validated !== true
+          || step.quality.scientific_usable === false || !Array.isArray(step.data)) continue;
+      for (const molecule of step.data) {
+        if (!record(molecule) || molecule.status !== "succeeded" || typeof molecule.smiles !== "string"
+            || !record(molecule.admet) || !record(molecule.admet.endpoints)) continue;
+        const endpoints = Object.entries(molecule.admet.endpoints).filter(([, endpoint]) =>
+          record(endpoint) && (typeof endpoint.value === "number" || numericText(endpoint.value) !== undefined)
+          && typeof endpoint.unit === "string" && ["classification", "regression"].includes(endpoint.task_type)
+          && ["admet_ai_model", "rdkit_calculation"].includes(endpoint.source));
+        if (!endpoints.length) continue;
+        const rows = endpoints.map(([name, endpoint]) => ({'端点': name, value: endpoint.value,
+          unit: endpoint.unit, task_type: endpoint.task_type === "classification" ? "分类" : "回归",
+          source: endpoint.validity === "out_of_range" ? "原始模型输出：超出物理范围，预测不可用"
+            : endpoint.source === "admet_ai_model" ? "模型预测" : "结构计算"}));
+        disclosure(state.body, `ADMET 端点：${molecule.smiles}（${rows.length}）`, state,
+          body => collection(body, rows, state, "endpoints"));
+      }
+    }
     collection(state.body, {status: p.status, tool_result_sequence: p.tool_result_sequence,
       error: p.error, warnings: p.warnings, display_redacted: p.display_redacted}, state);
     disclosure(state.body, "技术标识", state, body => collection(body, {trace_id: p.trace_id, format: p.format,

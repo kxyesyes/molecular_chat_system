@@ -221,7 +221,7 @@ def test_vina_candidate_recovery_rejects_missing_smiles_index_mapping(tmp_path: 
         MolecularDockingService.recover_vina_candidate_pose(str(output), pose_index=1)
 
 
-def test_failed_scientific_quality_survives_job_cleanup(tmp_path: Path):
+def test_failed_scientific_quality_survives_job_cleanup(tmp_path: Path, caplog):
     from src.docking.molecular_docking_service import MolecularDockingService
 
     job_dir = tmp_path / "docking-job"
@@ -229,6 +229,7 @@ def test_failed_scientific_quality_survives_job_cleanup(tmp_path: Path):
     (job_dir / "run_manifest.json").write_text("{}", encoding="utf-8")
     quality = {
         "status": "failed",
+        "failures": ["heavy_atom_count_mismatch", "private-input-marker"],
         "redocking_rmsd": {
             "status": "failed",
             "reason_code": "rmsd_exceeds_threshold",
@@ -244,6 +245,8 @@ def test_failed_scientific_quality_survives_job_cleanup(tmp_path: Path):
 
     assert response["scientific_quality"] == quality
     assert not job_dir.exists()
+    assert "heavy_atom_count_mismatch" in caplog.text
+    assert "private-input-marker" not in caplog.text
 
 
 @pytest.mark.parametrize("failure", [None, "copy", "manifest", "missing", "changed"])

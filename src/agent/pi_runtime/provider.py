@@ -139,6 +139,17 @@ def _message(message, *, trusted_system=False):
 
 
 def _safe_feedback(text):
+    from src.agent.contracts.response_length import THREE_SENTENCE_FEEDBACK
+    from src.agent.contracts.evaluation_claims import SPLIT_SCOPE_FEEDBACK, TIED_SCORE_FEEDBACK
+    if text in (THREE_SENTENCE_FEEDBACK, SPLIT_SCOPE_FEEDBACK, TIED_SCORE_FEEDBACK):
+        return text
+    for reason, count in (('ambiguous_decision_response', 2), ('invalid_decision_json', 1)):
+        fixed = schema_correction(SimpleNamespace(error=SimpleNamespace(
+            code=AgentErrorCode.INVALID_OUTPUT, details={'reason': reason}),
+            metadata={'mode': 'native', 'native_response_shape': {'call_count': count,
+                'content_present': False, 'function_name_valid': True, 'call_id_valid': True}}))
+        if text == fixed:
+            return text
     def reconstruct(issues):
         return schema_correction(SimpleNamespace(error=SimpleNamespace(
             code=AgentErrorCode.INVALID_OUTPUT, details={
@@ -172,6 +183,20 @@ def _proposal(call):
     return decision
 
 
+def _supersede_acceptance(observation):
+    """Replace one validated top-level acceptance value without rewriting science tokens."""
+    decoder = json.JSONDecoder()
+    position = 1
+    while position < len(observation) and observation[position] != '}':
+        key, end = decoder.raw_decode(observation, position)
+        value_start = end + 1  # compact object: colon immediately follows key
+        _, value_end = decoder.raw_decode(observation, value_start)
+        if key == 'task_acceptance':
+            return observation[:value_start] + '{"superseded_by_latest":true}' + observation[value_end:]
+        position = value_end + (observation[value_end:value_end + 1] == ',')
+    return observation
+
+
 def project_messages(pi_messages, *, mode, system_message=None, include_feedback=False,
                      compact_observations=False):
     """Project a trusted Pi transcript without mutation or lossy science rewrites.
@@ -198,6 +223,7 @@ def project_messages(pi_messages, *, mode, system_message=None, include_feedback
         raise DecisionProtocolError('invalid_pi_messages')
     _bounded(pi_messages, max_bytes=512 * 1024)
     output = []
+    observation_indices = []
     if system_message is not None:
         _bounded(system_message)
         if (type(system_message) is not dict or set(system_message) != {'role', 'content'}
@@ -213,6 +239,7 @@ def project_messages(pi_messages, *, mode, system_message=None, include_feedback
         message = pi_messages[index]
         role = _message(message, trusted_system=system_message is not None)
         if role == 'system':
+            feedback.clear()
             if non_system and system_message is None:
                 raise DecisionProtocolError('invalid_pi_system_position')
             content = _text(message['content'])
@@ -228,6 +255,7 @@ def project_messages(pi_messages, *, mode, system_message=None, include_feedback
         has_call = (role == 'assistant' and type(content) is list
                     and any(type(block) is dict and block.get('type') == 'toolCall' for block in content))
         if not has_call:
+            feedback.clear()
             output.append({'role': role, 'content': _text(content)})
             index += 1
             continue
@@ -235,6 +263,8 @@ def project_messages(pi_messages, *, mode, system_message=None, include_feedback
             raise DecisionProtocolError('invalid_pi_tool_call')
         call = content[0]
         decision = _proposal(call)
+        if decision is not None:
+            feedback.clear()
         if call['id'] in seen:
             raise DecisionProtocolError('duplicate_call_id')
         seen.add(call['id'])
@@ -250,7 +280,8 @@ def project_messages(pi_messages, *, mode, system_message=None, include_feedback
         if decision is None:
             # Never elevate callback text, schema exception text, or an invalid
             # raw proposal to instructions. The correction is fixed server text.
-            if include_feedback and index == len(pi_messages):
+            # Adjacent corrections can address content and wire format on the same turn.
+            if include_feedback:
                 feedback.append({'role': 'system', 'content': _safe_feedback(call['arguments']['feedback'])})
         elif decision.action == 'clarify':
             # Pi records a current system/tool-state entry when restoring a
@@ -282,6 +313,14 @@ def project_messages(pi_messages, *, mode, system_message=None, include_feedback
             else:
                 output.extend([{'role': 'assistant', 'content': envelope},
                                {'role': 'user', 'content': observation}])
+            observation_indices.append(len(output) - 1)
+    if compact_observations and len(observation_indices) > 1:
+        decoded = [decode_protocol_json(output[i]['content'], max_bytes=64 * 1024, max_depth=32)
+                   for i in observation_indices]
+        if all(isinstance(value, dict) and isinstance(value.get('task_acceptance'), dict)
+               and value['task_acceptance'].get('profile') == 'medchat-web-v1' for value in decoded):
+            for i in observation_indices[:-1]:
+                output[i]['content'] = _supersede_acceptance(output[i]['content'])
     output[prefix_size:prefix_size] = feedback
     # Reuse the actual transport's aggregate bounds, native pairing validator
     # and detached snapshot. JSON projections also satisfy its message grammar.
@@ -298,10 +337,21 @@ class ModelProviderAdapter:
 
     async def request(self, messages, timeout_seconds, *, system_message=None,
                       temperature=None, max_tokens=None, input_budget=None,
-                      compact_observations=False):
+                      compact_observations=False, review_draft=None, review_in_three_sentences=False):
         try:
             projected = project_messages(messages, mode=self.mode, system_message=system_message,
                                          include_feedback=True, compact_observations=compact_observations)
+            if review_draft is not None:
+                # Only the transient outbound request sees the parsed draft. Keep it
+                # in the assistant role and charge it to the normal input budget.
+                instruction = ('Submit a complete finish decision with version "1", action "finish", '
+                               'response_kind "chat", and empty evidence_ids. Put the evidence-checked '
+                               'answer to the original question in decision.text.')
+                if review_in_three_sentences:
+                    instruction += (' Use exactly three complete sentences without a heading or list. '
+                                    'Put the findings in the first two and the evidence limit in the third.')
+                projected.extend([{'role': 'assistant', 'content': review_draft},
+                                  {'role': 'user', 'content': instruction}])
         except DecisionProtocolError:
             # Feedback contributes to the actual model-input limit even when
             # omitted from the audit projection. Do not dispatch or classify

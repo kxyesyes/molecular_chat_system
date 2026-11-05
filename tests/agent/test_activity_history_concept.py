@@ -41,9 +41,9 @@ def test_concept_model_receives_assay_specific_interpretation_guidance(tmp_path)
     handler, _, _ = handler_for(tmp_path, [])
     turn(handler, 'What is pIC50? What was my previous pIC50?', [], SESSION)
     system = handler.model.messages[0][0]['content']
-    assert 'no universal potency threshold' in system
-    assert 'target and assay context' in system
-    assert 'does not guarantee a normal distribution' in system
+    assert 'Potency depends on target and assay' in system
+    assert 'in-vitro potency is not clinical efficacy' in system
+    assert 'Log transformation does not guarantee normality' in system
 
 
 @pytest.mark.parametrize('query', [

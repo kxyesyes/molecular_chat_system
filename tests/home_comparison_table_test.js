@@ -37,7 +37,7 @@ for (const value of ["CCO", "46.07", "0", "6.123", "unavailable"]) {
   assert(wide.includes(">" + value + "</td>"), "all scientific values must remain intact: " + value);
 }
 const template = fs.readFileSync(path.join(__dirname, "../src/web/templates/index.html"), "utf8");
-assert(template.includes('/static/js/home/formatters.js?v=20261026-scientific-notation-v9'), "refresh must load the accessible formatter");
+assert(template.includes('/static/js/home/formatters.js?v=20261104-literature-prose-v1'), "refresh must load the accessible formatter");
 
 const unsafe = render("| 分子 | 来源 |\n| --- | --- |\n| <img src=x onerror=alert(1)> | [link](javascript:alert) |");
 assert(!unsafe.includes("<img"), "Table cells must retain HTML escaping");

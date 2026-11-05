@@ -18,6 +18,7 @@ from src.agent.property_constraints import requested_property_bounds
 from src.target_identifiers import TARGET_PATTERN
 from src.agent.tooling import ToolRegistry
 from src.agent.tools.activity_input import activity_intent_requested
+from src.system.molecular_input_parser import LABELED_ACTIVITY_COMPARISON
 from src.agent.evidence_followup import comparison_tools
 from src.agent.utils.validators import InputValidator, MolecularInputAnalysis
 from src.agent.runtime.allocation import (
@@ -164,8 +165,15 @@ class HybridSkillRouter:
             add("comprehensive_evaluation", 0.95, "comprehensive workflow phrase")
         if self._contains(lower, "优化", "降低", "提高", "改善", "hit-to-lead", "lead optimization"):
             add("hit_to_lead_optimization", 0.95, "lead optimization intent")
+        # Referring to values already in the conversation is ordinary chat.
+        # Remove only that object of “引用”, retaining independent source requests.
+        knowledge_text = lower
+        if re.search(r'刚才|上文|前面|上一轮|上述', lower):
+            knowledge_text = re.sub(
+                r'引用\s*(?:(?:这|那)?(?:两|[一二三四五六七八九十\d]+)个?组的)?'
+                r'(?:数值|数字)(?=[\s。！？?！,，；;、]|$)', '', lower)
         knowledge_intent = self._contains(
-            lower,
+            knowledge_text,
             "知识库",
             "本地知识库",
             "引用",
@@ -252,7 +260,9 @@ class HybridSkillRouter:
             "配体",
         ) and self._contains(lower, "center", "size", "box"):
             add("docking_simulation", 1.0, "structured docking files and box intent")
-        if lookup_has_target and self._contains(
+        if (lookup_has_target
+                and not (LABELED_ACTIVITY_COMPARISON.fullmatch(text) and not molecular_input.blocks_execution)
+                and self._contains(
             lookup_text,
             "比较",
             "差异",
@@ -261,7 +271,7 @@ class HybridSkillRouter:
             "靶点数据库",
             "compare",
             "structure information",
-        ):
+        )):
             add("target_database_search", 0.95, "target structure comparison intent")
         if lookup_has_target:
             add("target_database_search", 0.12, "recognized target entity")

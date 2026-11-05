@@ -141,7 +141,10 @@ window.HomeFormatters = (function () {
           if (link) {
             if (link[2].includes('`')) return part;
             const label = link[1].split(/(`[^`]+`)/g).map(function (item, i) {
-              return i % 2 ? '<code>' + item.slice(1, -1) + '</code>' : escapeHtml(item);
+              // The entire input was escaped before markdown parsing. Restore
+              // one layer of trusted entity spelling without creating raw tags.
+              const text = item.replace(/&amp;(?=(?:amp|lt|gt|quot|#x27|#039);)/g, '&');
+              return i % 2 ? '<code>' + text.slice(1, -1) + '</code>' : text;
             }).join('');
             return '<a href="' + Safe.safeChatUrl(link[2]) + '" target="_blank" rel="noopener noreferrer" style="color: #4299e1; text-decoration: underline;">' + label + '</a>';
           }
@@ -468,9 +471,6 @@ window.HomeFormatters = (function () {
       content.includes("预测的可能产物")
     ) {
       return formatReactionPrediction(content);
-    }
-    if (content.includes("文献数据搜索结果") || content.includes("相关文献")) {
-      return formatLiteratureResults(content);
     }
     if (
       content.includes("增强ADMET属性预测结果") ||

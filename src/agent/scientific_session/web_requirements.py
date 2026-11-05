@@ -29,9 +29,14 @@ _PATTERNS = {
     'activity_predictor': r'活性|(?<![A-Za-z0-9_])(?:activity|potency|pIC50|IC50|inhibition)(?![A-Za-z0-9_])',
     'reverse_target_predictor': r'反向寻靶|反向预测靶点|\breverse\s+target',
     'rag_search': r'知识库|数据库|文献|\b(?:rag|knowledge\s+base|database|literature)\b',
-    'target_database_search': r'(?:查找|检索|搜索|查询|find|search|lookup|look\s+up).*(?:靶点|结构|\btarget|\bPDB|\bprotein)',
+    'target_database_search': r'(?:查找|检索|搜索|查询|find|search|lookup|look\s+up).*(?:靶点|结构|\btarget|\bPDB|\bprotein|\bUniProt\b)',
     'candidate_ranker': r'筛选|排序|\b(?:rank|ranking|screen)\b',
 }
+
+
+def _property_intent_text(text):
+    """Keep ADMET properties distinct from an independent descriptor request."""
+    return re.sub(r'(?<![A-Za-z0-9_])ADMET?\s*(?:的\s*)?(?:性质|属性)', 'ADMET', text, flags=re.I)
 
 
 def _ordinary_knowledge_lookup(query):
@@ -153,7 +158,15 @@ def _coverage(query, steps, workflow):
         raise ValueError('uncovered_comparison_obligation')
     positive = positive_intent_text(query)
     tools = {s.tool_name for s in steps}
-    if re.search(r'发送|邮件|写入|删除|下载|上传|运行命令|执行命令|\b(?:email|send|delete|download|upload|shell|execute\s+code)\b', positive, re.I):
+    # A speaker's planned report wording followed by a request to check it is
+    # consultation, not a command to write a file. Remove only that write verb
+    # from this operation scan; independent actions and the original stay intact.
+    external_operations = re.sub(
+        r'((?:^|[。？！!?；;，,\n])\s*我(?:们)?(?:想|准备|计划|打算)(?:把|将)'
+        r'[^。？！!?；;，,\n]{1,120})写入报告'
+        r'(?=\s*[，,]\s*请(?:只|先)?(?:(?:依据|根据)[^。？！!?；;，,\n]{1,40})?'
+        r'(?:核对|核实|确认|判断))', r'\1报告', positive)
+    if re.search(r'发送|邮件|写入|删除|下载|上传|运行命令|执行命令|\b(?:email|send|delete|download|upload|shell|execute\s+code)\b', external_operations, re.I):
         raise ValueError('unsupported_scientific_request')
     from src.agent.contracts.docking_intent import explicit_docking_action
     if explicit_docking_action(positive):
@@ -170,7 +183,8 @@ def _coverage(query, steps, workflow):
     if generation_requested and 'llm_molecular_generator' not in tools:
         raise ValueError('uncovered_web_obligation')
     for name, pattern in _PATTERNS.items():
-        if not re.search(pattern, positive, re.I) or name in tools:
+        intent = _property_intent_text(positive) if name == 'property_calculator' else positive
+        if not re.search(pattern, intent, re.I) or name in tools:
             continue
         if name == 'candidate_ranker' and (
                 _comparison_ranking_covered(positive, tools, workflow)
@@ -214,15 +228,19 @@ def compile_web_requirements(context, *, allowed_tools):
         allowed &= {'rag_search'}
     if not caps.get('rag', True):
         allowed -= {'rag_search'}
+    consultation = context.metadata.get('tool_free_consultation') is True
+    if consultation and (context.active_skill or allowed or caps.get('scientific_tools', True)
+                         or caps.get('rag', True)):
+        raise ValueError('task_requirements_not_authorized')
     catalog = WorkflowCatalog()
     policy = catalog.get(context.active_skill) if context.active_skill else None
-    explanation = not context.active_skill and _concept_explanation(context.query)
+    explanation = not context.active_skill and (consultation or _concept_explanation(context.query))
     if context.active_skill and policy is None:
         raise ValueError('unsupported_scientific_request')
     from src.agent.planning.composite_request import (
         parse_target_structure_molecule_request,
     )
-    if policy is None and parse_target_structure_molecule_request(context.query) is not None:
+    if policy is None and not explanation and parse_target_structure_molecule_request(context.query) is not None:
         policy = catalog.require('target_structure_molecule_analysis')
     if policy is None and not explanation:
         from src.agent.router import SkillRouter
@@ -235,6 +253,14 @@ def compile_web_requirements(context, *, allowed_tools):
         routing_query = reverse_rank_routing_query(routing_query)
         decision = SkillRouter(catalog).decide(routing_query, llm=None)
         policy = catalog.get(decision.selected_skill) if decision.selected_skill else None
+        if policy is not None and policy.name == 'activity_prediction':
+            from src.agent.contracts.generation_request import has_generation_intent
+            molecular_input = InputValidator().analyze_molecular_input(routing_query)
+            if (molecular_input.valid_smiles and not molecular_input.blocks_execution
+                    and has_generation_intent(routing_query)
+                    and re.search(r'优化|hit-to-lead|lead optimization|optimi[sz]e',
+                                  positive_intent_text(routing_query), re.I)):
+                policy = catalog.require('hit_to_lead_optimization')
         if decision.requires_confirmation:
             if 'target_clarification_required' in decision.reasons:
                 raise ValueError('target_clarification_required')
@@ -251,7 +277,11 @@ def compile_web_requirements(context, *, allowed_tools):
             if (not molecular_input.blocks_execution
                     and molecular_input.valid_smiles == (context.query.strip(),)):
                 policy = catalog.require('rag_search')
-    forbidden = _forbidden(context.query)
+    forbidden = WEB_TOOLS if consultation else _forbidden(context.query)
+    if (not context.active_skill and policy is not None and policy.name == 'target_driven_design'
+            and {'activity_predictor', 'admet_predictor'} <= forbidden
+            and re.match(r'\s*(?:请\s*)?(?:仅|只)\s*(?:生成|设计)', context.query)):
+        policy = catalog.require('molecular_design')
     if policy is None:
         if not explanation:
             _coverage(context.query, [], 'ordinary_chat')
@@ -267,7 +297,28 @@ def compile_web_requirements(context, *, allowed_tools):
         plan = TaskPlanner().plan(replace(context, active_skill=policy.name))
         if not plan.steps:
             raise ValueError(plan.metadata.get('reason', 'request_clarification_required'))
-        from src.agent.contracts.property_ranking_request import property_only_design_request
+        positive = positive_intent_text(context.query)
+        explicit_descriptors = (re.search(r'分子量|分子式|\b(?:MW|logP|TPSA|QED|HBA|HBD|molecular\s+weight)\b',
+                                          positive, re.I)
+                                and not re.search(r'全面|综合|\bcomprehensive\b', positive, re.I))
+        if (not context.active_skill and plan.workflow_name == 'admet_assessment'
+                and (re.search(_PATTERNS['admet_predictor'], positive, re.I) or explicit_descriptors)):
+            plan.steps = [replace(step, required=True, continue_on_error=False)
+                          if step.tool_name == 'admet_predictor' else step
+                          for step in plan.steps
+                          if step.tool_name == 'admet_predictor'
+                          or re.search(_PATTERNS[step.tool_name],
+                                       _property_intent_text(positive) if step.tool_name == 'property_calculator' else positive,
+                                       re.I)]
+        from src.agent.contracts.property_ranking_request import (
+            descriptor_only_design_request, property_only_design_request,
+        )
+        if (not context.active_skill and policy.name == 'target_driven_design'
+                and descriptor_only_design_request(context.query)):
+            requested_admet = bool(re.search(_PATTERNS['admet_predictor'], positive, re.I))
+            plan.steps = [s for s in plan.steps if s.tool_name in (
+                'target_database_search', 'llm_molecular_generator', 'property_calculator',
+                *(('admet_predictor',) if requested_admet else ()))]
         if policy.name == 'target_driven_design' and property_only_design_request(context.query):
             # Only the explicit property basis is authorized for this bounded
             # request. Do not pass optional prediction evidence into ranking.
@@ -293,6 +344,14 @@ def compile_web_requirements(context, *, allowed_tools):
             plan.steps = molecular_design_steps(plan.steps[0].input_data, include_properties=True)
             plan.metadata['atomic'] = False
         plan.steps = [s for s in plan.steps if s.tool_name not in forbidden]
+        if plan.workflow_name == 'hit_to_lead_optimization':
+            if not context.active_skill and not re.search(_PATTERNS['activity_predictor'], positive, re.I):
+                plan.steps = [s for s in plan.steps if s.tool_name != 'activity_predictor']
+            outputs = {step.output_key for step in plan.steps if step.output_key}
+            plan.steps = [replace(step, metadata={**step.metadata,
+                'workflow_output_keys': tuple(key for key in step.metadata['workflow_output_keys'] if key in outputs),
+                'workflow_optional_output_keys': tuple(key for key in step.metadata['workflow_optional_output_keys'] if key in outputs)})
+                if step.tool_name == 'lead_optimization_verifier' else step for step in plan.steps]
         if context.metadata.get('allow_molecular_clarification') is True:
             # The Web compiler seals its exact obligations; the broader legacy
             # ADMET template must not add a new assessment during clarification.
@@ -310,7 +369,7 @@ def compile_web_requirements(context, *, allowed_tools):
             # selected references are already bound by TaskPlanner. A raw
             # property request must instead contain its own valid structure,
             # never a chemical name or a structure borrowed from chat history.
-            if (not context.active_skill and step.tool_name == 'property_calculator'
+            if (not context.active_skill and step.tool_name in {'property_calculator', 'admet_predictor'}
                     and not (step.input_binding or step.input_from)):
                 if type(step.input_data) is not str:
                     raise ValueError(_ERROR)

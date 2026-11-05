@@ -121,6 +121,22 @@ def test_compaction_does_not_omit_observations_to_fit_budget(adapter, mode):
 
 
 @pytest.mark.parametrize('mode', ['native', 'json'])
+def test_web_model_view_supersedes_only_earlier_acceptance_snapshots(adapter, mode):
+    first = r'{"tool_name":"a","data":{"value":-0.000,"text":"\u003csource\u003e"},"task_acceptance":{"profile":"medchat-web-v1","checks":[{"passed":false}]}}'
+    second = r'{"tool_name":"b","data":{"value":2},"task_acceptance":{"profile":"medchat-web-v1","checks":[{"passed":true}]}}'
+    messages = history()[:2] + pair(call_id='call-1', content=first) + pair(call_id='call-2', content=second)
+    before = deepcopy(messages)
+    output = adapter.project_messages(messages, mode=mode, compact_observations=True)
+    observations = [message['content'] for message in output if message['role'] == ('tool' if mode == 'native' else 'user')][-2:]
+    earlier, latest = map(json.loads, observations)
+    assert earlier['task_acceptance'] == {'superseded_by_latest': True}
+    assert earlier['data'] == json.loads(first)['data'] and '-0.000' in observations[0]
+    assert r'\u003csource\u003e' in observations[0]
+    assert latest == json.loads(second)
+    assert messages == before
+
+
+@pytest.mark.parametrize('mode', ['native', 'json'])
 @pytest.mark.parametrize('depth', [17, 32])
 def test_compaction_keeps_observation_encoder_depth_contract(adapter, mode, depth):
     from src.agent.scientific_session.decision_policy import encode_observation
@@ -301,6 +317,20 @@ def test_internal_feedback_pair_becomes_safe_system_without_raw_model_content(ad
     assert 'decision.tool.version' in result[1]['content']
     assert 'private-raw-model-marker' not in repr(result)
     assert _snapshot_messages(result)[0] == result
+
+
+def test_native_json_correction_feedback_is_fixed_server_text(adapter):
+    from src.agent.scientific_session.decision_policy import schema_correction
+    from tests.agent.test_decision_protocol_recovery import malformed_native_json
+    messages = history() + feedback_pair()
+    feedback = schema_correction(malformed_native_json())
+    messages[-2]['content'][0]['arguments']['feedback'] = feedback
+    result = adapter.project_messages(messages, mode='native', include_feedback=True)
+    assert result[1] == {'role': 'system', 'content': feedback}
+    assert 'private-raw-model-marker' not in repr(result)
+    messages[-2]['content'][0]['arguments']['feedback'] += ' private-provider-text'
+    with pytest.raises(DecisionProtocolError, match='invalid_pi_feedback'):
+        adapter.project_messages(messages, mode='native', include_feedback=True)
 
 
 @pytest.mark.parametrize('mode', ['native', 'json'])

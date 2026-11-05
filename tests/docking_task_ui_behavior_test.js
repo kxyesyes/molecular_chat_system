@@ -146,6 +146,7 @@ test("generic docking failure is actionable without claiming a scientific result
   c.renderDurableTaskFailure({task_id: "task-1", status: "failed", error: "Docking process failed"});
   assert.match(get("results-content").innerHTML, /未生成可验证结果/);
   assert.match(get("results-content").innerHTML, /受体结构准备工具/);
+  assert.match(get("results-content").innerHTML, /配体.*准备/);
   assert.doesNotMatch(get("results-content").innerHTML, /-\d+\.\d+\s*kcal\/mol/);
 });
 test("poll disconnect holds task lock and schedules reconnect", async () => {

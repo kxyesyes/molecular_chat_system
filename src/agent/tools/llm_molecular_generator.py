@@ -539,7 +539,11 @@ class LLMMolecularGenerator(BaseMolecularTool):
             if '|' in query:
                 raise ValueError('CXSMILES extensions are not supported for optimization.')
             try:
-                smiles_list = parse_molecular_smiles(query, self)
+                from .activity_input import activity_intent_requested, parse_activity_input
+                if activity_intent_requested(query):
+                    _, smiles_list, _ = parse_activity_input(query, self)
+                else:
+                    smiles_list = parse_molecular_smiles(query, self)
             except MolecularInputMissing:
                 # Only genuinely seedless prose retains description generation.
                 smiles_list = []

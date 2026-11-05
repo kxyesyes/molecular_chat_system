@@ -99,12 +99,14 @@
       // Rank continuation emits only canonical UniProt entry pages. Do not
       // grant the entire domain (or its subdomains) redirect privileges.
       const uniprotEntry = /^https:\/\/www\.uniprot\.org\/uniprotkb\/[A-Z0-9]{6}(?:[A-Z0-9]{4})?\/entry$/.test(raw);
+      const pmcArticle = /^https:\/\/pmc\.ncbi\.nlm\.nih\.gov\/articles\/PMC[1-9][0-9]{0,11}\/$/.test(raw);
+      const hergDataset = raw === "https://tdcommons.ai/single_pred_tasks/tox/#herg-blockers";
       if (
         parsed.protocol !== "https:" ||
         parsed.username ||
         parsed.password ||
         parsed.port ||
-        !(trustedHost || uniprotEntry)
+        !(trustedHost || uniprotEntry || pmcArticle || hergDataset)
       ) {
         return "#";
       }

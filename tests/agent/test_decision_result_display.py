@@ -45,9 +45,16 @@ def test_property_result_display_is_human_readable_and_keeps_provenance():
     assert "evidence-1" in answer
     assert '"molecular_weight"' not in answer
     header = next(line for line in answer.splitlines() if line.startswith('| SMILES'))
-    row = next(line for line in answer.splitlines() if line.startswith('| CCO'))
+    row = next(line for line in answer.splitlines() if line.startswith('| `CCO`'))
     column = [cell.strip() for cell in header.split('|')].index('可旋转键数')
     assert row.split('|')[column].strip() == '0'
+
+
+def test_property_display_escapes_chiral_smiles_markdown():
+    result = property_result()
+    result.data[0]['smiles'] = 'CC(C)Cc1ccc([C@@H](C)C(=O)O)cc1'
+    answer = scientific_display_answer([result], concise=True)
+    assert '`CC(C)Cc1ccc([C@@H](C)C(=O)O)cc1`' in answer
 
 
 def test_property_display_keeps_only_compact_provenance_and_hides_disclaimers():
@@ -140,6 +147,183 @@ def test_admet_concise_summary_names_threshold_hit_endpoints():
     assert '阈值命中端点：hERG inhibition' in answer
 
 
+def test_admet_concise_table_identifies_prediction_source_without_mislabeling_fallback():
+    from src.web.decision_chat import _admet_display_answer
+    admet = {'prediction_method': 'admet_ai', 'total_endpoints': 1, 'risk_count': 0,
+             'endpoints': {'hERG': {'value': .1, 'unit': '-', 'source': 'admet_ai_model'},
+                           'mw': {'value': 46.07, 'unit': 'Da', 'source': 'rdkit'}}}
+    answer = _admet_display_answer([{'smiles': 'CCO', 'admet': admet}], concise=True)
+    assert '| 端点 | 模型预测值 |' in answer and '| mw |' not in answer
+    admet['endpoints'].pop('hERG')
+    answer = _admet_display_answer([{'smiles': 'CCO', 'admet': admet}], concise=True)
+    assert '| 端点 | 数值 |' in answer and '模型预测值' not in answer
+
+
+def test_admet_preview_prioritizes_risk_hits_and_displays_screening_threshold():
+    from src.web.decision_chat import _admet_display_answer
+    endpoints = {f'other_{i}': {'value': .1, 'unit': '-', 'source': 'admet_ai_model'}
+                 for i in range(9)}
+    endpoints['DILI'] = {'name': 'Drug Induced Liver Injury', 'value': .63,
+                         'unit': '-', 'source': 'admet_ai_model'}
+    answer = _admet_display_answer([{'smiles': 'CCO', 'admet': {
+        'prediction_method': 'admet_ai', 'endpoints': endpoints, 'total_endpoints': 10,
+        'risk_count': 1, 'risk_endpoint_ids': ['DILI'], 'risk_threshold': .5,
+    }}], concise=True)
+    assert '| DILI | 0.63 | - |' in answer
+    assert '筛查阈值：0.5' in answer
+    assert answer.index('| DILI |') < answer.index('| other_0 |')
+    assert '查看明细' in answer
+
+
+def test_admet_preview_prioritizes_explicitly_requested_endpoint():
+    from src.web.decision_chat import _admet_display_answer
+    endpoints = {f'other_{i}': {'value': .1, 'unit': '-', 'source': 'admet_ai_model'}
+                 for i in range(9)}
+    endpoints['hERG'] = {'value': .0105938, 'unit': '-', 'task_type': 'classification',
+                         'source': 'admet_ai_model'}
+    answer = _admet_display_answer([{'smiles': 'CCO', 'admet': {
+        'prediction_method': 'admet_ai', 'endpoints': endpoints,
+        'total_endpoints': 10, 'risk_count': 0, 'risk_endpoint_ids': [],
+    }}], concise=True, requested_endpoints=('hERG',))
+    assert '| hERG | 0.01059 | - | 分类 |' in answer
+    assert answer.index('| hERG |') < answer.index('| other_0 |')
+
+
+def test_focused_batch_solubility_hides_unrequested_endpoints_and_preserves_failures():
+    from src.web.decision_chat import _admet_display_answer
+    rows = []
+    for smiles, value in [('CCO', -1.2), ('CCN', -0.8)]:
+        rows.append({'smiles': smiles, 'admet': {'prediction_method': 'admet_ai',
+            'endpoints': {'Solubility_AqSolDB': {'value': value, 'unit': 'log(mol/L)',
+                'task_type': 'regression', 'source': 'admet_ai_model'},
+                'DILI': {'value': .9, 'unit': '-', 'task_type': 'classification', 'source': 'admet_ai_model'}}}})
+    answer = _admet_display_answer(rows, concise=True,
+        requested_endpoints=('Solubility_AqSolDB',), focused_only=True)
+    assert '水溶解度' in answer and '-1.2' in answer and '-0.8' in answer
+    assert 'DILI' not in answer and '明细' in answer
+    rows[1]['admet']['endpoints']['Solubility_AqSolDB']['validity'] = 'out_of_range'
+    answer = _admet_display_answer(rows, concise=True,
+        requested_endpoints=('Solubility_AqSolDB',), focused_only=True)
+    assert '预测不可用' in answer
+
+
+def test_direct_admet_endpoint_question_recognizes_subject_without_admet_as_endpoint():
+    from src.web.decision_chat import _requested_admet_endpoints
+    assert _requested_admet_endpoints('请预测 CCO 的 hERG 毒性风险并给出预测值。') == ('hERG',)
+    assert _requested_admet_endpoints('请预测 CCO 的 ADMET 毒性风险。') == ()
+    assert _requested_admet_endpoints('请预测 CCO 的 ADMET，不要预测 hERG 毒性。') == ()
+
+
+def test_bbb_request_selects_the_model_endpoint():
+    from src.web.decision_chat import _requested_admet_endpoints
+    assert _requested_admet_endpoints('请预测 CCO 的血脑屏障通透性。') == ('BBB_Martins',)
+    assert _requested_admet_endpoints('请预测 CCO 的 BBB 通透性。') == ('BBB_Martins',)
+    assert _requested_admet_endpoints('预测 ADMET，不要预测血脑屏障通透性。') == ()
+
+
+def test_cyp3a4_inhibition_selects_inhibition_not_substrate_endpoint():
+    from src.web.decision_chat import _requested_admet_endpoints
+    assert _requested_admet_endpoints('预测 CCO 的 CYP3A4 抑制风险。') == ('CYP3A4_Veith',)
+    assert _requested_admet_endpoints('预测 CCO 的 ADMET，重点给出 CYP3A4 抑制端点的预测结果。') == ('CYP3A4_Veith',)
+    assert _requested_admet_endpoints('预测 ADMET，不要预测 CYP3A4 抑制风险。') == ()
+
+
+def test_cyp3a4_substrate_selects_its_own_endpoint():
+    from src.web.decision_chat import _requested_admet_endpoints
+    assert _requested_admet_endpoints('预测 CCO 是否为 CYP3A4 的底物。') == ('CYP3A4_Substrate_CarbonMangels',)
+
+
+def test_admet_smiles_is_rendered_as_code_not_markdown_link():
+    from src.web.decision_chat import _admet_display_answer
+    smiles = 'CC(C)Cc1ccc([C@@H](C)C(=O)O)cc1'
+    answer = _admet_display_answer([{'smiles': smiles, 'admet': {
+        'prediction_method': 'admet_ai', 'endpoints': {'DILI': {
+            'value': .5, 'unit': '-', 'task_type': 'classification', 'source': 'admet_ai_model'}},
+        'total_endpoints': 1, 'risk_count': 1, 'risk_endpoint_ids': ['DILI']}}], concise=True)
+    assert f'SMILES：`{smiles}`' in answer
+
+
+def test_requested_bbb_result_explains_classification_score():
+    from src.web.decision_chat import _admet_display_answer
+    answer = _admet_display_answer([{'smiles': 'CCO', 'admet': {
+        'prediction_method': 'admet_ai', 'endpoints': {'BBB_Martins': {
+            'value': 0.81, 'unit': '-', 'task_type': 'classification', 'source': 'admet_ai_model',
+        }}, 'total_endpoints': 0, 'risk_count': 0, 'risk_endpoint_ids': [],
+    }}], concise=True, requested_endpoints=('BBB_Martins',))
+    assert '血脑屏障通透性' in answer
+    assert '分类' in answer and '0.81' in answer
+    assert '不是实测通透率' in answer
+
+
+@pytest.mark.parametrize(('query', 'expected'), [
+    ('比较 CCO 和 CCN 的 hERG 和 DILI 预测，只看这两个指标。', ('hERG', 'DILI')),
+    ('比较 CCO 和 CCN 的 DILI 与 hERG 的预测结果。', ('DILI', 'hERG')),
+    ('比较 CCO 和 CCN 的 AMES 和 DILI 预测值。', ('AMES', 'DILI')),
+    ('预测 CCO 的 ADMET，不要比较它的 hERG 和 DILI 预测。', ()),
+    ('请预测 SMILES: CCO 的 ADMET，包括 hERG 和 DILI。', ('hERG', 'DILI')),
+    ('请预测 SMILES: CCO 的 hERG 和 DILI。', ('hERG', 'DILI')),
+    ('请预测 CCO 的 ADMET，包括 DILI，不要预测 hERG。', ('DILI',)),
+    ('预测 CCO 的 ADMET，并列出 hERG 和 DILI 的预测值。', ('hERG', 'DILI')),
+    ('预测 CCO 的 ADMET，给出 hERG 和 DILI 的预测结果并说明它们的含义及局限。', ('hERG', 'DILI')),
+    ('请计算 CCO 的分子量和 LogP，并预测 ADMET，重点列出 hERG 和 DILI，说明结果的局限。', ('hERG', 'DILI')),
+    ('预测 CCO 的 ADMET，重点列出 hERG 和 DILI，不要列出 AMES。', ('hERG', 'DILI')),
+    ('请预测 SMILES: CC(C)Cc1ccc(C(C)C(=O)O)cc1 的 ADMET，重点查看 hERG 和 DILI。', ('hERG', 'DILI')),
+    ('预测 CCO 的 ADMET，重点关注 hERG 和 DILI。', ('hERG', 'DILI')),
+    ('预测 CCO 的 ADMET，重点给出 hERG 和 DILI。', ('hERG', 'DILI')),
+    ('比较 CCO 和 CCN 的 ADMET，给出各自的 hERG、DILI 与 AMES 端点。', ('hERG', 'DILI', 'AMES')),
+    ('预测 CCO 的 ADMET，不要列出 hERG 和 DILI 的预测值。', ()),
+    ('请预测 SMILES: CC(=O)Nc1ccc(O)cc1 的 ADMET，重点列出 hERG 和肝毒性预测结果。', ('DILI', 'hERG')),
+])
+def test_admet_requested_endpoint_lists(query, expected):
+    from src.web.decision_chat import _requested_admet_endpoints
+    assert _requested_admet_endpoints(query) == expected
+
+
+@pytest.mark.parametrize('single', [False, True])
+def test_focused_toxicity_table_preserves_threshold_decision_before_rounding(single):
+    from src.web.decision_chat import _admet_display_answer
+    rows = [{'smiles': smiles, 'admet': {
+        'prediction_method': 'admet_ai', 'risk_threshold': .5,
+        'risk_endpoint_ids': ['DILI'] if value >= .5 else [],
+        'endpoints': {'DILI': {'value': value, 'unit': '-', 'task_type': 'classification',
+                               'source': 'admet_ai_model'}}}}
+        for smiles, value in [('CCO', .499999), ('CCN', .5)]]
+    if single:
+        rows = rows[:1]
+    answer = _admet_display_answer(rows, concise=True, requested_endpoints=('DILI',), focused_only=True)
+    assert '未命中（< 0.5）' in answer
+    if not single:
+        assert '命中（≥ 0.5）' in answer
+    assert '不是人体发生率' in answer
+    rows[0]['admet'].pop('risk_threshold')
+    answer = _admet_display_answer(rows, concise=True, requested_endpoints=('DILI',), focused_only=True)
+    assert '阈值判定未提供' in answer
+
+
+def test_admet_preview_marks_out_of_range_model_output():
+    from src.web.decision_chat import _admet_display_answer
+    answer = _admet_display_answer([{'smiles': 'CCO', 'admet': {
+        'prediction_method': 'admet_ai',
+        'endpoints': {'Half_Life_Obach': {'value': -6.2, 'unit': 'hr',
+            'task_type': 'regression', 'source': 'admet_ai_model', 'validity': 'out_of_range'}},
+        'risk_endpoint_ids': [], 'risk_count': 0, 'total_endpoints': 0,
+    }}], concise=True)
+    assert 'Half_Life_Obach' in answer and '超出' in answer and '不可用' in answer
+    assert '-6.2 | hr' not in answer
+
+
+def test_admet_preview_distinguishes_classification_from_regression():
+    from src.web.decision_chat import _admet_display_answer
+    answer = _admet_display_answer([{'smiles': 'CCO', 'admet': {
+        'prediction_method': 'admet_ai', 'endpoints': {
+            'Bioavailability_Ma': {'value': .87, 'unit': '-', 'task_type': 'classification', 'source': 'admet_ai_model'},
+            'Caco2_Wang': {'value': -5.4, 'unit': 'log cm/s', 'task_type': 'regression', 'source': 'admet_ai_model'}},
+        'total_endpoints': 0, 'risk_count': 0, 'risk_endpoint_ids': [],
+    }}], concise=True)
+    assert '| Bioavailability_Ma | 0.87 | - | 分类 |' in answer
+    assert '| Caco2_Wang | -5.4 | log cm/s | 回归 |' in answer
+
+
 def test_activity_concise_summary_exposes_validated_family_prediction():
     from src.web.decision_chat import _activity_display_answer
     answer = _activity_display_answer([{
@@ -155,6 +339,33 @@ def test_activity_concise_summary_exposes_validated_family_prediction():
     assert '预测 pIC50：4.354' in answer
     assert '活性概率：0.3444' in answer
     assert '分类：无活性' in answer
+
+
+@pytest.mark.parametrize(('species', 'expected'), [
+    ('mixed', '混合物种'), ('human', '人源'), ('mouse', '小鼠'), (None, '未标明'),
+])
+def test_activity_summary_displays_registered_species_scope(species, expected):
+    from src.web.decision_chat import _activity_display_answer
+    answer = _activity_display_answer([{
+        'smiles': 'CCO', 'status': 'passed', 'requested_target': 'BuChE',
+        'predicted_pIC50': 4.354, 'activity_probability': .3444, 'activity_class': '无活性',
+        'provenance': {'scope': {'species': species}},
+    }], concise=True)
+    assert f'模型物种范围：{expected}' in answer
+    assert '预测分类：无活性' in answer
+    if species == 'mixed':
+        assert '不能视为人源特异预测' in answer
+
+
+def test_activity_scientific_projection_preserves_only_public_species_scope():
+    from types import SimpleNamespace
+    from src.agent.scientific_session.decision_binding_acceptance import _scientific_data
+    result = SimpleNamespace(tool_name='activity_predictor', data=[{
+        'smiles': 'CCO', 'family_id': 'buche-family', 'status': 'passed',
+        'provenance': {'bundle_id': 'bundle', 'scope': {'species': 'mixed', 'private': 'do-not-publish'}}}])
+    projected = _scientific_data(result)
+    assert projected[0]['provenance']['scope'] == {'species': 'mixed'}
+    assert 'private' not in str(projected)
 
 
 def test_activity_concise_summary_keeps_numeric_partial_prediction_for_review():
@@ -219,6 +430,7 @@ def test_completed_target_projection_is_human_readable_and_keeps_provenance():
         "recommended_structures": [{
             "structure_id": "7XYZ",
             "source": "RCSB_PDB",
+            "cache_status": "unverified",
             "recommendation_level": "primary",
             "ligand_ids": ["ABC"],
             "local_file_path": "PRIVATE_PATH_SENTINEL",
@@ -248,6 +460,7 @@ def test_completed_target_projection_is_human_readable_and_keeps_provenance():
     }
     projected = payload['observations'][0]['data']
     assert projected[0]['recommended_structures'][0]['stale'] is False
+    assert projected[0]['recommended_structures'][0]['cache_status'] == 'unverified'
     assert projected[0]['recommended_structures'][0].get('ligand_ids') == ['ABC']
     assert 'PRIVATE_PATH_SENTINEL' not in json.dumps(projected)
     assert 'DEBUG_SENTINEL' not in json.dumps(projected)
@@ -279,10 +492,102 @@ def test_completed_target_projection_is_human_readable_and_keeps_provenance():
     concise = web_scientific_display(agent_result, concise=True)
     assert '7XYZ' in concise and '配体 ID：ABC' in concise
     assert '配体角色和对接口袋尚未核实' in concise
+    assert '本地结构记录尚未核验' in concise
     assert 'RCSB_PDB' not in concise and '来源：' not in concise
     frame, _ = map(json.loads, _result_frame(ChatHandler, agent_result, False))
     assert frame['tool_result_sequence'][0]['quality']['evidence_id'] == 'evidence-target'
     assert frame['tool_result_sequence'][0]['provenance']['tool_name'] == 'target_database_search'
+
+
+def test_target_readiness_request_reports_preparation_not_checked():
+    from types import SimpleNamespace
+    from src.web.web_business import WebTurnProjection
+    target = ToolResult.success_result('target_database_search', data=[{
+        'gene_symbol': 'EGFR', 'recommended_structures': [{'structure_id': '1M17'}],
+    }], quality={'evidence_id': 'target', 'validated': True}, provenance=ToolProvenance(
+        tool_name='target_database_search', input_digest='in', output_digest='out'))
+    result = AgentResult('readiness', True, '', final_answer='{}', tool_results=[target],
+                         metadata={'binding_profile': 'medchat-web-v1'}, outcome=RunOutcome.COMPLETED)
+    query = '请查询人源 EGFR 靶点，列出可用于分子对接的实验结构，并说明结构是否已准备好进行对接。'
+    projection = WebTurnProjection(query, 'session', [])
+    view = projection.capture(result, context=SimpleNamespace(query=query, resolved_molecule=None, metadata={}))
+    assert view['status'] == 'partial'
+    assert any('未核验' in warning and '准备' in warning for warning in view['warnings'])
+
+
+def test_experimental_target_display_excludes_predictions_and_handles_missing():
+    from src.web.decision_chat import _target_display_answer
+    rows = [{'gene_symbol': 'EGFR', 'structure_count': 2, 'recommended_structures': [
+        {'structure_id': '1M17', 'structure_type': 'experimental', 'resolution': 2.6,
+         'ligand_ids': ['AQ4']},
+        {'structure_id': 'AF-P00533-F1', 'structure_type': 'predicted', 'ligand_ids': []},
+    ]}]
+    answer = _target_display_answer(rows, concise=True, experimental_only=True)
+    assert '1M17' in answer and 'AQ4' in answer and 'AF-P00533-F1' not in answer
+    rows[0]['recommended_structures'] = rows[0]['recommended_structures'][1:]
+    assert '未返回实验结构记录' in _target_display_answer(rows, concise=True, experimental_only=True)
+
+
+def test_target_structure_display_includes_recorded_method_and_marks_missing():
+    from src.web.decision_chat import _target_display_answer
+    rows = [{'gene_symbol': 'EGFR', 'recommended_structures': [
+        {'structure_id': '1M17', 'structure_type': 'experimental', 'method': 'X-ray', 'ligand_ids': ['AQ4']},
+        {'structure_id': '1IVO', 'structure_type': 'experimental', 'method': None, 'ligand_ids': []},
+    ]}]
+    for concise in (True, False):
+        answer = _target_display_answer(rows, concise=concise, experimental_only=True)
+        assert '解析方法：X-ray' in answer
+        assert '解析方法：未记录' in answer
+
+
+def test_target_lookup_requested_preparation_shows_checklist():
+    from types import SimpleNamespace
+    from src.agent.scientific_session.web_acceptance import _scientific_data
+    from src.web.web_business import WebTurnProjection
+    target = ToolResult.success_result('target_database_search', data=[{
+        'gene_symbol': 'EGFR', 'uniprot_id': 'P00533', 'structure_count': 2,
+        'function': 'Unrequested target function description.', 'recommended_structures': [
+            {'structure_id': '1M17', 'source': 'RCSB_PDB', 'structure_type': 'experimental',
+             'resolution': 2.6, 'ligand_ids': ['AQ4']},
+            {'structure_id': 'AF-P00533-F1', 'source': 'AlphaFold', 'structure_type': 'predicted'},
+        ],
+    }], quality={'evidence_id': 'target', 'validated': True}, provenance=ToolProvenance(
+        tool_name='target_database_search', input_digest='in', output_digest='out'))
+    payload = {'acceptance': {'profile': 'medchat-web-v1'}, 'observations': [{
+        'tool': 'target_database_search', 'status': 'succeeded', 'data': _scientific_data(target),
+        'evidence_id': 'target'}]}
+    result = AgentResult('target-prep', True, '', final_answer=json.dumps(payload), tool_results=[target],
+                         metadata={'binding_profile': 'medchat-web-v1'}, outcome=RunOutcome.COMPLETED)
+    query = ('我想针对人源 EGFR 做分子对接，请检索可用的实验蛋白结构，'
+             '列出 PDB 编号、分辨率和共结晶配体，并说明选择和准备受体时还需要核查什么。')
+    view = WebTurnProjection(query, 'session', []).capture(
+        result, context=SimpleNamespace(query=query, resolved_molecule=None, metadata={}))
+    assert '1M17' in view['final_answer'] and 'AF-P00533-F1' not in view['final_answer']
+    assert all(term in view['final_answer'] for term in ('蛋白链', '口袋', '缺失', '质子化', '未执行对接'))
+    assert 'Unrequested target function' not in view['final_answer']
+
+
+def test_experimental_structure_request_reports_absent_evidence_as_partial():
+    from types import SimpleNamespace
+    from src.agent.scientific_session.web_acceptance import _scientific_data
+    from src.web.web_business import WebTurnProjection
+    target = ToolResult.success_result('target_database_search', data=[{
+        'gene_symbol': 'Egfr', 'uniprot_id': 'Q01279', 'organism': 'Mus musculus',
+        'structure_count': 1, 'recommended_structures': [
+            {'structure_id': 'AF-Q01279-F1', 'source': 'AlphaFold', 'structure_type': 'predicted'}],
+    }], quality={'evidence_id': 'target', 'validated': True}, provenance=ToolProvenance(
+        tool_name='target_database_search', input_digest='in', output_digest='out'))
+    payload = {'acceptance': {'profile': 'medchat-web-v1'}, 'observations': [{
+        'tool': 'target_database_search', 'status': 'succeeded', 'data': _scientific_data(target),
+        'evidence_id': 'target'}]}
+    result = AgentResult('mouse-target', True, '', final_answer=json.dumps(payload), tool_results=[target],
+                         metadata={'binding_profile': 'medchat-web-v1'}, outcome=RunOutcome.COMPLETED)
+    query = '请查询小鼠 EGFR 的蛋白信息和实验结构，列出物种、UniProt 和 PDB 编号。'
+    view = WebTurnProjection(query, 'session', []).capture(
+        result, context=SimpleNamespace(query=query, resolved_molecule=None, metadata={}))
+    assert view['status'] == 'partial'
+    assert 'Mus musculus' in view['final_answer'] and 'Q01279' in view['final_answer']
+    assert '未返回实验结构记录' in view['final_answer'] and 'AF-Q01279-F1' not in view['final_answer']
 
 
 @pytest.mark.parametrize('data', [None, []])
@@ -343,3 +648,18 @@ def test_property_projection_does_not_hide_other_results_or_clarification(case):
     assert complete['content'] == result.final_answer
     if case in {'waiting', 'waiting_completed'}:
         assert frame['status'] == 'waiting_for_input'
+
+
+def test_target_display_includes_returned_function_without_inventing_missing_text():
+    from src.web.decision_chat import _target_display_answer
+    from src.agent.scientific_session.web_acceptance import _scientific_data
+    rows = [{'gene_symbol': 'EGFR', 'uniprot_id': 'P00533', 'structure_count': 0,
+             'function': 'Receptor tyrosine kinase involved in signaling (PubMed:12345, PubMed:67890).', 'recommended_structures': []}]
+    target = ToolResult.success_result('target_database_search', data=rows,
+        quality={'evidence_id': 'target', 'validated': True}, provenance=ToolProvenance(
+            tool_name='target_database_search', input_digest='in', output_digest='out'))
+    answer = _target_display_answer(_scientific_data(target), concise=True)
+    assert 'Receptor tyrosine kinase involved in signaling.' in answer
+    assert 'PubMed:12345' not in answer
+    assert 'EGFR' in answer
+    assert 'OTHER 功能' not in answer

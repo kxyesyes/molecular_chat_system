@@ -39,6 +39,10 @@ ChatHandler → WebDecisionRuntime → PiAgentRuntime → 官方 Pi（runtime/pi
 | 工具异常、超时或旧返回格式 | [tooling/adapters.py](../src/agent/tooling/adapters.py)、[tools/base_tool.py](../src/agent/tools/base_tool.py) | `ToolResult` 中的状态、错误、warnings、artifacts、evidence、quality 不能退化为一段成功文本。 |
 | 数值、候选结构或来源不可信 | [validators](../src/agent/validators)、[contracts/result.py](../src/agent/contracts/result.py) | 保留领域校验、候选对齐和 partial/failed；模型缺失或 demo 不等于真实预测，未执行 Vina 不得给出已计算结合能。 |
 | 长历史或证据挤掉当前问题 | [prompt_budget.py](../src/web/prompt_budget.py)、[chat_prompt_builder.py](../src/web/chat_prompt_builder.py)、[chat_handler.py](../src/web/chat_handler.py) | 分区字符预算不是精确 token 计数；保留完整问题和科学约束，历史/证据整块取舍，不截断 SMILES 或 JSON。输入自身超限应明确拒绝；关键状态放不下时直接保留工具结果，不强行交模型解读。 |
+| 结构结果的自然语言追问缺少原始数值 | [web_business.py](../src/web/web_business.py) 的 `model_target_context()`、[web_request.py](../src/web/web_request.py)、[decision_policy.py](../src/agent/scientific_session/decision_policy.py)；回归 [test_pi_web_target_context.py](../tests/agent/test_pi_web_target_context.py) | 只读聊天可接收同一连接、同一会话已接受的结构元数据白名单，封存在 `prior_target_context` 并计入既有输入预算；模型解释成功后只保留原始记录，不把解释升级为科学证据。新连接不继承该上下文，科学执行仍按本轮编译计划；检索元数据不代表坐标检查、受体准备或对接验证。 |
+| 性质或 ADMET 自然追问丢失预测值 | [web_business.py](../src/web/web_business.py) 的 `model_candidate_context()`、[web_request.py](../src/web/web_request.py)、[decision_policy.py](../src/agent/scientific_session/decision_policy.py)；回归 [test_pi_web_candidate_context.py](../tests/agent/test_pi_web_candidate_context.py) | `prior_candidate_context` 只投影当前连接、当前会话已接受的候选计算记录；保留数值、单位、任务类型和无效端点状态，ADMET 按原请求关注端点筛选。只读解释不能授权新计算，也不能成为新科学证据；新连接不继承记录，原有输入预算继续生效。“预测数值/结果”等名词不单独构成计算指令。 |
+| 活性预测的报告解释缺少数值或模型范围 | [web_business.py](../src/web/web_business.py) 的 `model_activity_context()`、[web_request.py](../src/web/web_request.py)、[decision_policy.py](../src/agent/scientific_session/decision_policy.py)；回归 [test_pi_web_activity_context.py](../tests/agent/test_pi_web_activity_context.py) | `prior_activity_context` 只在无新科学执行的解释中传递当前会话已接受的活性记录，保留结构、靶点、数值、单位、阈值、失败／分歧状态和声明的物种范围，并计入既有输入预算。家族预测不能当作亚型实验效力，混合物种不能当作人源特异预测；文献查询和解释后保留原记录，不采纳模型文字作为证据。讨论实验优先级时，单个分子的阈值判定一致不代表不同候选的排序一致，数值小差异也不能证明实验优势。完整只读问句由概念契约识别，追加的新科学操作仍须执行或明确澄清。 |
+| 活性复核卡片泄漏原始状态或显示过多小数 | [activity_evidence_inspection.py](../src/agent/activity_evidence_inspection.py)；回归 [test_activity_inspection_presentation.py](../tests/agent/test_activity_inspection_presentation.py) | 摘要默认约四位有效数字并使用中文状态，保留分歧、阈值和已记录的物种范围；明确请求“原始”／`original`／`raw` 数值时保留完整精度。完整审计文本与科学记录不变，展示舍入不得改写判定或触发重算；缺失物种标为未标明。 |
 | partial/失败展示与安全摘要 | [agent_result_presentation.py](../src/web/agent_result_presentation.py)、[chat_handler.py](../src/web/chat_handler.py) | 纯投影保留科学正文和失败步骤；兼容入口传入当前 sanitizer 覆写。诊断、WebSocket、历史及资源清理仍由 handler 拥有；不能因提取改变状态或让主模型改写 partial 结果。 |
 
 [PiAgentRuntime](../src/agent/pi_runtime/runtime.py) 连接 [Python 桥接](../src/agent/pi_runtime/bridge.py) 与 [官方 SDK 会话](../runtime/pi/session.mjs)。Pi 管理迭代和上下文；[ScientificSession](../src/agent/scientific_session/controller.py) 保留领域授权、预算、工具执行和证据校验，复用 `WorkflowRunSession`。主模型事务与凭据留在 Python；Pi 不开放内置文件/终端工具或自动扩展发现。
@@ -56,6 +60,16 @@ ChatHandler → WebDecisionRuntime → PiAgentRuntime → 官方 Pi（runtime/pi
 | `rag_search`：[rag_contract.py](../src/agent/tooling/rag_contract.py) | 接受字符串或字符串 query；检查检索记录的 source_index、有限相似度与来源结构，保留额外 CSV 字段。来源字段形状正确不等于来源真实，索引/manifest/行映射验证仍由 RAG 服务负责。`rag_database_search` 经工厂别名归一化进入同一适配。 |
 | `activity_predictor`：[activity_contract.py](../src/agent/tooling/activity_contract.py) | 兼容字符串与结构化分子/靶点输入；检查原始和规范化成功、partial、失败观察及已知失败快照，复用活性科学校验。不训练、加载或启用模型，不改活性阈值。缺模型/demo 不能因通过类型校验就成为真实预测。 |
 | `molecular_docking`：[docking_contract.py](../src/agent/tooling/docking_contract.py) | 兼容文本、单层 query 包装和直接结构；可执行结构须显式给出 receptor、ligand/SMILES、center 与 size，不能借作业模型默认值补 box。复用 pose/能量/输入证明和 OpenSandbox hash、gvisor、image、cleanup 检查；不可信结果按现有规则清除。通过已验证快照传递的沙盒要求不能被外层 local 标记降低。 |
+
+活性请求明确限定物种时，模型选择和检查点身份必须保留该物种；分类与回归模型的登记范围都须明确匹配。`mixed`、`all` 或 `any` 范围不再视为单一物种专属证据，因此以前依赖这些范围接受物种限定的请求现在会返回模型不匹配；未限定物种的家族预测不受影响。
+
+已有活性结果讨论后接“然后／再预测或计算”时，`WebTurnProjection` 仅在前半段完整满足只读概念或活性记录查看契约时分拆。记录查看复用已有确定性展示；复杂讨论由配置中的模型解释当前会话已接受的活性记录，并复用普通解释的字段展示转换。后半段完整交给原有科学校验与执行流程，不能把讨论中的亚型或物种要求串入新预测。缺少记录或解释未生成时保留部分完成状态，新计算拒绝时同时保留旧结果解释及拒绝原因。解释文字不写入科学证据。回归入口：[test_pi_web_mixed_activity.py](../tests/agent/test_pi_web_mixed_activity.py)。
+
+讨论分类／回归分歧与阈值适用范围时，紧连的 `pIC50=5` 等端点等式属于文本，不作为未标注的结构候选；显式 `SMILES:` 及其逗号分隔候选仍严格校验。完整解释请求复用已接受的活性上下文，附加的新计算不能被解释识别吞掉。回归入口：[test_activity_threshold_discussion.py](../tests/agent/test_activity_threshold_discussion.py)。
+
+活性解释上下文保留分类与回归各自已记录的模型标识、任务、端点和单位，缺失时不补造；不同标识不证明训练数据或误差独立。预测一致不等于实验验证，不能替代靶点／物种匹配的实验数据，也不是有效实验结果必须满足的前提。解释不应将两项预测笼统称为同一模型的输出，除非原记录支持；这些身份字段用于解释依据，不主动堆入结果正文。
+
+活性解释的展示转换同时处理已知字段和值组合：分类／回归一致性显示为“一致／不一致”，`species = mixed` 显示为“混合物种”。不全局替换布尔词或 `mixed`；显式字段提问保留对应原词。转换仅影响普通与混合请求的解释正文，不改写科学记录。回归：[test_activity_explanation_display.py](../tests/agent/test_activity_explanation_display.py)。
 
 三个输出视图的 `schema_version` 均为类元数据 `1`，不是新增 HTTP 字段。它们校验观察而不把 `model_dump()` 投影写回科学结果；既有 `execute_tool_compat` 继续负责结果规范化，合法状态、warnings、artifacts、evidence、quality 与来源不应在类型迁移中丢失。工具归属、一次调用内的超时/并发槽与关闭仍沿用既有适配层。
 
@@ -147,6 +161,22 @@ git diff --check
 
 独立性能用例 `MEDCHAT_RUN_TASK_STORE_OFFLOAD_PERF=1` 保留原 50ms 调度断言，仅在适当的受控 runner 使用；默认功能测试验证线程 offload、同步进展和真实 SQLite。此拆分不是原 CI 慢点已经定位或性能已修复的证据。
 
+### 多行候选比较输入
+
+首页使用原生三行 `textarea` 保留多个 SMILES 的换行；Enter 发送，Shift+Enter 换行。解析“以下／下列分子”的指标列表时，语法主语不作为未知指标；hERG／BBB 预测绑定到已有 ADMET 端点，显式 SMILES 字段仍整段校验。“不要给综合评分”仅限制展示，不应让性质与 ADMET 批量请求退出已验证的执行路径。“只列出这些／这两个／这两项指标”等完整展示指代句不新增计算义务；附带未知指标的句子仍保留检查。BBB 简称在端点选择去重前归并到 BBB_Martins，避免重复的假缺失行。未知指标、非法结构和实际工具禁用仍按原规则处理。回归：[test_candidate_list_workflow.py](../tests/agent/test_candidate_list_workflow.py)、[home_multiline_composer_test.js](../tests/home_multiline_composer_test.js)；真实页面另验粘贴、键盘发送及布局。
+
+### 候选预测的优先级解释
+
+已有候选结果的解释按端点读取阈值，不能借用另一个端点的阈值或默认填入 0.5。没有校准、逐分子不确定性或模型误差记录时，应说明这些信息未知，不把分数差异称为显著、可忽略或处于误差范围内，也不声称已经证明模型未经校准。可以在明确项目目标和假设后提出暂定实验顺序，并说明靶点活性、选择性等缺失证据如何影响后续判断；分类分数高不等于实际性能更优。不能替用户假定项目偏好来强行选出候选；证据不足时可提出并行验证或条件分支。可修饰位点不构成选择性更好或脱靶风险更低的证据。BBB 简表显示“血脑屏障通透性（分类分数）”，结构化原始端点名保留。BBB_Martins 的二分类任务定义参见 [TDC 官方说明](https://huggingface.co/tdc/BBB_Martins-AttentiveFP)；这不证明本地模型已完成概率校准。回归：[test_pi_web_candidate_context.py](../tests/agent/test_pi_web_candidate_context.py)、[test_candidate_list_workflow.py](../tests/agent/test_candidate_list_workflow.py)。
+
+### 原生决策 JSON 纠正
+
+原生响应仅在单一调用、函数名和调用标识合法、没有附带正文且参数 JSON 无法解析时，可使用原有一次协议纠正额度重新请求完整决策。它与 schema／多调用纠正共享次数、模型请求预算和截止时间；不执行或回放损坏提案，不保存原始响应，不自动补写 JSON。Pi 只接受服务器生成的固定纠正文本，修正后的决策仍经过原有工具授权和证据校验。检查点保留有限结构元数据，继续任务不重置额度，也不重复已接受的工具调用。回归覆盖传输、反馈投影、预算、授权和 Web 继续执行：[test_decision_protocol_recovery.py](../tests/agent/test_decision_protocol_recovery.py)、[test_pi_provider.py](../tests/agent/test_pi_provider.py)、[test_decision_transport_boundaries.py](../tests/agent/test_decision_transport_boundaries.py)、[test_pi_web_profile_runtime.py](../tests/agent/test_pi_web_profile_runtime.py)。
+
+### 解释正文与文献检索展示
+
+首页通用正文格式化不再凭“相关文献”等文字合成文献检索结果卡片；提到查阅资料不表示本轮执行过检索。已有正文、表格和安全链接继续正常渲染，明确调用的检索格式化接口保留。回归：[home_literature_presentation_test.js](../tests/home_literature_presentation_test.js)，并检查比较表格、科学记号、链接安全和消息运行时。
+
 ## 6. 修改时的最小检查顺序
 
 1. 先确认当前分支和工作树，不覆盖原始混杂改动；为本任务建立独立分支。
@@ -154,3 +184,21 @@ git diff --check
 3. 修改契约时同时测正式组装路径、兼容路径、partial/failed、取消/清理和来源字段；削弱测试不是修复。
 4. 保留首个失败及原因，记录当前 SHA、解释器、真实命令、退出码和 skipped 原因；不粘贴密钥或聊天隐私数据。
 5. 独立审查、精确暂存、CI 门禁和授权齐备后再合并。文档、schema 或目录重命名都不能代替科学验收。
+
+### 明确只读的模型证据讨论
+
+`concept_request.py` 的 `_model_evidence_consultation()` 沿用完整分句契约，支持未核验的 AUC 前提、单分子正确率与分数差异解释，以及校准资料核对方法。每个分句必须完整匹配有界的证据角色，并有明确的不执行要求；未知分句、嵌入的新操作或新数值请求不能被任意说明文字吞掉。没有讨论对象的“只解释判断依据”不单独构成完整请求。该入口只覆盖列出的问法类型，不是通用语义分类器，其他表达继续走已有契约。
+
+接受后复用零步骤的普通聊天路径与已有候选上下文，用户假设的 ROC-AUC 等信息不能写入已接受的候选记录。完整单句复述按文本转换处理，追加独立句子必须重新判定。回归入口：[test_read_only_scientific_consultation.py](../tests/agent/test_read_only_scientific_consultation.py)；同时验证概念路由、科学义务、候选上下文与展示回归。
+
+在完整 Web 模式，遇到“不运行任何工具”等独立指令且已有概念契约未覆盖时，[decision_runtime.py](../src/web/decision_runtime.py) 将完整原文交给前端已配置的模型判断意图。只读问答可使用已接受的结果，但没有工具权限；请求同时要求执行、意图不明或分类失败时，不回退到科学执行。引文内的禁令、只禁止某一种操作的措辞不选择这个模式。分类也消耗本轮模型调用和输入预算。需要澄清时，同一连接和断线重连都根据原请求保存的权限续接。回归入口：[test_web_tool_free_consultation.py](../tests/agent/test_web_tool_free_consultation.py)。
+
+当完整 Web 请求因活性靶点不明确被拒，而原文同时包含 IC50、EC50、Ki 或 Kd 及浓度值时，运行时也可复核整句意图。用户给出的测定数据可供解释，模型明确判为只读时进入零工具问答。混合请求保留原拒绝原因。已编译的计算计划、结构引用、改写后的请求与续接任务各自沿用原流程。
+
+如果性质编译器返回通用能力拒绝，而用户明确限定“仅据这些信息”等证据范围，同一意图分类器会复核完整原文。只有只读解释可转入咨询。带新计算的混合请求保留原计划的拒绝结果。两种结果都在 `consultation_admission` 记录分类调用次数。例如，用户给出的指纹相似度可用于讨论覆盖范围，不能作为本次执行过相似度计算的证据。
+
+完整 Web 聊天在发布回答前核对明确的三句要求。对随机划分与骨架泛化的因果解释、并列分数的 AUC 解读，前端配置的模型还会根据原题复核草稿，区分已观察到的结果和可能原因。一次回答最多安排一次内容改写（科学复核或句数纠正）和一次协议修复，两者都受本轮模型请求数和截止时间限制。例如，复核结果缺少必填的 decision.version 时，系统保留复核要求，并让模型在同一轮重新提交完整结构。再次违反协议时终止。草稿只作为该次出站请求的 assistant 消息，不写入用户对话历史或用作工具证据。再次超出句数或仍命中已知的无条件骨架结论时返回具体原因。“能由此认定……”这类推断问题若误入候选选择，会在未绑定候选时复核整句意图；混合执行要求沿用原拒绝。页面将正文里的 BBB 端点标识显示为 BBB，明细保留原始键。
+
+涉及骨架或适用域时，问答策略提示模型核对训练集近邻和目标化学系列上的验证表现。涉及概率校准时，提示模型区分 Brier 总体误差和分组校准，并核对独立带标签样本中的预测概率与实际发生频率。两组说明只用于回答相关问题。维护依据见[骨架划分实证研究](https://doi.org/10.1021/acs.jcim.5c00475)与[概率校准文档](https://scikit-learn.org/stable/modules/calibration.html)。
+
+若用户提供同序的 0/1 标签和多个模型的阳性概率，并请求比较 Brier 分数和分组校准，Web 可以直接核算支持的完整输入。示例：“标签：0,1,1；模型A: 0.21,0.22,0.22；模型B: 0.5,0.5,0.5。请核对各模型的 Brier 分数和分组校准误差。” 每个不同概率单独成组，按组样本数加权比较预测概率与实际阳性率的绝对差。后续讨论通过同一连接既有的历史保留规则获得实际展示的报告。[核算代码](../src/web/calibration_report.py)及[入口回归](../tests/agent/test_supplied_calibration.py)包含改变标签、相邻概率、相同得分和独立操作的例子。

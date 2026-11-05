@@ -348,13 +348,14 @@ class OpenAICompatibleModel:
         )
 
     async def propose_ordinary_intent(
-        self, messages, *, mode="native", max_tokens=256, timeout_seconds=30.0, _journal=None,
+        self, messages, *, mode="native", max_tokens=256, timeout_seconds=30.0, _journal=None, input_budget=None,
     ):
         """Return one strict intent proposal using the same bounded transport."""
         transport = self._require_decision_transport("request_ordinary_intent")
         return await transport.request_ordinary_intent(
             self, messages, mode=mode, max_tokens=max_tokens,
             timeout_seconds=timeout_seconds, _journal=_journal,
+            **({'input_budget': input_budget} if input_budget is not None else {}),
         )
 
     async def propose_docking_preparation(

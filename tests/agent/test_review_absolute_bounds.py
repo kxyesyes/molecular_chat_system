@@ -15,8 +15,8 @@ def test_english_conjunction_checks_both_explicit_bounds(connector):
     assert unknown == []
     assert [bound["metric"] for bound in bounds] == ["molecular_weight", "logp"]
     report = generation_constraint_report(_generation_result(), query)
-    assert "candidate-1 | molecular_weight < 450.0 Da | 46.07 | 满足" in report
-    assert "candidate-2 | logp < 3.0 dimensionless | 3.1 | 不满足" in report
+    assert "候选 1 `CCO` | 分子量 < 450.0 Da | 46.07 | 满足" in report
+    assert "候选 2 `CCN` | logP < 3.0 | 3.1 | 不满足" in report
     assert "未验证" not in report
 
 
@@ -62,10 +62,10 @@ def test_relative_objectives_are_not_misclassified_as_unknown_numeric_bounds(que
 
 
 @pytest.mark.parametrize("clause,metric,passing,failing", [
-    ("MW < 450", "molecular_weight", 449, 450),
-    ("logP < 3", "logp", 2, 3),
-    ("QED > 0.5", "qed", 0.6, 0.5),
-    ("TPSA < 20", "tpsa", 19, 20),
+    ("MW < 450", "molecular_weight", 449, 451),
+    ("logP < 3", "logp", 2, 4),
+    ("QED > 0.5", "qed", 0.6, 0.4),
+    ("TPSA < 20", "tpsa", 19, 21),
     ("HBA <= 2", "hba", 2, 3),
     ("HBD <= 1", "hbd", 1, 2),
 ])
@@ -86,6 +86,22 @@ def test_absolute_goal_without_relative_objective_uses_matched_checks(clause, me
     assert result["quality"]["goal_supported"] is (state == "passing")
     assert candidate["constraint_checks"][0]["satisfied"] is {"passing": True, "failing": False, "missing": None}[state]
     assert not any("未识别到明确" in warning for warning in result["warnings"])
+
+
+@pytest.mark.parametrize('clause,metric,value', [
+    ('MW < 450', 'molecular_weight', 450),
+    ('logP < 3', 'logp', 3),
+    ('QED > 0.5', 'qed', 0.5),
+    ('TPSA < 20', 'tpsa', 20),
+])
+def test_rounded_descriptor_on_strict_boundary_is_unverified(clause, metric, value):
+    payload = _payload('优化 CCO，要求 ' + clause)
+    payload['outputs']['candidate_properties'][0]['properties'] = {metric: value}
+    result = LeadOptimizationVerifier().execute(payload)
+    candidate = result['data']['candidates'][0]
+    assert result['data']['status'] == candidate['status'] == 'unverified'
+    assert candidate['constraint_checks'][0]['satisfied'] is None
+    assert candidate['goal_supported'] is False
 
 
 @pytest.mark.parametrize("defect", ["failed", "wrong_id", "unknown_unit", "structure", "no_goal"])

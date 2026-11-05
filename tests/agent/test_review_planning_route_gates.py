@@ -64,7 +64,7 @@ def test_p2_1_target_role_bounds_reach_compiled_generation(separator, comparison
 
 
 @pytest.mark.parametrize("comparison,operator", [("不大于", "<="), ("不小于", ">=")])
-@pytest.mark.parametrize("state,label", [("equal", "满足"), ("missing", "未验证"), ("violating", "不满足")])
+@pytest.mark.parametrize("state,label", [("equal", "未验证（舍入精度不足）"), ("missing", "未验证"), ("violating", "不满足")])
 def test_p2_1_report_keeps_inclusive_bounds_and_missing_evidence(comparison, operator, state, label):
     from src.web.property_constraints import generation_constraint_report
     from tests.agent.test_browser_property_constraints import _generation_result
@@ -73,7 +73,7 @@ def test_p2_1_report_keeps_inclusive_bounds_and_missing_evidence(comparison, ope
     for row in result["tool_result_sequence"][1]["data"]:
         row["properties"]["molecular_weight"] = mass
     report = generation_constraint_report(result, f"以PDE为靶点设计2个分子要求MW{comparison}450")
-    assert f"molecular_weight {operator} 450.0 Da | {mass if mass is not None else '不可用'} | {label}" in report
+    assert f"分子量 {operator} 450.0 Da | {mass if mass is not None else '不可用'} | {label}" in report
 
 
 @pytest.mark.parametrize("query", [

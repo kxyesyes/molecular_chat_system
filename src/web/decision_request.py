@@ -48,7 +48,7 @@ _QUALIFIED = re.compile(r'不要|不使用|不用|不能|排除|但是|但不要
     r'\b(?:except|exclude|without|instead|not|never)\b', re.I)
 _METRICS = {
     'molecular_weight': r'分子量|\b(?:molecular\s+weight|mw)\b',
-    'logp': r'\blogp\b', 'tpsa': r'\btpsa\b',
+    'logp': r'\bc?logp\b', 'tpsa': r'\btpsa\b',
     'hbd': r'氢键供体|\bhbd\b', 'hba': r'氢键受体|\bhba\b', 'qed': r'\bqed\b',
 }
 

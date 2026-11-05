@@ -25,7 +25,7 @@ window.HomeTaskStatus = (() => {
     task_partial: "部分完成",
     task_rejected: "已拒绝",
     task_cancelled: "已取消",
-    validation_warning: "结果校验提醒",
+    validation_warning: "执行提醒",
   });
   const toolNames = Object.freeze({
     property_calculator: "属性计算",
@@ -131,13 +131,17 @@ window.HomeTaskStatus = (() => {
       const optionalFailureDetails = optionalFailures
         .map(item => /^Optional step [A-Za-z0-9_:.-]{1,128} \(([^()\s]+)\) failed: ([\s\S]*)$/.exec(item))
         .filter(match => match && match[1] === toolName);
-      const hasDuplicateFailureReason = optionalFailureDetails.length === 1
-        && warnings.includes(optionalFailureDetails[0][2]);
-      if (optionalFailureDetails.length === 1
-          && (warnings.length === 1 || hasDuplicateFailureReason)) {
-        return `${toolNames[toolName] || "计算步骤"}：结果校验未通过；具体原因见失败步骤。`;
+      if (optionalFailureDetails.length === 1) {
+        const reason = optionalFailureDetails[0][2];
+        const independent = warnings.filter(item => item !== optionalFailureDetails[0][0]
+          && !reason.endsWith(item));
+        if (!independent.length) {
+          return `${toolNames[toolName] || "计算步骤"}：步骤未完成；具体原因见失败步骤。`;
+        }
+        text = independent.map(rankWarning).join("；");
+      } else {
+        text = warnings.map(item => rankWarning(optionalFailureMessage(item, toolName))).join("；");
       }
-      text = warnings.map(item => rankWarning(optionalFailureMessage(item, toolName))).join("；");
     }
     text = optionalFailureMessage(text, toolName);
     for (const label of Object.values(toolNames)) {

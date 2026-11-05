@@ -124,7 +124,7 @@ class ChatHandler:
     def _reverse_display_count(message):
         counts = list(re.finditer(
             r'前\s*([0-9一二三四五六七八九十百]+)'
-            r'(?=\s*(?:个\s*)?(?:(?:最相似的?)?(?:候选)?靶点|目标|排名|结果|行|名|$|[，,。！？;；]))|'
+            r'(?=\s*(?:个\s*)?(?:的\s*)?(?:(?:最相似的?)?(?:候选)?靶点|候选(?=及其|以及|和|[，,。！？;；]|$)|目标|排名|结果|行|名|$|[，,。！？;；]))|'
             r'\btop\s*(one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+)\b'
             r'(?=\s*(?:targets?|candidates?|results?|ranks?|$|[,;.!?]))', message, re.I))
         def forbidden(match):
@@ -132,13 +132,13 @@ class ChatHandler:
                               message[:match.start()], flags=re.I)[-1]
             negated = re.search(r"不要|不用|不是|不只|不仅|别|勿|无需|\binstead\s+of\b|\b(?:not|never|don['’]t)\b", prefix, re.I)
             postfix_negated = re.match(
-                r'\s*(?:个)?\s*(?:最相似的?)?(?:候选)?(?:靶点)?\s*(?:不要|不用|无需|别|勿)\s*(?:列出|展示|显示)|'
+                r'\s*(?:个)?\s*(?:的\s*)?(?:最相似的?)?(?:候选)?(?:靶点)?\s*(?:不要|不用|无需|别|勿)\s*(?:列出|展示|显示)|'
                 r'\s*(?:targets?\s*)?(?:(?:are|is|should|must)\s*)?not\s+(?:be\s+)?(?:requested|wanted|shown|displayed)\b',
                 message[match.end():], re.I)
             return bool(negated or postfix_negated)
         counts = [match for match in counts if not forbidden(match)]
         target_counts = [match for match in counts if re.match(
-            r'\s*(?:个\s*)?(?:(?:最相似的?)?(?:候选)?靶点|目标|targets?)',
+            r'\s*(?:个\s*)?(?:的\s*)?(?:(?:最相似的?)?(?:候选)?靶点|目标|targets?)',
             message[match.end():], re.I)]
         if target_counts:
             counts = target_counts
@@ -157,10 +157,10 @@ class ChatHandler:
     def _reverse_display_restricted(message):
         """Distinguish an explicit no-display command from no count limit."""
         amount = r'(?:前\s*[0-9一二三四五六七八九十百]+|\btop\s*(?:one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+)\b)'
-        subject = r'\s*(?:个\s*)?(?:最相似的?)?(?:候选)?(?:靶点|目标|结果|行|名|targets?|results?)?'
+        subject = r'\s*(?:个\s*)?(?:的\s*)?(?:最相似的?)?(?:候选)?(?:靶点|目标|结果|行|名|targets?|results?)?'
         negative = r'(?:不要|不用|无需|别|勿|不(?=列出|显示|展示)|\bdo\s+not\b|\bdon[’\x27]t\b|\bnever\b)'
         action = r'(?:列出|显示|展示|show|list|display)'
-        boundary = r'(?=\s*(?:$|[，,。.!?！？;；]|以及|并|但|\band\b|\bbut\b))'
+        boundary = r'(?=\s*(?:$|[，,。.!?！？;；]|及其支持证据|以及|并|但|\band\b|\bbut\b))'
         return bool(re.search(rf'{negative}\s*{action}\s*(?:the\s+)?{amount}{subject}{boundary}|'
             rf'{amount}{subject}\s*{negative}\s*{action}|'
             rf'{amount}{subject}\s*(?:should|must|are|is)\s+not\s+(?:be\s+)?(?:shown|displayed|requested|wanted)',

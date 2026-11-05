@@ -15,7 +15,7 @@ from .dataset_contract import _canonical_parent
 from .family_contract import LABEL_THRESHOLD, PROBABILITY_THRESHOLD, resolve_activity_family
 from .model_card import _read_snapshot
 from .predictor import ActivityPredictor
-from .request_selection import ActivityModelRequest, select_family_bundle
+from .request_selection import ActivityModelRequest, SpeciesModelSelectionError, select_family_bundle
 
 
 class _PinnedPredictor(ActivityPredictor):
@@ -242,6 +242,11 @@ class FamilyActivityPredictor:
                 request_payload.setdefault("target", target)
                 request = ActivityModelRequest.from_mapping(request_payload)
                 bundle, stages, selected = self._pair_for_request(family, request)
+            except SpeciesModelSelectionError:
+                self._cache.pop(family, None)
+                for index in valid:
+                    rows[index]["errors"]["bundle"] = "species_model_unavailable"
+                return rows
             except Exception:
                 self._cache.pop(family, None)
                 for index in valid:

@@ -103,6 +103,21 @@ def test_model_metadata_never_copies_unrecognized_diagnostic_values():
     assert 'private-provider-marker' not in repr(clean)
 
 
+@run_async
+async def test_native_invalid_json_preserves_only_repair_shape(model_factory):
+    from src.agent.scientific_session.decision_policy import model_call_metadata, schema_correction
+    body = wire()
+    body['choices'][0]['message']['tool_calls'][0]['function']['arguments'] = '{"private-provider-marker":'
+    result = await model_factory(lambda _: httpx.Response(200, json=body)).decide(MESSAGES)
+    assert not result.success and result.decision is None
+    clean = model_call_metadata(result)
+    assert clean['reason'] == 'invalid_decision_json'
+    assert clean['native_response_shape'] == {
+        'call_count': 1, 'content_present': False, 'function_name_valid': True, 'call_id_valid': True}
+    assert schema_correction(result) is not None
+    assert 'private-provider-marker' not in repr(result) + repr(clean) + schema_correction(result)
+
+
 @pytest.mark.parametrize('schema_failure', [False, True])
 @run_async
 async def test_native_shape_is_not_added_to_resumable_model_history(model_factory, schema_failure):

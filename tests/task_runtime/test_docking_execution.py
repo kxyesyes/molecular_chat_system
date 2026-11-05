@@ -1605,6 +1605,25 @@ def test_verified_execution_reports_only_real_phase_boundaries(tmp_path: Path) -
     ]
 
 
+def test_failed_ligand_preparation_does_not_report_result_parsing(tmp_path: Path) -> None:
+    manifest = _stage(tmp_path)
+    phases: list[str] = []
+
+    def executor(_payload: dict[str, Any], **control: Any) -> ToolResult:
+        control["progress_callback"]("ligand_preparation", 35)
+        return ToolResult.error_result(
+            "molecular_docking", AgentErrorCode.INTERNAL_ERROR, "Preparation failed"
+        )
+
+    result = DockingExecution(tmp_path, raw_executor=executor).run_verified(
+        "task-1", manifest, progress_callback=lambda phase, _progress: phases.append(phase)
+    )
+
+    assert result["success"] is False
+    assert phases[-1] == "ligand_preparation"
+    assert "result_parsing" not in phases
+
+
 def test_second_input_integrity_failure_after_tool_never_commits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

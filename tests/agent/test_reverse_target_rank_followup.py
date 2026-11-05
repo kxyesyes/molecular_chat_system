@@ -134,6 +134,9 @@ def test_five_row_display_does_not_crop_or_renumber_proof(ranked):
     assert 'Synthetic E' in display and 'Synthetic F' not in display
     assert str(ranked.data[0]['final_similarity']) in display
     assert '非实验' in display and 'ChEMBL' in display
+    assert '截断处' in display and '相同' in display
+    concise = boundary.render_prefix(context, session_id='owner-session', count=5, concise=True)
+    assert '截断处' in concise and '相同' in concise
     assert boundary.resolve(context, session_id='owner-session', rank=10)['record'] == ranked.data[9]
 
 

@@ -93,7 +93,8 @@ def inspection_request(query):
     # grammar above still checks every original clause, including unknown text.
     intent_clauses = [_NO_RECALCULATE.split(clause, maxsplit=1)[0].strip() for clause in clauses]
     if recognized and not unknown and activity_inspection:
-        return {'selectors': tuple(selectors), 'all': all_candidates}
+        return {'selectors': tuple(selectors), 'all': all_candidates,
+                'raw_values': bool(re.search(r'原始|\b(?:original|raw)\b', query, re.I))}
     # Keep this guard in the evidence-inspection domain. Quoting a prohibition
     # in unrelated chat must not disable scientific work in subsequent turns.
     inspection_intent = any(_ACTIVITY_FIELDS.search(clause) and (
@@ -156,6 +157,7 @@ def inspection_answer(evidence, selection):
     rows = [row for row in observation['data'] if _canonical(row['smiles']) in selected]
     lines = ['活性结果解读（复用上一轮证据）', '',
              '仅查看已验证的原始记录，未重新运行科学工具。模型预测非实验结论；需复核的值不能作为已确认活性。']
+    summary_lines = ['活性预测解读', '', '复用已有模型预测，非实验测量；未重新计算。']
     partial = observation['status'] == 'partial'
     for row in rows:
         reason = _exclusion(row)
@@ -163,6 +165,8 @@ def inspection_answer(evidence, selection):
         consistency = row.get('classification_regression_consistent')
         lines.extend(['', f"候选 `{_cell(row['smiles'])}` · 靶点 `{_cell(row.get('requested_target'))}`",
                       '', '| 原始字段 | 记录值 |', '|---|---|'])
+        summary_lines.extend(['', f"候选 `{_cell(row['smiles'])}` · 靶点 `{_cell(row.get('requested_target'))}`",
+                              '', '| 指标 | 结果 |', '|---|---|'])
         fields = [('活性概率', row.get('activity_probability')),
                   ('预测 pIC50', row.get('predicted_pIC50')),
                   ('活性分类', row.get('activity_class')),
@@ -171,8 +175,24 @@ def inspection_answer(evidence, selection):
                   ('记录状态', row.get('status'))]
         for label, value in fields:
             lines.append(f"| {label} | {_cell(value) if value is not None else '不可用'} |")
+            displayed = value
+            if label in {'活性概率', '预测 pIC50'} and value is not None and not selection.get('raw_values'):
+                displayed = format(value, '.4g')
+            elif label == '分类与回归一致性':
+                displayed = '不一致' if consistency is False else '一致' if consistency is True else '未确定'
+            elif label == '记录状态':
+                displayed = {'passed': '已完成', 'partial': '部分完成', 'failed': '失败',
+                             'unavailable': '不可用'}.get(value, '未确定')
+            summary_lines.append(f"| {label} | {_cell(displayed) if displayed is not None else '不可用'} |")
+        scope = (row.get('provenance') or {}).get('scope')
+        species = scope.get('species') if isinstance(scope, dict) else None
+        species_name = {'mixed': '混合物种', 'human': '人源', 'mouse': '小鼠',
+                        'rat': '大鼠', 'dog': '犬', 'pig': '猪'}.get(species, '未标明') if isinstance(species, str) else '未标明'
+        summary_lines.append(f'模型物种范围：{species_name}'
+                             + ('；不能视为人源特异预测。' if species == 'mixed' else '。'))
         lines.append('排除原因：' + reason + '。原始预测保留。' if reason else
                      '该候选未因一致性检查被排除；本次仅查看结果，不重新排序。')
+        summary_lines.append(lines[-1])
         if (row.get('label_threshold') == LABEL_THRESHOLD
                 and row.get('probability_threshold') == PROBABILITY_THRESHOLD):
             lines.append(f'本模型契约：分类概率阈值为 {PROBABILITY_THRESHOLD}，'
@@ -182,6 +202,7 @@ def inspection_answer(evidence, selection):
         else:
             partial = True
             lines.append('来源未提供本功能支持的阈值契约，不能进一步解释一致性；未补造阈值。')
+        summary_lines.append(lines[-1].removeprefix('本模型契约：'))
         models = (row.get('provenance') or {}).get('models', {})
         for task, label in (('classification', '分类模型'), ('regression', '回归模型')):
             model = models.get(task, {}) if isinstance(models, dict) else {}
@@ -189,8 +210,7 @@ def inspection_answer(evidence, selection):
             if model_id is not None:
                 lines.append(f'{label}：`{_cell(model_id)}`。')
     # Model identifiers remain in the full audit view, not the result body.
-    summary = '\n'.join(line for line in lines
-                        if not line.startswith(('分类模型：', '回归模型：')))
+    summary = '\n'.join(summary_lines)
     lines.extend(['', f"来源：trace `{_cell(evidence['trace_id'])}`；"
                   f"证据 `{_cell(observation['quality']['evidence_id'])}`。"])
     content = '\n'.join(lines)

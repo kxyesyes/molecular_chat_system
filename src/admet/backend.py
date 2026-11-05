@@ -178,6 +178,9 @@ class ADMETAIBackend:
                     "category": str(row["category"]),
                     "task_type": str(row["task_type"]),
                     "unit": str(row["units"]),
+                    "dataset_url": str(row["url"]),
+                    **{key: float(row[key]) for key in ("minimum", "maximum")
+                       if math.isfinite(float(row[key]))},
                 }
                 for _, row in info.iterrows()
             }
@@ -267,15 +270,22 @@ class ADMETAIBackend:
                     else "admet_ai_model"
                 ),
             }
+            if ((info.get('minimum') is not None and value < info['minimum'])
+                    or (info.get('maximum') is not None and value > info['maximum'])):
+                endpoints[key]['validity'] = 'out_of_range'
+            if isinstance(info.get('dataset_url'), str) and info['dataset_url'].startswith('https://tdcommons.ai/'):
+                endpoints[key]['dataset_url'] = info['dataset_url']
 
         classification = [
             key for key, endpoint in endpoints.items()
-            if endpoint["task_type"] == "classification"
+            if endpoint["task_type"] == "classification" and endpoint.get('validity') != 'out_of_range'
         ]
         adverse = [
             key for key in classification
-            if endpoints[key]["category"] == "Toxicity"
-            or any(marker in key for marker in ("CYP", "Pgp", "hERG", "DILI", "NR-", "SR-"))
+            if "_Substrate_" not in key and (
+                endpoints[key]["category"] == "Toxicity"
+                or any(marker in key for marker in ("CYP", "Pgp", "hERG", "DILI", "NR-", "SR-"))
+            )
         ]
         risk_endpoint_ids = [key for key in adverse if endpoints[key]["value"] >= 0.5]
         admet = {

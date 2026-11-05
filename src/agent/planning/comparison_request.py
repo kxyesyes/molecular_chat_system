@@ -50,6 +50,19 @@ def _whole_subject_list(text):
     # alternatives from candidates causes exponential backtracking on duplicates.
     for member in re.split(r'和|与|及|、|，|,|\band\b', text, flags=re.I):
         value = member.strip()
+        named_structure = re.fullmatch(r'[\u4e00-\u9fff]{1,32}\s*（(.+)）', value)
+        if named_structure:
+            label = value[:value.index('（')].strip()
+            if re.search(r'预测|计算|分析|测定|评估|检索|对接|生成|设计', label):
+                return False
+            value = named_structure.group(1)
+            value = re.sub(r'^\s*SMILES\s*[:：=]\s*', '', value, flags=re.I)
+        else:
+            named_structure = re.fullmatch(r'([\u4e00-\u9fff]{1,32})\s+([^\s]+)', value)
+            if named_structure:
+                if re.search(r'预测|计算|分析|测定|评估|检索|对接|生成|设计', named_structure.group(1)):
+                    return False
+                value = named_structure.group(2)
         for label in _COMPOUND_LABELS:
             if (value.startswith(label) and len(value) > len(label)
                     and value[len(label)].isspace()):

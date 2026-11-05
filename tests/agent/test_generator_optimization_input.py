@@ -98,6 +98,17 @@ def test_supported_legacy_prose(boundary):
     assert dispatch.call_args.args[0]['count'] == 1
 
 
+def test_optimization_with_activity_target_preserves_validated_seed_and_request(boundary):
+    tool, dispatch, _ = boundary
+    query = ('优化 CC(=O)Oc1ccccc1C(=O)O，降低 logP，生成 2 个候选分子，'
+             '并预测候选分子对人源 BChE 的活性。')
+    tool.execute(query)
+    dispatch.assert_called_once()
+    intent = dispatch.call_args.args[0]
+    assert intent['base_smiles'] == 'CC(=O)Oc1ccccc1C(=O)O'
+    assert intent['requirements'] == query
+
+
 def test_seed_spelling_reaches_real_prompt(offline_models):
     llm = offline_models('CCN', max_calls=1, model_name='test-only')
     tool = LLMMolecularGenerator(llm_model=llm)

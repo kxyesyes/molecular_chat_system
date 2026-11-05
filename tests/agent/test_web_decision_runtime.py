@@ -674,6 +674,20 @@ def test_whole_request_rejected_without_subset_execution(actual_app, message, fl
     asyncio.run(run())
 
 
+def test_unrecognized_docking_request_points_to_available_setup(actual_app):
+    async def run():
+        async with actual_app(mode='decision_a2') as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                frames = await socket.turn({'message': '请将配体 CCO 与 BuChE 进行分子对接，给我结合能。'})
+                result = result_of(frames)
+                complete = next(frame for frame in frames if frame['type'] == 'complete')
+                assert result['status'] == 'rejected' and not result['tool_result_sequence']
+                assert all(term in complete['content'] for term in ('分子对接', 'PDB', '配体', '盒子', '未执行')), result['metadata']
+                assert b.calls == []
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('raw', [
     '{"message":"你好","message":"你好"}', '{"message":"你好","temperature":NaN}',
     '[]', 'null', '"' + 'x' * 33000 + '"',

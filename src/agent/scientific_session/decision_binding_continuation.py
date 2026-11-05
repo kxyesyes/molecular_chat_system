@@ -29,7 +29,7 @@ from .decision_bindings import B1BindingResolver
 from .decision_binding_acceptance import evaluate_binding_acceptance
 from .decision_bounds import validate_json, observation_value
 from .decision_inputs import seal_observation, verify_observation_integrity
-from .decision_policy import DecisionBoundaryError, encode_observation, model_observation, usable
+from .decision_policy import DecisionBoundaryError, encode_observation, model_observation, usable, repair_record_valid
 from .binding_policy import get_binding_policy
 
 
@@ -303,13 +303,14 @@ def _replay(saved, loop, projection, resolver, historical, journal, adapters, re
         required = {'success', 'usage', 'round', 'decision_id'}
         strings = {'request_id', 'provider', 'model', 'mode', 'finish_reason'}
         numbers = {'elapsed_ms', 'request_attempts'}
-        optional = strings | numbers | {'usage_unit', 'error_code', 'reason', 'schema_issues'}
+        optional = strings | numbers | {'usage_unit', 'error_code', 'reason', 'schema_issues', 'native_response_shape'}
         if (type(call) is not dict or not required <= set(call) or not set(call) <= required | optional
                 or any(type(call[k]) is not str or len(call[k]) > 256 for k in strings & set(call))
                 or any(type(call[k]) is not int or not 0 <= call[k] <= 10**9 for k in numbers & set(call))
                 or ('usage_unit' in call and call['usage_unit'] != 'tokens')
                 or ('error_code' in call and call['error_code'] not in {e.value for e in AgentErrorCode})
-                or ('reason' in call and call['reason'] != 'invalid_decision_schema')
+                or ('reason' in call and call['reason'] not in {'invalid_decision_schema', 'ambiguous_decision_response', 'invalid_decision_json'})
+                or ('native_response_shape' in call and not repair_record_valid(call))
                 or ('schema_issues' in call and not _equal(call['schema_issues'], public_schema_issues(call['schema_issues'])))):
             raise ValueError('invalid model metadata')
         usage = call['usage']
@@ -326,7 +327,7 @@ def _replay(saved, loop, projection, resolver, historical, journal, adapters, re
     failed = [c for c in calls if not c['success']]
     successful = [c for c in calls if c['success']]
     if (len(failed) != saved['protocol_repairs'] or not calls[-1]['success']
-            or any(c.get('reason') != 'invalid_decision_schema' or c.get('error_code') != AgentErrorCode.INVALID_OUTPUT.value for c in failed)
+            or any(not repair_record_valid(c) for c in failed)
             or type(proposals) is not list or len(proposals) != len(successful)):
         raise ValueError('invalid repaired proposal history')
     messages = deepcopy(prefix)

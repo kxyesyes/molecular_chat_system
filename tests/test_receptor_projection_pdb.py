@@ -87,6 +87,16 @@ def test_complete_fixture_preserves_all_atoms_and_raw_records(newline, final):
     assert_immutable(result)
 
 
+def test_site_annotation_is_retained_as_metadata_without_selecting_a_pocket():
+    lines = fixture_lines()
+    lines.insert(1, "SITE     1 AC1  3 ALA A   1  GLY A   2  SER A   3")
+    parsed = api().parse_original_pdb(pack(lines))
+    assert parsed.records[1].record_type == "SITE"
+    assert parsed.records[1].classification == "metadata"
+    assert len(parsed.atoms) == 10
+    assert parsed.connections == ()
+
+
 @pytest.mark.parametrize("field,places,expected", [
     (" -0.001", 3, -1), ("  1.00", 2, 100), ("-0.00", 2, 0), ("123.456", 3, 123456),
 ])

@@ -19,6 +19,8 @@ from tests.agent.test_reverse_target_rank_followup import ranked  # noqa: F401
     ('比较前3个分子，做反向寻靶并列出前5个靶点', 5),
     ('Use CCO from the top three molecules and show top five targets', 5),
     ('对 CCO 反向寻靶，列出前3个最相似的靶点', 3),
+    ('对 CCO 反向寻靶，列出排名前 5 的候选靶点及依据', 5),
+    ('对 CCO 反向寻靶，不要列出排名前 5 的候选靶点', 10),
     ('比较前3个结果，再对 CCO 反向寻靶并列出前5个靶点', 5),
     ('不要列出前3个靶点，列出前5个结果', 5),
     ('前3个最相似的靶点不要列出', 10),
@@ -32,6 +34,7 @@ def test_requested_rank_count_is_bounded_and_respects_negation(query, expected):
 
 @pytest.mark.parametrize('query,restricted', [
     ('对 CCO 反向寻靶，不要列出前3个靶点', True),
+    ('对 CCO 反向寻靶，不要列出前 5 的候选靶点。', True),
     ('对 CCO 反向寻靶，前3个最相似的靶点不要列出', True),
     ('不要列出前3个靶点，列出前5个结果', True),
     ('Reverse target CCO; do not show top five targets', True),

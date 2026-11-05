@@ -21,7 +21,7 @@ from src.agent.contracts.ordinary_admission import (
     binding_digest, loop_admission, admission_metadata, restored_deadline,
 )
 from src.agent.persistence.redaction import contains_secret_material
-from .decision_policy import DecisionBoundaryError
+from .decision_policy import DecisionBoundaryError, repair_record_valid
 from .decision_bounds import validate_json, context_value, configuration_generation
 from .decision_history import history_prefix
 
@@ -250,8 +250,7 @@ def validate_history(snapshot, loop, results, specs, *, session,
     failed = [c for c in calls if not c['success']]
     if (len(failed) != snapshot['protocol_repairs']
             or not calls[-1]['success']
-            or any(c.get('reason') != 'invalid_decision_schema'
-                   or c.get('error_code') != AgentErrorCode.INVALID_OUTPUT.value for c in failed)):
+            or any(not repair_record_valid(c) for c in failed)):
         raise ValueError('invalid repair history')
     call_ids = snapshot['call_ids']
     if (type(call_ids) is not list

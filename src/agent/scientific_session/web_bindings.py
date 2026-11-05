@@ -82,6 +82,14 @@ def _clarification_molecules(query, original, tools, *, molecular_input):
     for clause in clauses:
         if clause.casefold().rstrip('。!！') in acknowledgements:
             continue
+        if 'activity_predictor' in tools:
+            from src.agent.tools.activity_input import _SPECIES_DECLARATION, requested_activity_species
+            if _SPECIES_DECLARATION.fullmatch(clause.rstrip('。!！')):
+                try:
+                    requested_activity_species(clause)
+                except ValueError:
+                    raise DecisionBoundaryError('web_clarification_changes_request') from None
+                continue
         target = re.fullmatch(r'(?:(?:target|靶点)\s*[:：=]\s*)?([\w-]+)', clause, re.I)
         if target and 'activity_predictor' in tools:
             try:
@@ -309,6 +317,17 @@ class WebBindingResolver:
         if not semantic.allowed:
             raise DecisionBoundaryError('web_semantic_precondition_failed')
         resolved = WorkflowOrchestrator._resolve_input(context, step, outputs)
+        if (self.requirements.workflow_name == 'hit_to_lead_optimization'
+                and step.name in {'baseline_properties', 'baseline_admet'}
+                and isinstance(resolved, str)
+                and any(item.tool_name == 'activity_predictor' for item in steps.values())):
+            from src.agent.tools.activity_input import activity_intent_requested, parse_activity_input
+            if activity_intent_requested(resolved):
+                from src.agent.tools.base_tool import BaseMolecularTool
+                _, molecules, _ = parse_activity_input(resolved, BaseMolecularTool('web-input', ''))
+                if len(molecules) != 1:
+                    raise DecisionBoundaryError(_ERROR)
+                resolved = molecules[0]
         if name == 'reverse_target_predictor':
             from src.agent.tools.molecular_input import parse_molecular_smiles
             from src.agent.routing.reverse_request import reverse_molecular_input_query
@@ -326,14 +345,50 @@ class WebBindingResolver:
             resolved = {'query': resolved, 'k': count}
         if name == 'activity_predictor':
             from .decision_inputs import activity_input_target
+            from src.agent.tools.activity_input import requested_activity_species
+            queries = [self._input_journal.context(index).query for index in range(turn + 1)]
             target = activity_input_target(SimpleNamespace(context=original,
-                input_queries=[self._input_journal.context(index).query for index in range(turn + 1)]))
+                input_queries=queries))
             if target is not None:
                 resolved = ({**resolved, 'target': target} if type(resolved) is dict
                             else {'query': resolved, 'target': target})
+            try:
+                species = {value for query in queries if (value := requested_activity_species(query)) is not None}
+            except ValueError:
+                raise DecisionBoundaryError('web_clarification_changes_request') from None
+            if len(species) > 1:
+                raise DecisionBoundaryError('web_clarification_changes_request')
+            if species:
+                model_request = dict(resolved.get('model_request') or {})
+                value = next(iter(species))
+                if 'species' in model_request and model_request['species'] != value:
+                    raise DecisionBoundaryError('web_clarification_changes_request')
+                model_request['species'] = value
+                resolved = {**resolved, 'model_request': model_request}
         # The optimization verifier's existing typed adapter consumes the
         # workflow envelope directly; other domain adapters accept query views.
         payload = resolved if name == 'lead_optimization_verifier' else {'query': resolved}
+        if name == 'target_database_search':
+            from src.agent.contracts.target_request import UNSUPPORTED_TARGET_SPECIES, unrecognized_lookup_qualifier
+            from src.agent.planning.request_parsing import positive_intent_text
+            from src.agent.tools.activity_input import requested_activity_species
+            qualifiers = re.findall(r'([\u4e00-\u9fff]{1,12}源)\s*(?=[A-Za-z][A-Za-z0-9_-]*)', original.query)
+            if (unrecognized_lookup_qualifier(original.query)
+                    or any(not qualifier.endswith(('人源', '小鼠源', '大鼠源', '犬源', '狗源', '猪源'))
+                    for qualifier in qualifiers)
+                    or re.search(rf'(?<![A-Za-z])(?:{UNSUPPORTED_TARGET_SPECIES})\s*'
+                                 r'(?=[A-Za-z][A-Za-z0-9_-]*)', original.query, re.I)):
+                raise DecisionBoundaryError('web_clarification_changes_request')
+            try:
+                species = requested_activity_species(original.query)
+            except ValueError:
+                raise DecisionBoundaryError('web_clarification_changes_request') from None
+            if species not in (None, 'human', 'mouse'):
+                raise DecisionBoundaryError('web_clarification_changes_request')
+            if species == 'mouse':
+                payload['organism'] = 'Mus musculus'
+            if re.search(r'功能|\bfunction\b', positive_intent_text(original.query), re.I):
+                payload['include_function'] = True
         snapshot = context_value(self._input_journal.context(turn), query_content_bytes=True)
         selected = context_value(context, query_content_bytes=True)['resolved_molecule']
         selection = _digest(selected) if selected is not None else None

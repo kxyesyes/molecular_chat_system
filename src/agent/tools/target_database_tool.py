@@ -43,10 +43,12 @@ _NAMED_ACCESSION = re.compile(
 _ACCESSION_ITEM = rf"(?:{_NAMED_ACCESSION.pattern}|{_LABELLED_ACCESSION.pattern}|{_ACCESSION})"
 _EXPLICIT_ACCESSION_QUERY = re.compile(
     rf"\s*(?:(?:find|search|lookup|compare)\s+|(?:请\s*)?(?:查找|搜索(?:靶点数据库)?|查询|比较)\s*[:：]?\s*)?"
-    rf"(?:人源\s*)?(?:丁酰胆碱酯酶\s+)?{_ACCESSION_ITEM}"
+    rf"(?:(?:人(?:源|类)?|小鼠(?:源)?)\s*)?(?:丁酰胆碱酯酶\s+)?{_ACCESSION_ITEM}"
     rf"(?:{_ACCESSION_JOIN.pattern}{_ACCESSION_ITEM})*"
-    r"\s*(?:(?:for\s+)?(?:experimental\s+)?structures|(?:的实验结构|的结构)"
-    r"|[，,。]\s*列出(?:可用于对接的)?实验结构(?:编号与配体信息|，说明物种、结构编号和共晶配体信息)?)?"
+    r"\s*(?:(?:for\s+)?(?:experimental\s+)?structures|(?:的蛋白(?:信息|功能)和(?:已解析的)?实验结构|的实验结构|的结构)"
+    r"|[，,。]\s*列出(?:可用于对接的)?实验结构(?:编号与配体信息|，说明物种、结构编号和共晶配体信息)?"
+    r"|的实验结构\s+列出结构信息和配体)?"
+    r"(?:[，,]\s*列出\s*PDB\s*编号(?:及|和|与)结构方法)?"
     r"[。.！!]?\s*", re.I,
 )
 
@@ -70,11 +72,17 @@ class TargetDatabaseTool(BaseMolecularTool):
             ),
         )
         self._service = None
+        self._species_services = {}
         self._service_lock = threading.RLock()
 
-    def _get_service(self):
+    def _get_service(self, organism=None):
         """Lazy-load TargetSearchService."""
         with self._service_lock:
+            if organism and organism != 'Homo sapiens':
+                if organism not in self._species_services:
+                    from src.target_search.service import TargetSearchService
+                    self._species_services[organism] = TargetSearchService(organism=organism)
+                return self._species_services[organism]
             if self._service is None:
                 try:
                     from src.target_search.service import TargetSearchService
@@ -90,10 +98,14 @@ class TargetDatabaseTool(BaseMolecularTool):
         with self._service_lock:
             service = self._service
             self._service = None
+            species_services = list(self._species_services.values())
+            self._species_services.clear()
         if service is not None:
             close = getattr(service, "close", None)
             if callable(close):
                 close()
+        for service in species_services:
+            service.close()
 
     def should_use(self, query: str) -> bool:
         query_lower = query.lower()
@@ -121,6 +133,14 @@ class TargetDatabaseTool(BaseMolecularTool):
 
     def execute(self, query: Any) -> Dict[str, Any]:
         result = self._create_base_result(query)
+        include_function = isinstance(query, dict) and query.get('include_function') is True
+        organism = query.get('organism') if isinstance(query, dict) else None
+        if organism not in (None, 'Homo sapiens', 'Mus musculus'):
+            result.update(status='invalid_input', message='Unsupported target organism.',
+                          error={'code': 'validation_error', 'message': 'Unsupported target organism.'})
+            return result
+        if isinstance(query, dict) and 'query' in query:
+            query = query['query']
         try:
             pdb_id = requested_pdb_id(query)
         except ValueError:
@@ -140,7 +160,7 @@ class TargetDatabaseTool(BaseMolecularTool):
         if (type(target_query) is str and _ACCESSION_LABEL.search(target_query)
                 and search_queries and all(re.fullmatch(_ACCESSION, keyword, re.I) for keyword in search_queries)):
             pair_text = re.sub(r"^\s*(?:请\s*)?(?:查找|搜索(?:靶点数据库)?|查询|比较)\s*[:：]?\s*", "", target_query)
-            pair_text = re.sub(r"^\s*人源\s*", "", pair_text)
+            pair_text = re.sub(r"^\s*(?:人(?:源|类)?|小鼠(?:源)?)\s*", "", pair_text)
             pairs = list(_NAMED_ACCESSION.finditer(pair_text))
             for pair in pairs:
                 name = canonical_target_identifier(pair[1]) or pair[1].upper()
@@ -176,7 +196,7 @@ class TargetDatabaseTool(BaseMolecularTool):
         logger.info("Target database search queries: %s", search_queries)
 
         try:
-            service = self._get_service()
+            service = self._get_service(organism) if organism == 'Mus musculus' else self._get_service()
             targets: list[Any] = []
             searched: list[str] = []
             lookup_path: list[str] = []
@@ -186,9 +206,16 @@ class TargetDatabaseTool(BaseMolecularTool):
             result["warnings"] = []
             for search_query in search_queries:
                 search_result = service.search_targets(search_query,
-                    **({"pdb_id": pdb_id} if pdb_id is not None else {}))
+                    **({"pdb_id": pdb_id} if pdb_id is not None else {}),
+                    **({'include_function': True} if include_function else {}))
                 searched.append(search_query)
                 service_results = search_result.get("results", [])
+                if organism is not None and any(
+                        not isinstance(target, dict) or target.get('organism') != organism
+                        for target in service_results):
+                    result.update(status='invalid_input', message='Target organism did not match the request.',
+                        error={'code': 'validation_error', 'message': 'Target organism mismatch.'})
+                    return result
                 # A labelled accession is a lookup key, not permission to drop
                 # a named target. Bind both against authoritative gene evidence.
                 expected_name = accession_names.get(search_query) or (named_targets[0] if named_targets else None)
@@ -239,9 +266,11 @@ class TargetDatabaseTool(BaseMolecularTool):
                                     int(target_id)
                                 )
                                 structures = structure_payload.get("structures", [])
+                                if len(structures) > 20:
+                                    result.setdefault("warnings", []).append("structure_list_truncated")
                                 recommended_structures = [
                                     dict(structure)
-                                    for structure in structures[:3]
+                                    for structure in structures[:20]
                                     if isinstance(structure, dict)
                                 ]
                             except Exception:
@@ -331,7 +360,13 @@ class TargetDatabaseTool(BaseMolecularTool):
             ) or any(
                 isinstance(target, dict) and bool(target.get("stale"))
                 for target in targets
-            )
+            ) or "structure_list_truncated" in result["warnings"]
+            if isinstance(query, str) and re.search(r'分辨率|\bresolution\b', query, re.I):
+                if any(structure.get('structure_type') == 'experimental' and structure.get('resolution') is None
+                       for target in targets if isinstance(target, dict)
+                       for structure in target.get('recommended_structures', [])):
+                    partial = True
+                    result['warnings'].append('structure_resolution_missing')
             if partial:
                 result["status"] = "partial"
                 result["quality"]["status"] = "partial"

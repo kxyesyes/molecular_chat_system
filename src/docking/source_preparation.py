@@ -44,13 +44,13 @@ def _source_candidate(pdb_id, accession, taxonomy, deadline):
         # Compiler input reservations additionally retain these bytes; the
         # deliberate conservative overlap never depends on garbage collection.
         budget.reserve(64 * 1024 * 1024)
-        pair = downloader.fetch_rcsb_source_pair(pdb_id, deadline=deadline)
+        pair = downloader.fetch_rcsb_source_pair(pdb_id, deadline=deadline, pinned=True)
         current()
         comparing = True
         ids = compiler._discover_components(pair["cif_bytes"], pdb_id, budget=budget)
         comparing = False
         current()
-        components = downloader.fetch_rcsb_component_files(ids, deadline=deadline)
+        components = downloader.fetch_rcsb_component_files(ids, deadline=deadline, pinned=True)
         current()
         comparing = True
         compared = compiler._compile(pair["pdb_bytes"], pair["cif_bytes"], components,
@@ -67,6 +67,9 @@ def _source_candidate(pdb_id, accession, taxonomy, deadline):
                 "source_authentication": "requires_live_owner_binding"}
     except TimeoutError:
         return lifecycle._failure("PREPARATION_TIMEOUT")
+    except downloader.RestrictedStructureDNS:
+        return {"ok": False, "code": "SOURCE_DNS_RESTRICTED",
+                "message": "Official source DNS resolved to a restricted network."}
     except compiler._Invalid as exc:
         reason = exc.args[0] if len(exc.args) == 1 and type(exc.args[0]) is str else "cif_invalid"
         return compiler._error(reason if reason in compiler.SAFE_REASONS else "cif_invalid")

@@ -129,6 +129,34 @@ def safe(view):
         assert forbidden not in serialized
 
 
+def test_slow_status_context_check_does_not_block_event_loop(tmp_path):
+    rig = Rig(tmp_path)
+    async def run():
+        async with rig.client() as client:
+            coordinator = rig.coordinator(client)
+            await rig.begin(coordinator)
+            entered, release = threading.Event(), threading.Event()
+            original = coordinator._capture_current
+            def slow_capture():
+                entered.set()
+                release.wait(2)
+                return original()
+            coordinator._capture_current = slow_capture
+            watchdog = threading.Timer(1, release.set)
+            watchdog.start()
+            task = asyncio.create_task(coordinator.status(root_id='root-1', owner_session_id='owner-1'))
+            try:
+                assert await asyncio.to_thread(entered.wait, .5)
+                await asyncio.sleep(.05)
+                assert not release.is_set(), 'status context check blocked the event loop'
+            finally:
+                release.set()
+                watchdog.cancel()
+                await task
+                await coordinator.close_root(root_id='root-1', owner_session_id='owner-1')
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("mode", ["native", "json"])
 def test_whole_request_real_transport_one_draft_no_scientific_authority(tmp_path, mode):
     rig = Rig(tmp_path)
@@ -141,7 +169,7 @@ def test_whole_request_real_transport_one_draft_no_scientific_authority(tmp_path
             assert view["phase"] == "AWAITING_INPUT"
             assert view["reason_code"] == "source_preparation_required"
             record = rig.read(view)
-            assert record["draft"]["budget"] == dict(limit_ms=180000, spent_ms=30000, proposal_slots_spent=1)
+            assert record["draft"]["budget"] == dict(limit_ms=180000, spent_ms=90000, proposal_slots_spent=1)
             assert all(v == {"state": "pending"} for v in record["draft"]["slots"].values())
             assert record["expires_at_ms"] == 1900000 and record["monotonic_expires"] == 1000.0
             claim = rig.metadata()["chat_docking_root"]

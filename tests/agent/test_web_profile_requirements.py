@@ -18,6 +18,114 @@ def api():
     return importlib.import_module(name), importlib.import_module('src.agent.scientific_session.web_requirements')
 
 
+@pytest.mark.parametrize('query', [
+    '那是否可以把刚才的数值默认当作纯水、pH 7 和 25°C 下的结果？'
+    '我想把这几个条件写入报告，请只依据已有记录核对，不要重新计算。',
+    '我们计划将上述条件写入报告，请核实是否有记录支持。',
+    '我准备把这些条件写入报告，请判断是否准确。',
+])
+def test_report_content_consultation_is_chat_without_file_authority(query):
+    from src.web.web_request import prepare_web_request
+    prepared = prepare_web_request({'message': query, 'enable_rag': False},
+                                   session_id='owner', trace_id='report-consultation')
+    assert prepared.request_kind == 'chat'
+    assert not prepared.allowed_tools
+    assert prepared.context.query == query
+
+
+@pytest.mark.parametrize('query', [
+    '请把这些条件写入报告，请核对。',
+    '我想把这些条件写入报告。',
+    '我想把这些条件写入报告，请核对；然后写入 report.md。',
+    '我想把这些条件写入报告，请核对；发送邮件。',
+    '我想把这些条件写入报告，请核对；删除文件。',
+    '我想把这些条件写入报告，请核对并上传报告。',
+    '我想把这些条件写入报告，请不要核对。',
+    '我想把这些条件写入报告 report.md，请核对。',
+])
+def test_report_consultation_does_not_hide_external_operations(query):
+    from src.web.decision_request import DecisionAdmissionError
+    from src.web.web_request import prepare_web_request
+    with pytest.raises(DecisionAdmissionError):
+        prepare_web_request({'message': query, 'enable_rag': False},
+                            session_id='owner', trace_id='external-operation')
+
+
+def test_unsupported_activity_target_is_rejected_before_binding_validation():
+    from src.web.decision_request import DecisionAdmissionError
+    from src.web.decision_runtime import terminal_message_for_reason
+    from src.web.web_request import prepare_web_request
+    query = ('请预测分子 SMILES: CC(=O)Oc1ccccc1C(=O)O 对人 EGFR（UniProt P00533）的活性。'
+             '如果没有可用模型，请明确说明，不要编造数值。')
+    with pytest.raises(DecisionAdmissionError, match='activity_target_conflict_or_unknown'):
+        prepare_web_request({'message': query}, session_id='owner', trace_id='test')
+    assert '靶点' in terminal_message_for_reason('activity_target_conflict_or_unknown')
+    valid = prepare_web_request({'message': '预测 CCO 对人 BuChE 的活性。'}, session_id='owner', trace_id='test')
+    assert valid.required_tools == frozenset({'activity_predictor'})
+
+
+def test_target_design_and_requested_descriptors_do_not_add_prediction_or_ranking():
+    c, a = api()
+    query = '针对 EGFR 生成 2 个候选小分子，给出 SMILES，并计算每个分子的分子量和 LogP。'
+    req = a.compile_web_requirements(AgentContext(query, 'target-design', session_id='owner'),
+                                     allowed_tools=c.WEB_TOOLS)
+    assert [step.tool_name for step in req.steps] == [
+        'target_database_search', 'llm_molecular_generator', 'property_calculator']
+    extended = query[:-1] + '，并预测 ADMET。'
+    extended_req = a.compile_web_requirements(AgentContext(extended, 'target-design-extra', session_id='owner'),
+                                              allowed_tools=c.WEB_TOOLS)
+    assert 'admet_predictor' in [step.tool_name for step in extended_req.steps]
+
+
+def test_target_design_with_unverified_inhibitor_caveat_only_computes_requested_descriptors():
+    c, a = api()
+    query = ('针对 BuChE 设计 2 个候选小分子，给出 SMILES，计算分子量和 LogP。'
+             '请不要将生成结果当作已验证的抑制剂。')
+    req = a.compile_web_requirements(AgentContext(query, 'target-design-caveat', session_id='owner'),
+                                     allowed_tools=c.WEB_TOOLS)
+    assert [step.tool_name for step in req.steps] == [
+        'target_database_search', 'llm_molecular_generator', 'property_calculator']
+
+
+def test_target_design_with_activity_admet_and_ranking_preserves_all_obligations():
+    from src.agent.contracts.target_request import analyze_target_request
+    from src.web.scientific_obligations import ScientificObligationCompiler
+    c, a = api()
+    query = ('针对 BuChE 设计 2 个候选分子，计算分子性质、预测活性和 ADMET，'
+             '并按这些证据排序；注明预测不是实验结果。')
+    target = analyze_target_request(query)
+    assert target.targets == ('BCHE',) and not target.needs_clarification
+    assert not ScientificObligationCompiler.is_profile_candidate(query)
+    req = a.compile_web_requirements(AgentContext(query, 'target-design-complete', session_id='owner'),
+                                     allowed_tools=c.WEB_TOOLS)
+    assert {step.tool_name for step in req.steps} >= {
+        'target_database_search', 'llm_molecular_generator', 'property_calculator',
+        'admet_predictor', 'activity_predictor', 'candidate_ranker'}
+    for unsupported in ('logD', 'FooMetric'):
+        altered = query.replace('分子性质', '分子性质和 ' + unsupported)
+        assert ScientificObligationCompiler.is_profile_candidate(altered)
+        assert ScientificObligationCompiler().compile(altered).status == 'rejected'
+
+
+@pytest.mark.parametrize('suffix', ['', '不要将预测结果当作实验事实。'])
+def test_target_design_with_admet_reaches_generated_candidate_workflow(suffix):
+    from src.web.scientific_obligations import ScientificObligationCompiler
+    c, a = api()
+    query = '请针对人源 EGFR 设计 2 个候选小分子，给出 SMILES，计算分子量和 LogP，并预测 ADMET。' + suffix
+    assert not ScientificObligationCompiler.is_profile_candidate(query)
+    req = a.compile_web_requirements(AgentContext(query, 'target-design-admet', session_id='owner'),
+                                     allowed_tools=c.WEB_TOOLS)
+    assert [step.tool_name for step in req.steps] == [
+        'target_database_search', 'llm_molecular_generator', 'property_calculator', 'admet_predictor']
+
+
+def test_target_design_with_unknown_metric_is_not_silently_forwarded():
+    from src.web.scientific_obligations import ScientificObligationCompiler
+    query = '请针对人源 EGFR 设计 2 个候选小分子，计算 logD，并预测 ADMET。'
+    assert ScientificObligationCompiler.is_profile_candidate(query)
+    assert ScientificObligationCompiler().compile(query).status == 'rejected'
+
+
 def context(query='生成 3 个候选分子', skill='molecular_design', **kwargs):
     return AgentContext(query, 'web-requirements', session_id='owner', active_skill=skill, **kwargs)
 
@@ -103,6 +211,18 @@ def test_explicit_forbidden_clause_does_not_authorize_optional_defaults():
     req = a.compile_web_requirements(context('计算 CCO 的性质，不要计算类药性', 'admet_assessment'), allowed_tools=c.WEB_TOOLS)
     assert 'drug_likeness_assessment' in req.forbidden_tools
     assert [s.tool_name for s in req.steps] == ['property_calculator']
+
+
+@pytest.mark.parametrize(('query', 'tools'), [
+    ('计算 CCO 的分子量，不要检索文献。', ['property_calculator']),
+    ('计算 CCO 的分子量和 logP，不要预测毒性。', ['property_calculator']),
+    ('计算 CCO 的分子量并评估类药性，不要检索文献。',
+     ['property_calculator', 'drug_likeness_assessment']),
+])
+def test_automatic_property_workflow_excludes_unrequested_assessments(query, tools):
+    c, a = api()
+    req = a.compile_web_requirements(context(query, None), allowed_tools=c.WEB_TOOLS)
+    assert [step.tool_name for step in req.steps] == tools
 
 
 @pytest.mark.parametrize('query', [
@@ -257,3 +377,33 @@ def test_server_resolved_optimization_remains_optimization_not_new_target_design
     assert req.request['query'] == query
     assert 'target_database_search' not in {step.tool_name for step in req.steps}
     assert 'lead_optimization_verifier' in {step.tool_name for step in req.steps}
+
+
+@pytest.mark.parametrize(('suffix', 'skill', 'activity_expected'), [
+    ('', None, False),
+    ('，不要预测活性', None, False),
+    ('，并预测 PDE5A 活性', 'hit_to_lead_optimization', True),
+])
+def test_automatic_lead_plan_only_includes_requested_activity(suffix, skill, activity_expected):
+    c, a = api()
+    query = '优化 CCO，降低 logP，生成 2 个候选分子' + suffix
+    req = a.compile_web_requirements(context(query, skill), allowed_tools=c.WEB_TOOLS)
+    steps = a.workflow_steps(req)
+    assert ('activity_predictor' in {step.tool_name for step in steps}) is activity_expected
+    verification = next(step for step in steps if step.tool_name == 'lead_optimization_verifier')
+    keys = verification.metadata['workflow_output_keys']
+    assert ('baseline_activity' in keys and 'candidate_activity' in keys) is activity_expected
+    assert {'baseline', 'candidates', 'candidate_properties'} <= set(keys)
+
+
+def test_automatic_lead_optimization_with_candidate_activity_keeps_both_obligations():
+    c, a = api()
+    query = ('优化 CC(=O)Oc1ccccc1C(=O)O，降低 logP，生成 2 个候选分子，'
+             '并预测候选分子对人源 BChE 的活性。')
+    req = a.compile_web_requirements(context(query, None), allowed_tools=c.WEB_TOOLS)
+    assert req.workflow_name == 'hit_to_lead_optimization'
+    steps = a.workflow_steps(req)
+    assert {'llm_molecular_generator', 'property_calculator', 'activity_predictor',
+            'lead_optimization_verifier'} <= {step.tool_name for step in steps}
+    candidate_activity = next(step for step in steps if step.name == 'candidate_activity')
+    assert candidate_activity.input_from == 'candidates'

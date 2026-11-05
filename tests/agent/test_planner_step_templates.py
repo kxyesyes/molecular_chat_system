@@ -190,6 +190,22 @@ def test_target_structure_molecule_analysis_has_fixed_three_step_plan():
     assert plan.steps[2].continue_on_error is True
 
 
+def test_target_function_and_admet_plan_preserves_both_obligations():
+    query = '查询人 EGFR 的生物学功能和 UniProt 编号，并预测 CCO 的 ADMET。'
+    plan = TaskPlanner().plan(_context('target_structure_molecule_analysis', query))
+    assert [step.tool_name for step in plan.steps] == ['target_database_search', 'admet_predictor']
+    assert [step.input_data for step in plan.steps] == ['EGFR', 'CCO']
+    assert all(step.required for step in plan.steps)
+
+
+def test_target_admet_and_property_plan_binds_each_molecule():
+    query = '预测 CCO 的 ADMET，并查询人 EGFR 的生物学功能和 UniProt 编号，再计算 CCN 的 LogP。'
+    plan = TaskPlanner().plan(_context('target_structure_molecule_analysis', query))
+    assert {step.tool_name: step.input_data for step in plan.steps} == {
+        'target_database_search': 'EGFR', 'admet_predictor': 'CCO', 'property_calculator': 'CCN'}
+    assert all(step.required for step in plan.steps)
+
+
 @pytest.mark.parametrize("skill,query", [
     ("molecular_design", GENERATION_QUERY), ("target_driven_design", TARGET_QUERY),
     ("hit_to_lead_optimization", LEAD_QUERY),

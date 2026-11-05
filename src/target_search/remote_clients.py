@@ -19,7 +19,7 @@ import requests
 
 STABLE_USER_AGENT = "MedChat-TargetSearch/1.0"
 
-_OFFICIAL_SOURCES = frozenset({"UniProt", "RCSB_PDB", "AlphaFold"})
+_OFFICIAL_SOURCES = frozenset({"UniProt", "RCSB_PDB", "AlphaFold", "ChEMBL", "PDBe", "EuropePMC", "PMC_BioC"})
 _ERROR_MESSAGES = {
     "ambiguous_match": "multiple authoritative records matched",
     "connection_failure": "connection to the remote source failed",
@@ -138,6 +138,14 @@ def _is_allowlisted_request(source: str, method: str, url: Any) -> bool:
             return False
         accession = parsed.path[len(prefix) :]
         return _is_uniprot_accession(accession)
+    if source == 'ChEMBL' and method == 'GET' and host == 'www.ebi.ac.uk':
+        return bool(re.fullmatch(r'/chembl/api/data/(?:molecule\.json|mechanism\.json|target/CHEMBL[0-9]+\.json)', parsed.path))
+    if source == 'PDBe' and method == 'GET' and host == 'www.ebi.ac.uk':
+        return bool(re.fullmatch(r'/pdbe/api/pdb/entry/binding_sites/[0-9][a-z0-9]{3}/[1-9][0-9]*', parsed.path))
+    if source == 'EuropePMC' and method == 'GET' and host == 'www.ebi.ac.uk':
+        return parsed.path == '/europepmc/webservices/rest/search'
+    if source == 'PMC_BioC' and method == 'GET' and host == 'www.ncbi.nlm.nih.gov':
+        return bool(re.fullmatch(r'/research/bionlp/RESTful/pmcoa\.cgi/BioC_json/PMC[1-9][0-9]{0,11}/unicode', parsed.path))
     return False
 
 
@@ -665,7 +673,7 @@ class UniProtClient(_SourceClientContext):
                 "query": f"({field}:{normalized_query}) AND (organism_id:{taxon_id})",
                 "format": "json",
                 "size": 5,
-                "fields": "accession,id,gene_names,protein_name,organism_name,organism_id,reviewed",
+                "fields": "accession,id,gene_names,protein_name,organism_name,organism_id,reviewed,cc_function",
             },
             _deadline=deadline,
         )
@@ -726,6 +734,62 @@ class UniProtClient(_SourceClientContext):
         return _normalize_uniprot(selected, match_reason)
 
 
+class ChemblClient(_SourceClientContext):
+    """Bind a chemical identity and a single-protein mechanism to an accession."""
+
+    def __init__(self, http: BoundedJsonClient) -> None:
+        self._http = http
+
+    def lookup_mechanism(self, inchikey: str, accession: str) -> dict[str, str] | None:
+        if (not isinstance(inchikey, str) or not re.fullmatch(r'[A-Z]{14}-[A-Z]{10}-[A-Z]', inchikey)
+                or not isinstance(accession, str) or not _is_uniprot_accession(accession)):
+            raise RemoteSourceError('ChEMBL', 'invalid_identifier', retryable=False)
+        deadline = self._http._begin_operation()
+        base = 'https://www.ebi.ac.uk/chembl/api/data/'
+        payload = self._http.request_json('ChEMBL', 'GET', base + 'molecule.json',
+            params={'molecule_structures__standard_inchi_key': inchikey, 'limit': 5}, _deadline=deadline)
+        if not isinstance(payload, dict) or not isinstance(payload.get('molecules'), list) or not isinstance(payload.get('page_meta'), dict):
+            raise RemoteSourceError('ChEMBL', 'invalid_response', retryable=False)
+        molecules = payload['molecules']
+        if payload['page_meta'].get('total_count') != 1 or len(molecules) != 1:
+            return None
+        molecule = molecules[0]
+        if not isinstance(molecule, dict) or not isinstance(molecule.get('molecule_structures'), dict):
+            raise RemoteSourceError('ChEMBL', 'invalid_response', retryable=False)
+        molecule_id, name = molecule.get('molecule_chembl_id'), molecule.get('pref_name')
+        if (not isinstance(molecule_id, str) or not re.fullmatch(r'CHEMBL[0-9]+', molecule_id)
+                or molecule['molecule_structures'].get('standard_inchi_key') != inchikey
+                or not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9 .,+()-]{1,120}', name)):
+            raise RemoteSourceError('ChEMBL', 'invalid_response', retryable=False)
+        payload = self._http.request_json('ChEMBL', 'GET', base + 'mechanism.json',
+            params={'parent_molecule_chembl_id': molecule_id, 'limit': 5}, _deadline=deadline)
+        if not isinstance(payload, dict) or not isinstance(payload.get('mechanisms'), list) or not isinstance(payload.get('page_meta'), dict):
+            raise RemoteSourceError('ChEMBL', 'invalid_response', retryable=False)
+        mechanisms = payload['mechanisms']
+        if payload['page_meta'].get('total_count') != len(mechanisms):
+            return None
+        matches = []
+        for mechanism in mechanisms:
+            if not isinstance(mechanism, dict) or mechanism.get('parent_molecule_chembl_id') != molecule_id:
+                raise RemoteSourceError('ChEMBL', 'invalid_response', retryable=False)
+            target_id = mechanism.get('target_chembl_id')
+            if not isinstance(target_id, str) or not re.fullmatch(r'CHEMBL[0-9]+', target_id):
+                continue
+            target = self._http.request_json('ChEMBL', 'GET', base + f'target/{target_id}.json', _deadline=deadline)
+            if not isinstance(target, dict) or target.get('target_chembl_id') != target_id:
+                raise RemoteSourceError('ChEMBL', 'invalid_response', retryable=False)
+            components = target.get('target_components')
+            if (target.get('target_type') == 'SINGLE PROTEIN' and target.get('organism') == 'Homo sapiens'
+                    and isinstance(components, list) and len(components) == 1
+                    and isinstance(components[0], dict) and components[0].get('accession') == accession
+                    and mechanism.get('action_type') == 'INHIBITOR'):
+                matches.append(target_id)
+        if len(set(matches)) != 1:
+            return None
+        return {'molecule_id': molecule_id, 'name': name, 'target_id': matches[0], 'action': 'INHIBITOR',
+                'source_url': f'https://www.ebi.ac.uk/chembl/compound_report_card/{molecule_id}/'}
+
+
 class RcsbClient(_SourceClientContext):
     SEARCH_URL = "https://search.rcsb.org/rcsbsearch/v2/query"
     GRAPHQL_URL = "https://data.rcsb.org/graphql"
@@ -737,6 +801,10 @@ query Entries($ids: [String!]!) {
     struct { title }
     exptl { method }
     rcsb_entry_info { resolution_combined nonpolymer_bound_components }
+    nonpolymer_entities {
+      rcsb_nonpolymer_entity_container_identifiers { entry_id }
+      nonpolymer_comp { chem_comp { id } }
+    }
     polymer_entities {
       rcsb_id
       rcsb_polymer_entity_container_identifiers {
@@ -765,6 +833,91 @@ query Entries($ids: [String!]!) {
             raise ValueError("max_structures must be an integer from 1 to 100")
         self._http = http
         self._max_structures = max_structures
+
+    def lookup_titles(self, ids: list[str]) -> dict[str, str]:
+        if not ids or len(ids) > 20 or any(not isinstance(value, str) or not re.fullmatch(r'[0-9][A-Z0-9]{3}', value) for value in ids):
+            raise RemoteSourceError('RCSB_PDB', 'invalid_identifier', retryable=False)
+        query = 'query Entries($ids: [String!]!) { entries(entry_ids: $ids) { rcsb_id struct { title } } }'
+        payload = self._http.request_json('RCSB_PDB', 'POST', self.GRAPHQL_URL,
+                                          json={'query': query, 'variables': {'ids': ids}})
+        data = payload.get('data') if isinstance(payload, dict) and not payload.get('errors') else None
+        entries = data.get('entries') if isinstance(data, dict) else None
+        if not isinstance(entries, list):
+            raise RemoteSourceError('RCSB_PDB', 'invalid_response', retryable=False)
+        titles = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get('rcsb_id') not in ids:
+                continue
+            structure = entry.get('struct')
+            title = structure.get('title') if isinstance(structure, dict) else None
+            if isinstance(title, str) and 0 < len(title) <= 500 and not re.search(r'[\x00-\x1f<>\[\]`]', title):
+                titles[entry['rcsb_id']] = title
+        return titles
+
+    def lookup_entry_origins(self, pdb_id: str) -> list[dict[str, Any]]:
+        """Return source organisms per polymer entity for an exact PDB entry."""
+        if not isinstance(pdb_id, str) or not re.fullmatch(r'[0-9][A-Za-z0-9]{3}', pdb_id):
+            raise RemoteSourceError('RCSB_PDB', 'invalid_identifier', retryable=False)
+        pdb_id = pdb_id.upper()
+        query = ('query Entries($ids: [String!]!) { entries(entry_ids: $ids) { rcsb_id '
+                 'polymer_entities { rcsb_id rcsb_entity_source_organism '
+                 '{ ncbi_scientific_name ncbi_taxonomy_id } } } }')
+        payload = self._http.request_json('RCSB_PDB', 'POST', self.GRAPHQL_URL,
+                                          json={'query': query, 'variables': {'ids': [pdb_id]}})
+        data = payload.get('data') if isinstance(payload, dict) and not payload.get('errors') else None
+        entries = data.get('entries') if isinstance(data, dict) else None
+        if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+            raise RemoteSourceError('RCSB_PDB', 'invalid_response', retryable=False)
+        entry = entries[0]
+        entities = entry.get('polymer_entities')
+        if entry.get('rcsb_id') != pdb_id or not isinstance(entities, list) or not 1 <= len(entities) <= 100:
+            raise RemoteSourceError('RCSB_PDB', 'invalid_response', retryable=False)
+        result = []
+        for entity in entities:
+            identifier = entity.get('rcsb_id') if isinstance(entity, dict) else None
+            if not isinstance(identifier, str) or not re.fullmatch(re.escape(pdb_id) + r'_[1-9][0-9]*', identifier):
+                raise RemoteSourceError('RCSB_PDB', 'invalid_response', retryable=False)
+            organisms = entity.get('rcsb_entity_source_organism') or []
+            if not isinstance(organisms, list) or len(organisms) > 100:
+                raise RemoteSourceError('RCSB_PDB', 'invalid_response', retryable=False)
+            sources = []
+            for organism in organisms:
+                name = organism.get('ncbi_scientific_name') if isinstance(organism, dict) else None
+                taxid = organism.get('ncbi_taxonomy_id') if isinstance(organism, dict) else None
+                if (not isinstance(name, str) or not 0 < len(name) <= 200
+                        or re.search(r'[\x00-\x1f<>\[\]`]', name)
+                        or type(taxid) is not int or taxid <= 0):
+                    raise RemoteSourceError('RCSB_PDB', 'invalid_response', retryable=False)
+                sources.append((name, taxid))
+            result.append({'entity_id': identifier, 'organisms': sources})
+        return result
+
+    def lookup_component(self, component_id: str) -> dict[str, str]:
+        if not isinstance(component_id, str) or not re.fullmatch(r'[A-Za-z0-9]{1,12}', component_id):
+            raise RemoteSourceError('RCSB_PDB', 'invalid_identifier', retryable=False)
+        component_id = component_id.upper()
+        query = ('query Component($id: String!) { chem_comp(comp_id: $id) { '
+                 'chem_comp { id name } rcsb_chem_comp_descriptor { InChIKey } '
+                 'rcsb_chem_comp_container_identifiers { comp_id } } }')
+        payload = self._http.request_json('RCSB_PDB', 'POST', self.GRAPHQL_URL,
+                                          json={'query': query, 'variables': {'id': component_id}})
+        data = payload.get('data') if isinstance(payload, dict) and not payload.get('errors') else None
+        record = data.get('chem_comp') if isinstance(data, dict) else None
+        chemical = record.get('chem_comp') if isinstance(record, dict) else None
+        identifiers = record.get('rcsb_chem_comp_container_identifiers') if isinstance(record, dict) else None
+        name = chemical.get('name') if isinstance(chemical, dict) else None
+        if (not isinstance(chemical, dict) or chemical.get('id') != component_id
+                or not isinstance(identifiers, dict) or identifiers.get('comp_id') != component_id
+                or not isinstance(name, str) or not 0 < len(name) <= 512
+                or re.search(r'[\x00-\x1f<>`]', name)):
+            raise RemoteSourceError('RCSB_PDB', 'invalid_response', retryable=False)
+        result = {'id': component_id, 'name': name,
+                  'source_url': f'https://www.rcsb.org/ligand/{component_id}'}
+        descriptor = record.get('rcsb_chem_comp_descriptor')
+        key = descriptor.get('InChIKey') if isinstance(descriptor, dict) else None
+        if isinstance(key, str) and re.fullmatch(r'[A-Z]{14}-[A-Z]{10}-[A-Z]', key):
+            result['inchikey'] = key
+        return result
 
     def search(
         self, uniprot_accession: str, *, pdb_id: str | None = None
@@ -1126,6 +1279,20 @@ def _normalize_uniprot(record: dict[str, Any], match_reason: str) -> dict[str, A
         if scientific_name is not None and not isinstance(scientific_name, str):
             raise RemoteSourceError("UniProt", "invalid_response", retryable=False)
         organism_name = scientific_name.strip() if scientific_name else None
+    functions = []
+    comments = record.get("comments", [])
+    if not isinstance(comments, list):
+        raise RemoteSourceError("UniProt", "invalid_response", retryable=False)
+    for comment in comments:
+        if not isinstance(comment, dict):
+            raise RemoteSourceError("UniProt", "invalid_response", retryable=False)
+        if comment.get("commentType") == "FUNCTION":
+            texts = comment.get("texts", [])
+            if not isinstance(texts, list) or any(
+                not isinstance(text, dict) or not isinstance(text.get("value"), str) for text in texts
+            ):
+                raise RemoteSourceError("UniProt", "invalid_response", retryable=False)
+            functions.extend(text["value"].strip() for text in texts if text["value"].strip())
     return {
         "gene_symbol": gene_name,
         "protein_name": protein_name,
@@ -1136,6 +1303,7 @@ def _normalize_uniprot(record: dict[str, Any], match_reason: str) -> dict[str, A
         "source_record_id": accession,
         "source_url": f"https://www.uniprot.org/uniprotkb/{accession}/entry",
         "match_reason": match_reason,
+        **({"function": " ".join(functions)} if functions else {}),
     }
 
 
@@ -1256,6 +1424,21 @@ def _normalize_rcsb_graphql_entry(
     ligands = _optional_string_list(
         info, "nonpolymer_bound_components", "RCSB_PDB"
     )
+    entities = entry.get('nonpolymer_entities') or []
+    if not isinstance(entities, list):
+        raise RemoteSourceError('RCSB_PDB', 'invalid_response', retryable=False)
+    for entity in entities:
+        if not isinstance(entity, dict):
+            raise RemoteSourceError('RCSB_PDB', 'invalid_response', retryable=False)
+        identifiers = entity.get('rcsb_nonpolymer_entity_container_identifiers')
+        component = entity.get('nonpolymer_comp')
+        chemical = component.get('chem_comp') if isinstance(component, dict) else None
+        if (not isinstance(identifiers, dict) or identifiers.get('entry_id') != requested_id
+                or not isinstance(chemical, dict) or not isinstance(chemical.get('id'), str)
+                or not re.fullmatch(r'[A-Za-z0-9]{1,12}', chemical['id'])):
+            raise RemoteSourceError('RCSB_PDB', 'invalid_response', retryable=False)
+        ligands.append(chemical['id'].upper())
+    ligands = sorted(set(ligands))
     return {
         "structure_id": requested_id,
         "source": "RCSB_PDB",

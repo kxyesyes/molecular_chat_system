@@ -102,7 +102,9 @@ def web_observation_reasons(result, record, step, *, request_query):
                 if target is None:
                     reasons.append('activity_target_missing')
                 else:
-                    translated = {'input_data': {'query': {'smiles': subjects, 'target': target}}}
+                    bound = dict(payload) if type(payload) is dict else {'query': payload}
+                    bound.update(smiles=subjects, target=target)
+                    translated = {'input_data': {'query': bound}}
                     reasons += _activity_reasons(result, translated, None)
                 if not all(row.get('success') is True for row in result.data):
                     reasons.append('incomplete_activity_batch')
@@ -212,7 +214,7 @@ def _generation_constraints(requirements, steps, by_step, observations, reasons_
             source_id = property_id
         for candidate in generated.data['candidates']:
             smiles = candidate['canonical_smiles']
-            checks = check_property_bounds(bounds, properties.get(_canonical(smiles)))
+            checks = check_property_bounds(bounds, properties.get(_canonical(smiles)), rounded=True)
             if any(check['satisfied'] is False for check in checks):
                 failures.add('property_bounds_not_satisfied')
             if any(check['satisfied'] is None for check in checks):
@@ -340,7 +342,7 @@ def _scientific_data(result):
             return None
         for row, original in zip(rows, result.data):
             row.update(_pick(original, (
-                'has_experimental_structure', 'has_alphafold_structure',
+                'function', 'has_experimental_structure', 'has_alphafold_structure',
                 'experimental_structure_count', 'alphafold_structure_count',
                 'source_url', 'target_stale', 'structures_stale',
                 'target_retrieved_at', 'target_expires_at',
@@ -353,6 +355,8 @@ def _scientific_data(result):
                 for structure in original.get('recommended_structures', [])]
             for clean, structure in zip(row['recommended_structures'],
                                         original.get('recommended_structures', [])):
+                if structure.get('cache_status') == 'unverified':
+                    clean['cache_status'] = 'unverified'
                 for field in ('chain_ids', 'ligand_ids'):
                     if field in structure:
                         clean[field] = (list(structure[field])
@@ -443,7 +447,8 @@ def render_web_scientific_answer(resolver, *, required_tools=(), evidence_ids, i
                 _typed(result)
                 display = not any(code in reasons[identity] for code in (
                     'invalid_scientific_observation', 'subject_mismatch', 'ranking_candidate_mismatch',
-                    'ranking_evidence_mismatch', 'invalid_smiles', 'duplicate_smiles', 'current_source_proof_missing'))
+                    'ranking_evidence_mismatch', 'invalid_smiles', 'duplicate_smiles',
+                    'activity_species_mismatch', 'current_source_proof_missing'))
             except (ValueError, TypeError, KeyError):
                 pass
         block = dict(tool=result.tool_name, evidence_id=identity, status=result.status.value,

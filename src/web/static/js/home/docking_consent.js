@@ -124,7 +124,7 @@
     }
     function poll(state) {
       clear(state, "pollTimer");
-      if (state.socket === socket && !state.readOnly && !state.stopped &&
+      if (state.socket === socket && !state.readOnly && (!state.stopped || state.cancelSent) &&
         (state.event.phase === "running" || state.blocked)) {
         state.pollTimer = timer(() => {state.pollTimer = null; watch(state); poll(state);}, 2000);
       }
@@ -190,6 +190,10 @@
           const host = node("div", undefined, box), revision = event.revision;
           state.source = window.HomeDockingSourceSelection.mount(host, {event: copy(event),
             isCurrent: () => state.epoch === epoch && live(state, revision),
+            requestInventory: async (path, body) => {
+              if (state.epoch !== epoch || !live(state, revision)) throw new Error("stale selection");
+              return options.request(path, body);
+            },
             request: async (path, body) => {
               if (state.epoch !== epoch || !live(state, revision)) throw new Error("stale selection");
               if (path.endsWith("/selection")) {state.blocked = true; notify();}
@@ -278,7 +282,7 @@
         action("补充本次请求", () => {
           if (!validClick() || !input.value.trim() || input.value.length > 8192) return;
           if (options.send(socket, {type: "docking_refine", request_id: event.request_id, revision: event.revision, message: input.value})) {
-            state.blocked = true; state.notice = "正在核对补充信息…"; render(state); notify(); watch(state);
+            state.refiningRevision = event.revision; state.blocked = true; state.notice = "正在核对补充信息…"; render(state); notify(); watch(state); poll(state);
           }
         }, validClick());
       }
@@ -289,7 +293,7 @@
         try {
           await options.request(revoke ? `/api/agent/docking/preparations/${event.preparation_id}/revoke` : `/api/agent/docking/tasks/${event.task_id}/cancel`);
         } catch (_) {state.notice = "取消结果未确认，请手动刷新状态；不会重新提交。"; render(state);}
-        watch(state);
+        watch(state); poll(state);
       }, !state.cancelSent && state.socket === socket);
       action("刷新状态", () => {if (state.epoch === epoch) watch(state);}, state.socket === socket);
     }
@@ -383,12 +387,22 @@
         const prior = state.event;
         state.event = event;
         options.onView?.(copy(event));
-        state.blocked = !event.segment_complete || event.cleanup_status !== "settled" || event.persistence_pending;
+        state.blocked = state.cancelSent && !event.terminal || !event.segment_complete || event.cleanup_status !== "settled" || event.persistence_pending;
         if (event.terminal) {forget(state); clear(state, "workTimer");}
         if (event.terminal && event.view_status !== "SUCCEEDED") state.stopped = true;
+        if (state.cancelSent && event.view_status === "CANCELLED" && !state.blocked) {
+          state.stopHeading = "已取消";
+          state.notice = "后台清理完成。";
+        }
         if (event.preview?.consent && state.proof && !consentKeys.every(key => sameData(state.proof[key], event.preview.consent[key]))) forget(state);
+        const refinementFinished = state.refiningRevision !== undefined && !state.blocked;
+        if (refinementFinished) {
+          state.notice = event.revision === state.refiningRevision && !event.terminal
+            ? "补充信息未能确认，请检查后重试。" : null;
+          delete state.refiningRevision;
+        }
         const presentation = value => JSON.stringify({...value, sequence: 0, send_generation: 0});
-        if (state.epoch === 0 || presentation(prior) !== presentation(event)) render(state);
+        if (refinementFinished || state.epoch === 0 || presentation(prior) !== presentation(event)) render(state);
         if (!state.blocked && state.ownsComposer) {
           state.ownsComposer = false;
           options.onSegment?.(copy(event));

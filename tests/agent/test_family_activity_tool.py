@@ -104,7 +104,7 @@ def test_unavailable_family_bundle_exposes_runtime_dependency_hint(boundary):
     assert "PyTorch" in result.message and "RG-MPNN" in result.message
 
 
-def test_failed_family_stage_exposes_runtime_dependency_hint(boundary):
+def test_failed_family_stage_does_not_claim_model_weights_are_missing(boundary):
     tool, _, state = boundary
     state.update(rows=[family_row(
         success=False,
@@ -120,8 +120,23 @@ def test_failed_family_stage_exposes_runtime_dependency_hint(boundary):
     result = tool.execute({"smiles": "CCO", "target": "PDE5A"})
 
     assert not result.success
-    assert any("PyTorch" in warning and "RG-MPNN" in warning for warning in result.warnings)
-    assert "PyTorch" in result.message and "RG-MPNN" in result.message
+    assert any("模型执行失败或输出未通过校验" in warning for warning in result.warnings)
+    assert "模型执行失败或输出未通过校验" in result.message
+    assert "权重已安装" not in result.message
+
+
+def test_failed_regression_preserves_classification_and_explains_missing_prediction(boundary):
+    tool, _, state = boundary
+    row = family_row(success=False, status='partial', execution_status='partial',
+        predicted_pIC50=None, classification_regression_consistent=None,
+        errors={'regression': 'regression_failed_or_invalid_output'})
+    state.update(rows=[row], status='partial')
+    result = tool.execute({'smiles': 'CCO', 'target': 'PDE5A'})
+    assert result.status == ObservationStatus.PARTIAL
+    assert result.data[0]['activity_probability'] == 0.0
+    assert result.data[0]['predicted_pIC50'] is None
+    assert any('模型执行失败或输出未通过校验' in warning for warning in result.warnings)
+    assert '权重已安装' not in result.message
 
 
 @pytest.mark.parametrize("changes", [
@@ -182,6 +197,88 @@ def test_structured_model_request_is_forwarded_to_shared_service(boundary, monke
 
     assert result.success
     assert seen["model_request"]["species"] == "human"
+
+
+def test_human_species_in_query_is_forwarded_to_model_selection(boundary, monkeypatch):
+    from src.activity import prediction_service
+    tool, _, _ = boundary
+    seen = {}
+
+    def predict(smiles, *, target=None, model_request=None):
+        seen.update(model_request=model_request)
+        raise ValueError('test stop before inference')
+
+    monkeypatch.setattr(prediction_service, 'predict_activity', predict)
+    execute_tool_compat(tool, '预测 CCO 对 BuChE 的人源活性。')
+    assert seen['model_request']['species'] == 'human'
+
+
+@pytest.mark.parametrize('declaration', ['物种为人', '靶点物种：人'])
+def test_explicit_species_field_is_forwarded(boundary, monkeypatch, declaration):
+    from src.activity import prediction_service
+    tool, _, _ = boundary
+    seen = {}
+
+    def predict(smiles, *, target=None, model_request=None):
+        seen.update(model_request=model_request)
+        raise ValueError('test stop before inference')
+
+    monkeypatch.setattr(prediction_service, 'predict_activity', predict)
+    execute_tool_compat(tool, f'预测 CCO 对 BuChE 的活性，{declaration}。')
+    assert seen['model_request']['species'] == 'human'
+
+
+@pytest.mark.parametrize('declaration', ['物种为斑马鱼', '物种为人，物种为小鼠'])
+def test_unknown_or_conflicting_species_fields_stop_prediction(boundary, declaration):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, f'预测 CCO 对 BuChE 的活性，{declaration}。')
+    assert result.status == ObservationStatus.INVALID_INPUT
+    assert not calls
+
+
+@pytest.mark.parametrize('qualifier,species', [('犬源', 'dog'), ('猪源', 'pig')])
+def test_species_in_query_is_forwarded_to_model_selection(boundary, monkeypatch, qualifier, species):
+    from src.activity import prediction_service
+    tool, _, _ = boundary
+    seen = {}
+
+    def predict(smiles, *, target=None, model_request=None):
+        seen.update(model_request=model_request)
+        raise ValueError('test stop before inference')
+
+    monkeypatch.setattr(prediction_service, 'predict_activity', predict)
+    execute_tool_compat(tool, f'预测 CCO 对 BuChE 的{qualifier}活性。')
+    assert seen['model_request']['species'] == species
+
+
+def test_query_species_cannot_conflict_with_structured_model_request(boundary):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, {'query': '预测 CCO 对 BuChE 的人源活性。',
+        'smiles': 'CCO', 'target': 'BuChE', 'model_request': {'species': 'mouse'}})
+    assert result.status == ObservationStatus.INVALID_INPUT
+    assert not calls
+
+
+def test_human_chinese_target_alias_is_preserved_in_model_request(boundary, monkeypatch):
+    from src.activity import prediction_service
+    tool, _, _ = boundary
+    seen = {}
+
+    def predict(smiles, *, target=None, model_request=None):
+        seen.update(target=target, model_request=model_request)
+        raise ValueError('test stop before inference')
+
+    monkeypatch.setattr(prediction_service, 'predict_activity', predict)
+    execute_tool_compat(tool, '预测 CCO 对人丁酰胆碱酯酶（BuChE）的活性。')
+    assert seen['model_request']['species'] == 'human'
+
+
+@pytest.mark.parametrize('qualifier', ['鼠源', '非人源', '斑马鱼源'])
+def test_ambiguous_species_is_not_silently_assigned(boundary, qualifier):
+    tool, calls, _ = boundary
+    result = execute_tool_compat(tool, f'预测 CCO 对 BuChE 的{qualifier}活性。')
+    assert result.status == ObservationStatus.INVALID_INPUT
+    assert not calls
 
 
 def test_checkpoint_model_version_resolves_request_bound_family_identity(monkeypatch):

@@ -144,6 +144,27 @@ def _check_web_dependencies(observation, dependencies, run):
     return True
 
 
+def _web_ranking_dependencies(rank, accepted, run):
+    """Authenticate every committed ranking dependency against the frozen plan."""
+    requirements = run['metadata']['task_requirements']
+    planned = requirements['dependencies'][rank['metadata']['web_step_ref']]
+    steps = {step['name']: step for step in requirements['steps']}
+    proof = rank['raw']['quality']['binding_proof']
+    roles = proof['roles']
+    _check(type(planned) is list and type(roles) is list)
+    refs = [role['step_ref'] for role in roles]
+    _check(len(refs) == len(set(refs)) and refs == [ref for ref in planned if ref in refs])
+    _check(all(ref in refs or steps[ref].get('required') is False for ref in planned))
+    dependencies = []
+    for ref in refs:
+        matches = [source for source in accepted.values()
+                   if source['metadata'].get('web_step_ref') == ref]
+        _check(len(matches) == 1 and _planned_step(matches[0], run) == steps[ref])
+        dependencies.append(matches[0])
+    _check_web_dependencies(rank, dependencies, run)
+    return dependencies
+
+
 def _property_rows(prop, generator, run):
     cp, raw = prop["checkpoint"], prop["raw"]
     key = _workflow_output_key(generator, run)
@@ -187,6 +208,20 @@ def _ranking(accepted, outputs, generators, run, displayed):
     if len(ranks) != 1:
         return _empty_ranking("ambiguous_source")
     rank = ranks[0]
+    requirements = run.get('metadata', {}).get('task_requirements')
+    if isinstance(requirements, dict) and requirements.get('profile') == 'medchat-web-v1':
+        acceptance = run['metadata'].get('task_acceptance')
+        checks = acceptance.get('checks') if isinstance(acceptance, dict) else None
+        ref = rank['metadata'].get('web_step_ref')
+        evidence_id = rank['source']['evidence_id']
+        matches = [check for check in checks or [] if isinstance(check, dict)
+                   and check.get('step_ref') == ref and check.get('tool_name') == 'candidate_ranker']
+        if (not isinstance(acceptance, dict) or acceptance.get('profile') != 'medchat-web-v1'
+                or not isinstance(checks, list) or len(matches) != 1
+                or evidence_id not in matches[0].get('evidence_ids', [])):
+            return _empty_ranking('source_mismatch')
+        if matches[0].get('passed') is not True:
+            return _empty_ranking('partial_source')
     try:
         planned_rank = _planned_step(rank, run)
         meta = planned_rank.get("metadata", {}) if planned_rank is not None else rank["metadata"]
@@ -212,7 +247,9 @@ def _ranking(accepted, outputs, generators, run, displayed):
         _check(len(props) == 1 and props[0]["source"]["tool_name"] == "property_calculator")
         _property_rows(props[0], generator, run)
         if planned_rank is not None:
-            _check_web_dependencies(rank, [generator, props[0]], run)
+            dependencies = _web_ranking_dependencies(rank, accepted, run)
+            _check(any(item is generator for item in dependencies)
+                   and any(item is props[0] for item in dependencies))
         request = {
             "query": run["query"],
             "metadata": {

@@ -167,8 +167,8 @@ def test_schema_repair_defers_to_profile_catalog_instead_of_forcing_input_ref():
     assert _safe_feedback(feedback) == feedback
 
 
-@pytest.mark.parametrize('mode', ['native', 'json'])
-def test_web_schema_repair_and_resume_preserve_aligned_observations(setup_loop, mode):
+@pytest.mark.parametrize('mode,failure', [('native', 'schema'), ('json', 'schema'), ('native', 'multiple'), ('native', 'syntax')])
+def test_web_schema_repair_and_resume_preserve_aligned_observations(setup_loop, mode, failure):
     import asyncio
     from copy import deepcopy
     from src.agent.runtime.worker_ownership import WorkerOwner
@@ -176,7 +176,7 @@ def test_web_schema_repair_and_resume_preserve_aligned_observations(setup_loop, 
     from src.agent.tools.property_calculator import PropertyCalculator
     from src.agent.tools.candidate_ranker import CandidateRanker
     from tests.agent.test_decision_loop import tool, clarify, last_observation
-    from tests.agent.test_decision_protocol_recovery import ProtocolModel, invalid
+    from tests.agent.test_decision_protocol_recovery import ProtocolModel, invalid, ambiguous_calls, malformed_native_json
     from tests.agent.test_generation_ranking_contract import CountingTool, GEN, output
     from tests.agent.test_target_driven_design_workflow import FakeTool
 
@@ -212,15 +212,17 @@ def test_web_schema_repair_and_resume_preserve_aligned_observations(setup_loop, 
     bundle = setup_loop([], [target_search, generator, PropertyCalculator(), CandidateRanker()],
                         binding_profile=WEB, mode=mode)
     bundle.model = bundle.loop.model = ProtocolModel([
-        invalid(), target, generation, after_generation, pause_after_alignment,
+        {'schema': invalid, 'multiple': ambiguous_calls, 'syntax': malformed_native_json}[failure](),
+        target, generation, after_generation, pause_after_alignment,
         target, generation, properties, ranking])
     options = dict(request_kind='scientific', allowed_tools=allowed, required_tools=allowed,
                    requirements=requirements, event_bus=bundle.bus)
     waiting = asyncio.run(bundle.loop.run(context, **options, worker_owner=WorkerOwner()))
     assert waiting.metadata.get('waiting_for_input'), waiting.metadata
     assert waiting.metadata['protocol_repairs'] == 1
+    marker = {'schema': 'invalid_decision_schema', 'multiple': 'multiple tool calls', 'syntax': 'invalid_decision_json'}[failure]
     feedback = [message['content'] for message in bundle.model.messages[1]
-                if message['role'] == 'system' and 'invalid_decision_schema' in message['content']]
+                if message['role'] == 'system' and marker in message['content']]
     assert len(feedback) == 1 and 'input_ref' not in feedback[0]
     before = deepcopy([result.to_legacy_dict() for result in waiting.tool_results])
     assert len(before) == 3

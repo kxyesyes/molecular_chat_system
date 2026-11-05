@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from src.activity.family_contract import resolve_activity_family
 from src.agent.contracts.comparison_presentation import without_comparison_presentation
 from src.agent.contracts.target_request import _TARGET_ROLE, analyze_target_request
+from src.system.molecular_input_parser import LABELED_ACTIVITY_COMPARISON
 from .molecular_input import (
     _FIELD_END, _MARKER, _looks_like_structure, _unquote, parse_molecular_smiles,
 )
@@ -25,13 +26,13 @@ _ACTIVITY_NEGATION = re.compile(
     r"[^\r\n，,。；;:：]{0,32}$",
     re.I,
 )
-_GENERIC_SUBJECTS = frozenset({"分子", "这个分子", "该分子"})
+_GENERIC_SUBJECTS = frozenset({"分子", "这个分子", "该分子", "它们"})
 _CONTEXT_WORDS = frozenset({"target", "activity", "potency", "inhibition", "assess"})
 _BACKGROUND = re.compile(r"\s*(?:研究背景|背景|background\b)", re.I)
 _TARGET_LABEL = r"(针对|靶点\s*[:：]?|对|(?<![A-Za-z])(?:target|for|against)\s*[:=：]?)\s*"
 # Include unrecognized values so explicit intent cannot vanish before validation.
 _TARGET_VALUE = (
-    r"((?:丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*)(?=$|[\s；，,/和及与、]|(?:的)?(?:抑制活性|活性|p?IC50|p?EC50|p?Ki|p?Kd))"
+    r"((?:丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*)(?=$|[\s；，,/和及与、（(]|(?:的)?(?:抑制活性|活性|p?IC50|p?EC50|p?Ki|p?Kd))"
     r"|[^\s；，,/和及与、]+)"
 )
 _LABELLED_TARGET = re.compile(
@@ -50,6 +51,9 @@ _NAMED_MOLECULE_IN_LIST = re.compile(
     rf"(?=(?P<smiles>{_MOLECULE_LIST_TOKEN}+)(?=[ \t]*(?:$|[\u4e00-\u9fff，！？：、；。;,])))"
 )
 _INVALID = "SMILES 无效或缺失；请提供完整结构，并用换行或分号分隔，不会提取片段替代。"
+_SPECIES_DECLARATION = re.compile(
+    r'(?:靶点)?物种\s*(?:为|是|[:：=])\s*([^，,。；;!?！？\n]+)', re.I,
+)
 
 
 def activity_intent_requested(text):
@@ -100,6 +104,60 @@ def requested_activity_endpoint(payload):
     return structured or (unique[0] if unique else None)
 
 
+def requested_activity_species(payload):
+    """Preserve explicit species qualifiers for model selection."""
+    text = payload.get('query', '') if isinstance(payload, Mapping) else payload
+    if not isinstance(text, str):
+        return None
+    if re.search(r'(?<!小)(?<!大)鼠源|非人源', text):
+        raise ValueError('物种限定不明确，请明确指定物种。')
+    for match in re.finditer(r'的([\u4e00-\u9fff]{1,8})源(?:活性|抑制)', text):
+        if match[1] not in {'人', '小鼠', '大鼠', '犬', '狗', '猪'}:
+            raise ValueError('暂不支持识别该物种名称，未进行预测。')
+    patterns = {
+        'human': r'人源|人类|人(?:的)?(?:BuChE|丁酰胆碱酯酶)|\bhuman\b|\bHomo\s+sapiens\b',
+        'mouse': r'小鼠|\bmouse\b|\bMus\s+musculus\b',
+        'rat': r'大鼠|\brat\b|\bRattus\s+norvegicus\b',
+        'dog': r'犬源|狗源|\bdog\b|\bcanine\b|\bCanis\s+lupus\s+familiaris\b',
+        'pig': r'猪源|\bpig\b|\bporcine\b|\bSus\s+scrofa\b',
+    }
+    found = {species for species, pattern in patterns.items() if re.search(pattern, text, re.I)}
+    aliases = {'人': 'human', '人类': 'human', '人源': 'human',
+               '小鼠': 'mouse', '大鼠': 'rat', '犬': 'dog', '狗': 'dog', '猪': 'pig'}
+    for match in _SPECIES_DECLARATION.finditer(text):
+        value = match[1].strip()
+        species = aliases.get(value)
+        if species is None:
+            species = next((name for name, pattern in patterns.items()
+                            if re.fullmatch(pattern, value, re.I)), None)
+        if species is None:
+            raise ValueError('暂不支持识别该物种名称，未进行预测。')
+        found.add(species)
+    if len(found) > 1:
+        raise ValueError('活性预测请求包含多个物种，请明确选择一个物种。')
+    return next(iter(found)) if found else None
+
+
+def is_bare_generic_activity_request(query):
+    """Admit a structure clarification only for a complete generic request."""
+    if not isinstance(query, str):
+        return False
+    match = re.fullmatch(
+        r'\s*(?:请\s*)?(?:预测|评估)\s*分子\s*对\s*'
+        r'(丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*)\s*(?:的)?(?:抑制)?活性'
+        r'(?:[，,]\s*(?:靶点)?物种\s*(?:为|是|[:：=])\s*[^，,。；;!?！？\n]+)?'
+        r'\s*[。.!！?？]?\s*', query, re.I,
+    )
+    if not match:
+        return False
+    try:
+        _strict_family(match[1])
+        requested_activity_species(query)
+    except ValueError:
+        return False
+    return True
+
+
 def _strict_family(value):
     # The registry resolver deliberately permits surrounding text. At this input
     # boundary every explicit identifier must be recognized, not only one alias.
@@ -140,6 +198,14 @@ def _context_clauses(text):
 
 def activity_target(text, validate_smiles):
     """Resolve bounded target positions; never infer arbitrary biomedical intent."""
+    if _SPECIES_DECLARATION.search(text):
+        requested_activity_species(text)
+        text = _SPECIES_DECLARATION.sub('', text)
+    text = re.sub(
+        r'(对|\b(?:for|against)\s+)(?:人源|人类|人|小鼠|大鼠|犬源|狗源|猪源|human|mouse|rat|dog|canine|pig|porcine)\s*'
+        r'(?=丁酰胆碱酯酶|BuChE|BChE|PDE\d)',
+        r'\1', text, flags=re.I,
+    )
     # Target extraction must use only positive operation clauses.  Otherwise a
     # prohibition such as “不要做对接” is misread by the single-character
     # Chinese target label “对” as an additional target named “接”.
@@ -191,6 +257,9 @@ def activity_target(text, validate_smiles):
     for match in positions:
         if match.start() in molecule_name_positions:
             continue
+        if (match[1].strip() == '靶点' and text[:match.start()].endswith('该')
+                and re.match(r'以及该分子是否在模型适用域内(?:$|[。.!！?？;；])', text[match.end():])):
+            continue
         # A resolved candidate ordinal is a molecule object, not a target name.
         # Structure/reference admission remains the caller's responsibility.
         if match[1] == "对" and re.match(
@@ -204,6 +273,12 @@ def activity_target(text, validate_smiles):
         value = value_match[1]
         values = [value]
         tail = text[match.end() + value_match.end():]
+        alias = re.match(r'\s*(?:（([^（）]+)）|\(([^()]+)\))', tail)
+        if alias:
+            values.append(alias[1] or alias[2])
+            tail = tail[alias.end():]
+            if re.match(r'[A-Za-z0-9_-]', tail):
+                raise ValueError('Invalid target suffix')
         while following := re.match(
                 r"\s*(?:和|及|与|、|[,，/]|\band\b|\bor\b)\s*"
                 + _TARGET_VALUE, tail, re.I):
@@ -303,6 +378,27 @@ def parse_activity_input(payload, tool):
                     or parse_molecular_smiles("SMILES: " + value, tool) != [value]):
                 raise ValueError(_INVALID)
         return text, list(values), target
+
+    comparison = LABELED_ACTIVITY_COMPARISON.fullmatch(text)
+    if comparison:
+        values = [comparison.group('first'), comparison.group('second')]
+        for value in values:
+            if parse_molecular_smiles('SMILES: ' + value, tool) != [value]:
+                raise ValueError(_INVALID)
+        return text, values, target
+
+    labeled_buche = re.fullmatch(
+        r'\s*(?:请\s*)?(?:重新|再次)?预测\s*SMILES\s*[:：=]\s*([^\s，。；;]+)\s+'
+        r'对(?:人源?|人类)?\s*(?:丁酰胆碱酯酶(?:[（(](?:BuChE|BChE)[）)])?|BuChE|BChE)'
+        r'\s*的(?:抑制)?活性(?:\s*[，,]\s*(?:给出\s*pIC50(?:\s*和\s*模型(?:适用|物种)范围)?|'
+        r'并?说明(?:模型是否支持该靶点以及)?该分子是否在模型适用域内|'
+        r'并?给出模型信息与适用范围))?'
+        r'[。.!！?？]?\s*', text, re.I)
+    if labeled_buche:
+        value = labeled_buche.group(1)
+        if parse_molecular_smiles('SMILES: ' + value, tool) != [value]:
+            raise ValueError(_INVALID)
+        return text, [value], target
 
     # Only context is adapted. Labelled SMILES fields (including quoted suffixes)
     # go byte-for-byte to the stronger shared parser; no lexical truncation.

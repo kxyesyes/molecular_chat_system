@@ -4,8 +4,18 @@ import re
 from typing import Any
 
 
-_MARKER = re.compile(r'(?<![A-Za-z0-9_])SMILES\s*[:：=][ \t]*', re.I)
+_MARKER = re.compile(r'(?<![A-Za-z0-9_])SMILES\s*(?:[:：=]|是|为)[ \t]*', re.I)
+LABELED_ACTIVITY_COMPARISON = re.compile(
+    r'\s*(?:请\s*)?(?:比较|对比)\s*SMILES\s*[:：=]\s*'
+    r'(?P<first>[^\s\u4e00-\u9fff，。；！？]+)\s*(?:和|与)\s*'
+    r'(?P<second>[^\s\u4e00-\u9fff，。；！？]+)\s*对\s*'
+    r'(?P<target>丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*)\s*的\s*(?:抑制)?活性\s*[。.!！]?\s*',
+    re.I,
+)
 _FIELD_END = re.compile(r'[\r\n；。;]')
+_PDB_REFERENCE = re.compile(
+    r'(?:\bPDB\s*(?:ID\s*[:：]?\s*)?|\bRCSB\b[^，。；\r\n]{0,80}?结构\s*)'
+    r'(?P<id>[0-9][A-Za-z0-9]{3})(?![A-Za-z0-9])', re.I)
 _INVALID = 'SMILES 无效或缺失；请提供完整结构，使用换行或分号分隔，不会提取片段替代。'
 _INLINE_PROSE_WRAPPERS = (('(', ')'), ('（', '）'))
 _PROSE_WORDS = frozenset({
@@ -14,12 +24,30 @@ _PROSE_WORDS = frozenset({
 })
 
 
+def expand_labeled_comparison(text):
+    """Make the second explicit field visible without changing either value."""
+    return re.sub(
+        r'^(\s*(?:请\s*)?(?:比较|对比)\s*SMILES\s*[:：=]\s*'
+        r'[^\s\u4e00-\u9fff，。；！？]+\s*(?:和|与)\s*)'
+        r'([^\s\u4e00-\u9fff，。；！？]+)(?=\s*的)',
+        r'\1SMILES: \2', text, count=1, flags=re.I)
+
+
 class MolecularInputUnavailable(ValueError):
     """Validation could not run; not a diagnosis of the supplied structure."""
 
 
 class MolecularInputMissing(ValueError):
     """Nonempty supported text contains no molecular candidates."""
+
+
+class MolecularInputInvalid(ValueError):
+    """A complete candidate failed validation, without exposing its content."""
+
+    def __init__(self, position, count):
+        super().__init__(_INVALID)
+        self.position = position
+        self.count = count
 
 
 @dataclass(frozen=True)
@@ -89,12 +117,30 @@ def parse_molecular_inputs(text, tool, *, prose_pattern=None):
     """
     if not isinstance(text, str) or not text.strip() or len(text) > 65536:
         raise ValueError(_INVALID)
+    text = expand_labeled_comparison(text)
+    # A single-letter candidate label before an explicit field is not an atom.
+    text = re.sub(r'(?<![A-Za-z0-9_])[A-Z](?=\s*的\s*SMILES\s*(?:[:：=]|是|为))', '', text)
     markers = list(_MARKER.finditer(text))
     if markers:
         values = _bare_values(text[:markers[0].start()], tool, prose_pattern)
         for index, marker in enumerate(markers):
             end = markers[index + 1].start() if index + 1 < len(markers) else len(text)
-            fields = _FIELD_END.split(text[marker.end():end], maxsplit=1)
+            field_text = text[marker.end():end]
+            if index + 1 < len(markers):
+                field_text = re.sub(r'\s+(?:和|与|and)\s*$', '', field_text, flags=re.I)
+            # A full-width parenthesis can wrap the labelled field in Chinese
+            # prose; SMILES itself uses ASCII parentheses, so this delimiter
+            # cannot terminate an internal branch.
+            if text[:marker.start()].rstrip().endswith('（') and '）' in field_text:
+                value, prose = field_text.split('）', 1)
+                if prose and re.match(r'[A-Za-z0-9_]', prose):
+                    raise ValueError(_INVALID)
+                values.append(_labeled_field_value(value.strip(), tool))
+                values.extend(_bare_values(prose, tool, prose_pattern))
+                continue
+            # A Chinese comma separates the labeled field from the following
+            # clause; inspect that clause for further structures as usual.
+            fields = re.split(r'[\r\n；。，;]', field_text, maxsplit=1)
             values.append(_labeled_field_value(fields[0].strip(), tool))
             if len(fields) > 1:
                 values.extend(_bare_values(fields[1], tool, prose_pattern))
@@ -116,12 +162,12 @@ def parse_molecular_inputs(text, tool, *, prose_pattern=None):
     except Exception:
         raise MolecularInputUnavailable('SMILES 校验暂不可用。') from None
     parsed_values = []
-    for value in values:
+    for position, value in enumerate(values, 1):
         # SMILES is printable ASCII. Some RDKit builds accept a valid prefix
         # before a Unicode suffix, so RDKit success alone cannot prove complete
         # consumption of an authoritative field. Never calculate that prefix.
         if not value or len(value) > 8192 or re.search(r'[^\x21-\x7e]', value):
-            raise ValueError(_INVALID)
+            raise MolecularInputInvalid(position, len(values))
         try:
             with rdBase.BlockLogs():
                 mol = Chem.MolFromSmiles(value, params)
@@ -129,13 +175,13 @@ def parse_molecular_inputs(text, tool, *, prose_pattern=None):
         except Exception:
             raise MolecularInputUnavailable('SMILES 校验暂不可用。') from None
         if not valid:
-            raise ValueError(_INVALID)
+            raise MolecularInputInvalid(position, len(values))
         try:
             canonical = Chem.MolToSmiles(mol, canonical=True)
         except Exception:
             raise MolecularInputUnavailable('SMILES 校验暂不可用。') from None
         if not canonical:
-            raise ValueError(_INVALID)
+            raise MolecularInputInvalid(position, len(values))
         parsed_values.append(
             ParsedMolecularInput(
                 smiles=value,
@@ -155,7 +201,7 @@ def _labeled_field_value(value, tool):
     rejected by the full-field validator below.
     """
     candidate = _unquote(value.strip())
-    separator = re.search(r'\s+的(?=\s|[\u4e00-\u9fff])', candidate)
+    separator = re.search(r'\s+(?:(?:的|是否为|是否符合)(?=\s|[\u4e00-\u9fff]|Lipinski\b)|做(?=\s*ADMET\s*预测(?:\s|$)))', candidate, re.I)
     if separator:
         prefix = candidate[:separator.start()].strip()
         suffix = candidate[separator.end():].strip()
@@ -166,6 +212,10 @@ def _labeled_field_value(value, tool):
 
 def _bare_values(text, tool, prose_pattern=None):
     values = []
+    # Only suppress identifiers explicitly associated with a PDB source;
+    # labeled SMILES fields are parsed separately and remain authoritative.
+    text = _PDB_REFERENCE.sub(lambda match: match.group()[:match.start('id') - match.start()]
+                              + ' ' * len(match.group('id')), text)
     for fragment in _FIELD_END.split(text):
         fragment = fragment.strip()
         if not fragment:

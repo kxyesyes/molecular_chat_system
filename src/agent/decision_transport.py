@@ -67,7 +67,9 @@ _DOCKING_COVERAGE_INSTRUCTION = (
     'start-inclusive and end-exclusive; never use an empty span. Do not borrow history spans. '
     'A PDB ID or SMILES is not a receptor_ref or ligand_ref; those fields require explicit '
     'named references. Omit absent fields, never null or inferred defaults. Missing scientific '
-    'inputs remain unresolved even when the docking intent is clear. '
+    'inputs must not be invented. For docking_request, missing scientific inputs make unresolved true. '
+    'For docking_refinement, unresolved concerns only ambiguity in the current refinement; '
+    'missing inputs from the original request do not make the refinement unresolved. '
     'Only syntactic NAME=VALUE assignments in the CURRENT text are fields: receptor_ref=..., '
     'ligand_ref=..., center=..., size=..., exhaustiveness=..., num_modes=.... Natural-language '
     'PDB IDs and SMILES belong to the request, NOT these fields. If no such assignments appear, '
@@ -80,7 +82,7 @@ _DOCKING_INSTRUCTION = (
     'current docking request or refinement using all supplied history, without truncation. '
     'Call docking_preparation with exactly one {"proposal": {...}} envelope matching the schema. '
     'Include proposal.version as the string "1". Copy only explicit fields with source spans; '
-    'leave missing inputs unresolved. This is not admission, consent or execution authority. '
+    'Do not infer missing inputs. This is not admission, consent or execution authority. '
     'Do not invent inputs, approve consent, execute tools or answer with scientific results. '
     + _DOCKING_COVERAGE_INSTRUCTION
 )
@@ -535,6 +537,9 @@ def _budget_messages(messages, budget):
         history_size -= costs[dropped]
         dropped += 1
     if total > budget['max_chars']:
+        logger.warning('Decision input budget exceeded: total_chars=%d limit=%d system_chars=%d tool_chars=%d',
+                       total, budget['max_chars'], sum(count(m) for m in messages if m['role'] == 'system'),
+                       sum(count(m) for m in messages if m['role'] == 'tool'))
         raise DecisionProtocolError('decision_input_budget_exceeded')
     selected = [dict(message) for message in messages[:start]] + messages[start + dropped * 2:]
     if dropped:
@@ -779,9 +784,10 @@ async def request_decision(model, messages, *, mode="native", max_tokens=1500, t
 
 
 async def request_ordinary_intent(model, messages, *, mode="native", max_tokens=256,
-                                  timeout_seconds=30.0, _journal=None):
+                                  timeout_seconds=30.0, _journal=None, input_budget=None):
     return await _request_protocol(model, messages, mode=mode, max_tokens=max_tokens,
-        timeout_seconds=timeout_seconds, profile=ProtocolProfile.ORDINARY_INTENT_V1, journal=_journal)
+        timeout_seconds=timeout_seconds, profile=ProtocolProfile.ORDINARY_INTENT_V1, journal=_journal,
+        input_budget=input_budget)
 
 
 async def request_docking_preparation(model, messages, *, mode="native", max_tokens=256,

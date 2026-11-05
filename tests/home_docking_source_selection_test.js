@@ -50,7 +50,7 @@ class Element {
   async click() { if (!this.disabled) await this.fire("click"); }
 }
 function all(root) { return [root, ...root.children.flatMap(all)]; }
-function harness({data = fixture(), event = eventFor(data), page, request, current = () => true} = {}) {
+function harness({data = fixture(), event = eventFor(data), page, request, inventory, current = () => true} = {}) {
   const document = {createElement: tag => new Element(tag, document)};
   const host = document.createElement("div"), calls = [], errors = [], submitted = [];
   const context = {window: {}, document, console};
@@ -64,6 +64,7 @@ function harness({data = fixture(), event = eventFor(data), page, request, curre
     if (page) return page(body);
     return pageFor(data, body);
   }};
+  if (inventory) options.requestInventory = inventory;
   const mounted = context.window.HomeDockingSourceSelection.mount(host, options);
   const controls = role => all(host).filter(n => n.getAttribute("data-role") === role);
   const button = text => all(host).find(n => n.tagName === "button" && n.textContent === text);
@@ -134,6 +135,74 @@ async function choose(h) {
 }
 const unavailable = h => { assert.ok(/不可用/.test(h.host.textContent), "must explicitly show unavailable"); assert.ok(!submit(h) || submit(h).disabled); };
 
+test("one bounded snapshot loads the complete inventory before any choice", async () => {
+  const data = fixture(), calls = [];
+  const h = harness({data, inventory: async (url, body) => {
+    calls.push({url, body});
+    return {ok: true, source_sha256: digest, sections: clone(data), input_ready: false, execution_authorized: false};
+  }});
+  await load(h);
+  assert.equal(h.errors.length, 0);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /source-inventory$/);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.controls("reference")[0].value, "");
+  await choose(h);
+  assert.equal(submit(h).disabled, false);
+});
+
+test("water and limitation groups require explicit choices and retain per-item overrides", async () => {
+  const data = fixture(), second = identity("B", "HOH", 5);
+  data.hetero_choices.push({residue: second, role: "water", actions: ["retain", "remove"]});
+  data.residues.push({residue: second, role: "water", required_heavy_atoms: [{name: "O", element: "O"}],
+    atoms: [{serial: 7, name: "O", element: "O", altloc: "", occupancy_hundredths: 100}]});
+  data.limitations.push({id: "limitA2", kind: "missing_residues", residues: [identity("A", "GLY", 91)], source_record_id: "recordA2"});
+  const h = harness({data}); await load(h);
+  await change(h.controls("protein")[0], true);
+  await change(h.controls("reference")[0], "0");
+  assert.equal(h.controls("water-batch")[0].value, "");
+  assert.equal(h.controls("review-all")[0].checked, false);
+  assert.ok(submit(h).disabled);
+  await change(h.controls("water-batch")[0], "remove");
+  assert.deepEqual(h.controls("hetero").map(c => c.value), ["remove", "remove"]);
+  const waterDetails = h.controls("hetero")[0].parentNode.parentNode;
+  waterDetails.open = true; await waterDetails.fire("toggle");
+  await change(h.controls("hetero")[0], "retain");
+  assert.equal(h.controls("hetero")[0].parentNode.parentNode.open, true);
+  assert.equal(h.controls("water-batch")[0].value, "");
+  assert.deepEqual(h.controls("hetero").map(c => c.value), ["retain", "remove"]);
+  await change(h.controls("hetero")[0], "remove");
+  await change(h.controls("conformer")[0], "A");
+  await change(h.controls("review-all")[0], true);
+  assert.ok(h.controls("limitation").every(c => c.checked));
+  assert.equal(submit(h).disabled, false);
+  await change(h.controls("limitation")[0], false);
+  assert.equal(h.controls("review-all")[0].checked, false);
+  assert.ok(submit(h).disabled);
+});
+
+test("zero-occupancy atoms explain why an otherwise complete selection is blocked", async () => {
+  const data = fixture();
+  data.residues[0].atoms[0].occupancy_hundredths = 0;
+  const h = harness({data}); await load(h); await choose(h);
+  assert.ok(submit(h).disabled);
+  assert.match(h.host.textContent, /占有率为 0/);
+  assert.match(h.host.textContent, /ALA.*1/);
+  assert.match(h.host.textContent, /选择其他结构/);
+});
+
+test("site candidate remains an explicit choice with its evidence limit visible", async () => {
+  const data = fixture();
+  data.residues.find(r => r.residue.resname === "LIG").role = "site_candidate";
+  data.hetero_choices.find(r => r.residue.resname === "LIG").role = "site_candidate";
+  const h = harness({data}); await load(h);
+  assert.equal(h.errors.length, 0);
+  assert.match(h.host.textContent, /位点注释.*添加剂/);
+  assert.equal(h.controls("reference")[0].value, "");
+  await choose(h);
+  assert.equal(submit(h).disabled, false);
+});
+
 test("zero eligible reference is an explicit scientific blocker, not an expired confirmation", async () => {
   const data = fixture(); data.reference_residue = [];
   data.residues.filter(r => r.role === "deposited_ligand").forEach(r => r.role = "unproven");
@@ -184,6 +253,9 @@ test("constraint assignments and incomplete atom inventories disable submission"
   await change(h.controls("conformer")[0], "B"); assert.ok(submit(h).disabled);
   const data = fixture(); data.residues[0].required_heavy_atoms.push({name: "N", element: "N"});
   const bad = harness({data}); await load(bad); await choose(bad); assert.ok(submit(bad).disabled);
+  assert.match(bad.host.textContent, /缺少.*重原子/);
+  assert.match(bad.host.textContent, /ALA.*1/);
+  assert.match(bad.host.textContent, /选择其他结构/);
 });
 test("short byte-limited pages continue monotonically; empty sections are requested too", async () => {
   const data = fixture(); data.connections = []; data.conformer_constraints = [];

@@ -22,6 +22,10 @@ class ModelSelectionError(ValueError):
     """A request cannot be served by the selected scientific model bundle."""
 
 
+class SpeciesModelSelectionError(ModelSelectionError):
+    """No registered model matches the requested species."""
+
+
 _ENDPOINT_ALIASES = {
     "pic50": "pIC50",
     "pki": "pKi",
@@ -117,8 +121,6 @@ def _matches_species(request: ActivityModelRequest, model: Mapping[str, Any], bu
     if request.species is None:
         return True
     declared = _declared_species(model, bundle)
-    if declared and declared & {"mixed", "any", "all"}:
-        return True
     return declared == {request.species}
 
 
@@ -216,7 +218,7 @@ def select_family_bundle(bundle: Mapping[str, Any], request: ActivityModelReques
         if model.get("demo_mode") is not False or model.get("fallback_used") is not False:
             raise ModelSelectionError("demo/fallback model is not eligible")
         if not _matches_species(request, model, bundle):
-            raise ModelSelectionError("species: no model matches requested species")
+            raise SpeciesModelSelectionError("species: no model matches requested species")
         expected_endpoint = "activity" if task == "classification" else request.endpoint
         expected_units = "probability" if task == "classification" else request.units
         if model.get("endpoint") != expected_endpoint or model.get("units") != expected_units:

@@ -21,13 +21,13 @@ from pydantic import (
 )
 
 from src.agent.orchestrators.base import WorkflowStep
-from src.agent.planning.request_parsing import positive_intent_text
+from src.agent.planning.request_parsing import positive_intent_text, without_past_result_actions
 from src.agent.tools.base_tool import BaseMolecularTool
 from src.agent.tools.molecular_input import (
     MolecularInputMissing,
     MolecularInputUnavailable,
 )
-from src.system.molecular_input_parser import parse_molecular_inputs
+from src.system.molecular_input_parser import MolecularInputInvalid, expand_labeled_comparison, parse_molecular_inputs
 
 
 MAX_QUERY_CHARS = 8192
@@ -36,7 +36,10 @@ MAX_QUERY_CHARS = 8192
 MAX_QUERY_LENGTH = MAX_QUERY_CHARS
 WORKFLOW_VERSION = "web-property-v1"
 ADMET_WORKFLOW_VERSION = "web-admet-v1"
-WorkflowVersion = Literal["web-property-v1", "web-admet-v1"]
+BATCH_PROPERTY_WORKFLOW_VERSION = "web-property-batch-v1"
+BATCH_ADMET_WORKFLOW_VERSION = "web-admet-batch-v1"
+BATCH_PROPERTY_ADMET_WORKFLOW_VERSION = "web-property-admet-batch-v1"
+WorkflowVersion = Literal["web-property-v1", "web-admet-v1", "web-property-batch-v1", "web-admet-batch-v1", "web-property-admet-batch-v1"]
 Metric = Literal[
     "logp",
     "tpsa",
@@ -304,16 +307,26 @@ class ScientificPlan(BaseModel):
                     "ready ScientificPlan cannot contain missing fields or capabilities"
                 )
             has_admet = "admet_predictor" in self.required_tools
-            expected_workflow = (
-                ADMET_WORKFLOW_VERSION if has_admet else WORKFLOW_VERSION
-            )
+            batch = self.workflow_version in (BATCH_PROPERTY_WORKFLOW_VERSION, BATCH_ADMET_WORKFLOW_VERSION, BATCH_PROPERTY_ADMET_WORKFLOW_VERSION)
+            combined_batch = batch and tuple(self.required_tools) == ('property_calculator', 'admet_predictor')
+            expected_workflow = (BATCH_PROPERTY_ADMET_WORKFLOW_VERSION if combined_batch else
+                                 BATCH_ADMET_WORKFLOW_VERSION if batch and has_admet else
+                                 BATCH_PROPERTY_WORKFLOW_VERSION if batch else
+                                 ADMET_WORKFLOW_VERSION if has_admet else WORKFLOW_VERSION)
+            if batch and tuple(self.required_tools) not in (('property_calculator',), ('drug_likeness_assessment',), ('property_calculator', 'drug_likeness_assessment'), ('admet_predictor',), ('property_calculator', 'admet_predictor')):
+                raise ValueError('batch ScientificPlan supports reviewed property and ADMET tools')
             if self.workflow_version != expected_workflow:
                 raise ValueError(
                     "ready ScientificPlan workflow_version does not match reviewed tools"
                 )
 
             compiled_canonical = _COMPILED_CANONICAL.get()
-            if compiled_canonical is None:
+            if batch:
+                inputs = self.smiles.split('\n')
+                if not 2 <= len(inputs) <= 16:
+                    raise ValueError('batch ScientificPlan requires 2 to 16 structures')
+                computed_canonical = '\n'.join(self._canonicalize_direct_smiles(value) for value in inputs)
+            elif compiled_canonical is None:
                 computed_canonical = self._canonicalize_direct_smiles(self.smiles)
             else:
                 if type(compiled_canonical) is not str or not compiled_canonical:
@@ -357,7 +370,7 @@ ScientificPlan.model_rebuild(_types_namespace={"Any": Any, "WorkflowStep": Workf
 _METRIC_PATTERNS: tuple[tuple[Metric, tuple[re.Pattern[str], ...]], ...] = (
     (
         "logp",
-        (re.compile(r"(?<![A-Za-z0-9_])log\s*p(?![A-Za-z0-9_])", re.I),),
+        (re.compile(r"(?<![A-Za-z0-9_])c?log\s*p(?![A-Za-z0-9_])", re.I),),
     ),
     (
         "tpsa",
@@ -377,11 +390,14 @@ _METRIC_PATTERNS: tuple[tuple[Metric, tuple[re.Pattern[str], ...]], ...] = (
     ),
     (
         "hba",
-        (re.compile(r"(?<![A-Za-z0-9_])hba(?![A-Za-z0-9_])", re.I),),
+        (re.compile(r"(?<![A-Za-z0-9_])hba(?![A-Za-z0-9_])", re.I),
+         re.compile(r"氢键(?:供受体|受体)(?:数量|数)?"),
+         re.compile(r"氢键供体(?:数量|数)?(?:和|与|、)受体(?:数量|数)?")),
     ),
     (
         "hbd",
-        (re.compile(r"(?<![A-Za-z0-9_])hbd(?![A-Za-z0-9_])", re.I),),
+        (re.compile(r"(?<![A-Za-z0-9_])hbd(?![A-Za-z0-9_])", re.I),
+         re.compile(r"氢键(?:供受体|供体)(?:数量|数)?")),
     ),
     (
         "rotatable_bonds",
@@ -414,12 +430,15 @@ _DRUG_LIKENESS_REQUEST = re.compile(
     r"lipinski|rule\s+of\s+five|五规则",
     re.I,
 )
+_PREDICT_ACTION = r"预测(?!\s*(?:值|数值|结果|分数|概率\s*分(?:组|箱)))"
 _PROFILE_ACTION = re.compile(
-    r"计算|分析|评估|预测|返回|报告|给出|展示|显示|"
-    r"\b(?:calculate|compute|evaluate|predict|analy[sz]e|report|return|show)\b",
+    rf"计算|分析|评估|{_PREDICT_ACTION}|返回|"
+    r"(?<!写进|写入|放进|纳入|用于)报告|给出|展示|显示|比较|对比|"
+    r"\b(?:calculate|compute|evaluate|predict|analy[sz]e|report|return|show|compare)\b",
     re.I,
 )
 _UNREVIEWED_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("ionization_fraction", re.compile(r"电离(?:比例|分数|百分比|率)|离子化(?:比例|分数|百分比|率)|\bioniz(?:ed|ation)\s+(?:fraction|percentage)\b", re.I)),
     ("logd", re.compile(r"(?<![A-Za-z0-9_])log\s*d(?![A-Za-z0-9_])", re.I)),
     ("pic50", re.compile(r"(?<![A-Za-z0-9_])p\s*ic50(?![A-Za-z0-9_])", re.I)),
     ("pki", re.compile(r"(?<![A-Za-z0-9_])p\s*ki(?![A-Za-z0-9_])", re.I)),
@@ -436,7 +455,8 @@ _UNREVIEWED_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _METRIC_LIST_INTRODUCER = re.compile(
     r"\b(?:including|include|report|reports|return|returns|calculate|compute|"
     r"measure|predict|evaluate|and|contains?|with|plus)\b|"
-    r"包括|包含|返回|报告|计算|测量|预测|评估|给出|并|以及|和",
+    r"包括|包含|返回|(?<!写进|写入|放进|纳入|用于)报告|计算|测量|"
+    rf"{_PREDICT_ACTION}|评估|给出|列出|并|以及|和",
     re.I,
 )
 _METRIC_LIST_END = re.compile(
@@ -529,12 +549,38 @@ _METRIC_LIST_FILLER = frozenset(
     }
 )
 _METRIC_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9_-]*|[\u4e00-\u9fff]+")
+OPTIMIZATION_INTERPRETATION = re.compile(
+    r'[，,]\s*并(?:指出|解释)结果对后续优化的意义(?=[。.!！?？]\s*$|\s*$)'
+)
+_BBB_REQUEST = re.compile(r'(?:血脑屏障|(?<![A-Za-z0-9_])BBB(?![A-Za-z0-9_]))\s*(?:通透性|渗透性|透过性|permeability|penetration)', re.I)
+_CYP3A4_INHIBITION = re.compile(r'(?<![A-Za-z0-9_])CYP3A4\s*(?:抑制(?:风险|端点|预测)?|inhibition)(?![A-Za-z0-9_])', re.I)
+_CYP3A4_SUBSTRATE = re.compile(r'(?<![A-Za-z0-9_])CYP3A4\s*(?:的\s*)?(?:底物|substrate)(?![A-Za-z0-9_])', re.I)
+_SOLUBILITY_ENDPOINT = re.compile(r'水?溶解度|\baqueous\s+solubility\b|\bsolubility\b', re.I)
+_ADMET_ENDPOINT_PREDICTION = re.compile(
+    r'(?<![A-Za-z0-9_])(?P<names>(?:hERG|DILI|BBB)'
+    r'(?:\s*(?:和|与|及|、|,|，|and)\s*(?:hERG|DILI|BBB))*)'
+    r'\s*(?:的\s*)?预测(?:结果|值)?(?![A-Za-z0-9_])', re.I)
+
+
+def solubility_prediction_requested(query: str) -> bool:
+    """Recognize a requested model endpoint, independent of the ADMET acronym."""
+    return any(_SOLUBILITY_ENDPOINT.search(clause) and re.search(r'预测|\bpredict(?:ion|ed|ions)?\b', clause, re.I)
+               for clause in re.split(r'[。；;\n]', positive_intent_text(query)))
+
+
 _ADMET_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_])admet?(?![A-Za-z0-9_])|"
+    r"(?<![A-Za-z0-9_])(?:hERG\s*(?:和|与|、|,)\s*DILI|DILI\s*(?:和|与|、|,)\s*hERG)(?![A-Za-z0-9_])|"
     r"absorption|distribution|metabolism|excretion|toxicity|toxic|"
-    r"吸收|分布|代谢|排泄|毒性",
+    r"吸收|分布|代谢|排泄|毒性|" + _BBB_REQUEST.pattern + '|' + _CYP3A4_INHIBITION.pattern + '|' + _CYP3A4_SUBSTRATE.pattern
+    + '|' + _ADMET_ENDPOINT_PREDICTION.pattern,
     re.I,
 )
+_FOCUSED_ADMET_ENDPOINTS = re.compile(
+    r'重点(?:关注|查看|给出|列出)\s*(?P<names>(?:水?溶解度|肝毒性|hERG(?:\s*风险)?)'
+    r'(?:\s*(?:、|，|,|和|与|及)\s*(?:水?溶解度|肝毒性|hERG(?:\s*风险)?))*)'
+    r'(?:\s*(?:的)?(?:预测结果|预测值|数值|结果))?'
+    r'(?=\s*[；;。.!！？?]|\s*[，,]\s*并说明哪些是预测值|\s*$)', re.I)
 _UNSUPPORTED_CAPABILITIES: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "admet",
@@ -587,12 +633,41 @@ def _requested_metrics(query: str) -> tuple[Metric, ...]:
         return requested
     if _metric_list_is_explicit(query):
         return ()
-    if _PROPERTY_REQUEST.search(query):
+    if (_PROPERTY_REQUEST.search(query) or re.search(
+            r'\bSMILES\s*[:：=]?\s*[^\s,，；;。]+\s*的\s*(?:性质|属性)', query, re.I)):
         return _STANDARD_METRICS
     return ()
 
 
 def _unreviewed_metric_capabilities(query: str) -> tuple[str, ...]:
+    from src.agent.contracts.comparison_presentation import without_comparison_presentation
+    query = without_comparison_presentation(positive_intent_text(query))
+    # A separate, reviewed assessment action is not another descriptor name.
+    # Keep surrounding words so unknown metrics remain subject to validation.
+    query = re.sub(r'(?:并且?|以及)\s*(?:评估|评价|分析)\s*(?:类药性|成药性|药物相似性)',
+                   ' ', query, flags=re.I)
+    # The original query still reaches whole-field SMILES validation.  Remove
+    # labeled structure text only from this metric-name scan so atom and
+    # stereochemistry tokens cannot be mistaken for requested descriptors.
+    query = re.sub(r'[\u4e00-\u9fff]{2,32}（\s*SMILES\s*[:：=]\s*[^）\s]+）', ' ', query, flags=re.I)
+    query = re.sub(r'(?:分子\s*)?SMILES\s*[:：=]\s*[^\s,，;；。]+', ' ', query, flags=re.I)
+    query = _ADMET_ENDPOINT_PREDICTION.sub(' ', query)
+    if re.search(r'\bPDB\s*[:：]?\s*[0-9][A-Za-z0-9]{3}\b', query, re.I):
+        query = re.sub(r'分辨率|(?:哪些|什么)?配体', ' ', query)
+    if _CYP3A4_INHIBITION.search(query) or _CYP3A4_SUBSTRATE.search(query):
+        query = _CYP3A4_INHIBITION.sub(' ', query)
+        query = _CYP3A4_SUBSTRATE.sub(' ', query)
+        query = re.sub(r'是否为|给出模型结果', ' ', query)
+        query = re.sub(r'给出预测结果', ' ', query)
+    query = re.sub(r'(?:并\s*(?:预测|评估)\s*)?(?:其\s*)?' + _BBB_REQUEST.pattern,
+                   ' ', query, flags=re.I)
+    # A focused ADMET list is interpreted by the ADMET endpoint renderer,
+    # not as a request for an unimplemented RDKit property. Only remove a
+    # complete list of known endpoints; other clauses remain subject to review.
+    if _explicit_admet_request(query):
+        query = _FOCUSED_ADMET_ENDPOINTS.sub(' ', query)
+    if solubility_prediction_requested(query):
+        query = _SOLUBILITY_ENDPOINT.sub(' ', query)
     capabilities = [
         f"metric:{metric}"
         for metric, pattern in _UNREVIEWED_METRICS
@@ -648,6 +723,61 @@ def _metric_list_is_explicit(query: str) -> bool:
 
 def _metric_list_has_unknown_token(query: str) -> bool:
     """Reject explicit metric lists instead of treating unknown terms as prose."""
+    query = OPTIMIZATION_INTERPRETATION.sub('', query)
+    # A forward reference introduces the explicit structure list, not a metric.
+    # Only strip the complete grammatical subject; keep every following metric.
+    query = re.sub(r'^\s*(?:请\s*)?(?:计算|比较|对比)\s*(?:以下|下列)'
+                   r'(?:[一二三四五六七八九十两\d]+个)?分子\s*的', '计算 ', query)
+    # An explicitly supported bound is an evaluation of the preceding
+    # descriptors, not another metric name. Keep unknown trailing clauses
+    # visible to this scan and let the bound parser validate the whole clause.
+    from src.agent.property_constraints import (
+        _METRIC, _OP, _NUMBER, normalize_property_bound_questions, requested_property_bounds,
+    )
+    query = normalize_property_bound_questions(query)
+    bound_item = (_METRIC.pattern + _OP.pattern + _NUMBER.pattern
+                  + r'\s*(?:[A-Za-z][A-Za-z0-9/·²-]*|Å²|A²)?')
+    bound_clause = re.compile(
+        r'[，,]\s*(?:并\s*)?判断(?:它们|两者|其|该分子|这个分子)'
+        r'是否(?:都)?(?:满足|符合)\s*' + bound_item
+        + r'(?:\s*(?:和|与|及|、)\s*' + bound_item + r')*'
+        + r'(?:\s*的(?:约束|要求|限制))?'
+        + r'(?=\s*(?:[。.!！?？；;]|$))', re.I)
+    def remove_supported_bound(match):
+        bounds, unknown = requested_property_bounds(match.group())
+        return ' ' if bounds or unknown else match.group()
+    query = bound_clause.sub(remove_supported_bound, query)
+    # A colon after the property noun may introduce complete molecular
+    # operands, not descriptor names. Only remove an entirely validated list;
+    # other text remains visible to the unknown-metric gate.
+    from src.agent.planning.comparison_request import _whole_subject_list
+    def remove_structure_list(match):
+        return match.group('property') if _whole_subject_list(match.group('subjects')) else match.group()
+    query = re.sub(
+        rf'(?P<property>{_PROPERTY_REQUEST.pattern})\s*[:：]\s*(?P<subjects>[^。;；\n]+)',
+        remove_structure_list, query, flags=re.I,
+    )
+    query = re.sub(r'[，,]\s*(?:并|以及)\s*判断是否符合\s*(?:Lipinski\s*(?:五规则|规则)|五规则)',
+                   ' ', query, flags=re.I)
+    query = re.sub(r'是否符合(?=\s*Lipinski\s*(?:五规则|规则))', ' ', query, flags=re.I)
+    subject = re.match(r'^\s*(?:请\s*)?(?:比较|对比)\s*(.+?)的', query)
+    if subject:
+        from src.agent.planning.comparison_request import _whole_subject_list
+        if _whole_subject_list(subject.group(1)):
+            query = '计算 ' + query[subject.end():]
+    def remove_calculation_subject(calculation_subject):
+        subject_text = re.sub(r'^(?:分子\s*)?(?:SMILES\s*[:：=]?\s*)?', '',
+                              calculation_subject.group(1), flags=re.I)
+        if not _whole_subject_list(subject_text):
+            return calculation_subject.group()
+        return '计算 分子' if calculation_subject.group(2) is not None else '计算 '
+    # Also scan calculations appended to an explanation. Preserve “分子性质”
+    # as a property phrase and expose the requested metrics after a valid subject.
+    query = re.sub(r'计算\s*([^。；;！？!?\n]+?)的(\s*(?=性质|属性))?',
+                   remove_calculation_subject, query)
+    # The explicitly bounded comparison asks to reuse a prior molecule; its
+    # words are not names of additional molecular descriptors.
+    query = re.sub(r'[，,]\s*(?:并|以及)?\s*与(?:刚才|之前|上一轮)(?:的)?(?:分子|结果)(?:比较|对比)\s*[。.!！?？]?\s*$', '', query)
     # Once a property request is present, the text following that request is
     # an explicit metric context.  In particular, punctuation is not a safe
     # escape hatch: ``properties. FooMetric`` and ``properties, FooTask`` must
@@ -666,7 +796,7 @@ def _metric_list_has_unknown_token(query: str) -> bool:
             clause = clause[: object_boundary.start()]
         clause = re.split(
             r"\b(?:and|or)\s+(?:explain|show|tell|describe)\b|"
-            r"(?:并且?|以及)?(?:解释|说明|展示|显示)",
+            r"(?:并且?|以及)?\s*(?:简要|简短)?\s*(?:解释|说明|展示|显示)",
             clause,
             maxsplit=1,
             flags=re.I,
@@ -722,6 +852,10 @@ def _metric_list_has_unknown_token(query: str) -> bool:
             return True
 
     for introducer in _METRIC_LIST_INTRODUCER.finditer(query):
+        if (introducer.group() == '和'
+                and re.search(r'氢键供体(?:数量|数)?$', query[:introducer.start()])
+                and re.match(r'受体(?:数量|数)?', query[introducer.end():])):
+            continue
         # Do not interpret a leading action verb as a metric list when the
         # request's property noun appears later (for example, "计算阿司匹林
         # 的分子性质").  The property compiler will then issue the normal
@@ -732,19 +866,28 @@ def _metric_list_has_unknown_token(query: str) -> bool:
         if property_after_introducer is not None:
             continue
         clause = query[introducer.end():]
+        if re.match(r'\s*(?:解释|说明)(?:该|这个)指标的含义(?=[，,；;。.!！?？]|$)', clause):
+            # This clause asks for interpretation of the preceding metric;
+            # later introducers are still scanned for independent requests.
+            continue
         # In "计算乙醇 CCO 的分子量", the text before 的 is the
         # molecular subject. Keep scanning the metrics after it, including
         # unknown metrics, instead of classifying the name as a metric.
-        subject = re.match(r"\s*([\u4e00-\u9fff]{2,32})(?:\s+[^\s，,；;]+)?\s*的\s*", clause)
+        subject = re.match(r"\s*([\u4e00-\u9fff]{2,32})(?:\s+[^\s，,；;]+|（SMILES\s*[:：=][^）]+）)?\s*的\s*", clause, re.I)
         if subject is not None and '分子' not in subject[1]:
             clause = clause[subject.end():]
         # The bare subject in "计算分子的分子量" is not a metric. Consume
         # only this complete leading qualifier, so metrics after 的 (including
         # unknown ones) are still scanned rather than hidden by that boundary.
-        clause = re.sub(r"^\s*分子\s*的\s*", "", clause, count=1)
+        clause = re.sub(r"^\s*(?:分子|它|这个分子|该分子)\s*的\s*", "", clause, count=1)
         end = _METRIC_LIST_END.search(clause)
         if end:
             clause = clause[:end.start()]
+        clause = re.split(
+            r"\b(?:and|or)\s+(?:explain|show|tell|describe)\b|"
+            r"(?:并且?|以及)?\s*(?:简要|简短)?\s*(?:解释|说明|展示|显示)",
+            clause, maxsplit=1, flags=re.I,
+        )[0]
         # Multi-word reviewed metrics and the reviewed drug-likeness phrase
         # are atomic safe terms. Remove them before generic token inspection.
         for _, patterns in _METRIC_PATTERNS:
@@ -800,6 +943,7 @@ def _metric_list_has_unknown_token(query: str) -> bool:
                 "预测",
                 "评估",
                 "给出",
+                "列出",
             }
         ):
             return True
@@ -807,8 +951,9 @@ def _metric_list_has_unknown_token(query: str) -> bool:
 
 
 def _explicit_admet_request(query: str) -> bool:
+    query = positive_intent_text(query)
     return bool(
-        _ADMET_PATTERN.search(query)
+        (_ADMET_PATTERN.search(query) or solubility_prediction_requested(query))
         and (
             _PROPERTY_REQUEST.search(query)
             or _DRUG_LIKENESS_REQUEST.search(query)
@@ -890,6 +1035,23 @@ class ScientificObligationCompiler:
         """
         if not isinstance(query, str):
             return False
+        # An attributive reference to a past result is not a new operation.
+        # Keep the endpoint/object and all independent current imperatives;
+        # callers still retain and execute against the original request.
+        query = without_past_result_actions(query)
+        # Declining a synthetic score is a display constraint, not a forbidden
+        # scientific tool. Preserve all other exclusions for the full planner.
+        query = re.sub(r'(^|[，,；;。\n])\s*不要给综合评分\s*(?=[，,；;。\n]|$)',
+                       r'\1', query)
+        from src.agent.contracts.concept_request import is_concept_explanation
+        if is_concept_explanation(query):
+            return False
+        if re.fullmatch(
+            r'\s*(?:请)?(?:查询|检索)(?:人源|人类|人)?\s*[A-Za-z][A-Za-z0-9-]{1,31}\s*'
+            r'靶点[，,]\s*(?:给出|提供)\s*UniProt\s*编号(?:和|及|与)(?:蛋白)?功能(?:信息)?[。.!！?？]?\s*',
+            query, re.I,
+        ):
+            return False
         from src.agent.planning.composite_request import (
             parse_target_structure_molecule_request,
         )
@@ -898,6 +1060,22 @@ class ScientificObligationCompiler:
             # property-only compiler must not reject it or drop target lookup.
             return False
         from src.agent.planning.request_parsing import looks_like_design
+        if looks_like_design(query) and _explicit_admet_request(query):
+            from src.agent.contracts.target_request import analyze_target_request
+            target_request = analyze_target_request(query)
+            combined_ranking = re.fullmatch(
+                r'\s*(?:请\s*)?针对\s*[A-Za-z][A-Za-z0-9_-]*\s*设计\s*'
+                r'[1-9][0-9]?\s*个候选(?:小)?分子\s*[,，]\s*计算分子性质[、，,]\s*'
+                r'预测活性和\s*ADMET\s*[,，]\s*并按这些证据排序[；;]\s*'
+                r'注明预测不是实验结果[。.!！]?\s*', query, re.I)
+            if (target_request.explicit and not target_request.needs_clarification
+                    and ((combined_ranking and not (set(_unreviewed_metric_capabilities(query)) - {'metric:activity'})
+                          and not (set(_unsupported_capabilities(query)) - {'generation', 'admet', 'ranking'}))
+                         or (not _unreviewed_metric_capabilities(query)
+                             and not (set(_unsupported_capabilities(query)) - {'generation', 'admet'})))):
+                # Generated candidates are inputs to the target-design workflow;
+                # the single-structure compiler cannot own this request.
+                return False
         if (looks_like_design(query)
                 and re.search(r"优化|optimi[sz]e|lead\s+optimization|降低|提高|改善", query, re.I)):
             # Lead optimization already has a typed multi-step workflow. Do
@@ -1027,9 +1205,23 @@ class ScientificObligationCompiler:
             )
 
         admet_requested = _explicit_admet_request(original_query)
+        if solubility_prediction_requested(original_query) and re.search(
+                r'\bpH\b|温度|\btemperature\b|\d\s*(?:℃|°C)|实验(?:测定)?值', original_query, re.I):
+            return self._plan(status='rejected', original_query=original_query,
+                              missing_capabilities=('condition_specific_solubility',),
+                              message='当前水溶解度模型不能提供指定 pH、温度下的溶解度或实验测定值。'
+                                      '可请求不限定这些条件的模型预测；本次未执行计算。')
+        positive = positive_intent_text(original_query)
+        if (admet_requested and re.search(
+                r'(?:查询|查找|检索|搜索|\b(?:search|find|lookup)\b)'
+                r'[^。；;\n]{0,100}(?:靶点|\bUniProt\b|\btarget\b)', positive, re.I)):
+            return self._plan(
+                status='rejected', original_query=original_query,
+                missing_capabilities=('target_lookup_and_admet',),
+                message='当前不能完整执行此靶点检索和 ADMET 组合；请将各项任务分别提交。本次未执行科学工具。')
         unsupported = tuple(
             capability
-            for capability in _unsupported_capabilities(original_query)
+            for capability in _unsupported_capabilities(positive)
             if capability != "admet" or not admet_requested
         )
         unreviewed_metrics = _unreviewed_metric_capabilities(original_query)
@@ -1054,8 +1246,9 @@ class ScientificObligationCompiler:
             # when the user did not spell out a separate property request.
             metrics = _STANDARD_METRICS
         parser = BaseMolecularTool("scientific_obligation_compiler", "")
+        input_query = expand_labeled_comparison(original_query)
         try:
-            parsed_values = parse_molecular_inputs(original_query, parser)
+            parsed_values = parse_molecular_inputs(input_query, parser, prose_pattern=_ADMET_ENDPOINT_PREDICTION)
         except MolecularInputMissing:
             missing_input_hint = _NAMED_MOLECULE_HINT.search(original_query)
             if (
@@ -1085,6 +1278,11 @@ class ScientificObligationCompiler:
                 missing_capabilities=("rdkit_unavailable",),
                 message="分子结构验证能力暂不可用。",
             )
+        except MolecularInputInvalid as exc:
+            message = (f'识别到的第 {exc.position} 个 SMILES 无法验证；请检查后重新提交，本次未进行计算。'
+                       if exc.count > 1 else '无法验证分子结构；请提供有效的 SMILES。')
+            return self._plan(status='rejected', original_query=original_query,
+                              missing_capabilities=('invalid_smiles',), message=message)
         except ValueError:
             return self._plan(
                 status="rejected",
@@ -1100,12 +1298,21 @@ class ScientificObligationCompiler:
                 missing_capabilities=unsupported + unreviewed_metrics,
             )
 
-        if len(parsed_values) != 1:
-            return self._plan(status="rejected", original_query=original_query)
-
-        parsed = parsed_values[0]
-        smiles = parsed.smiles
-        canonical_smiles = parsed.canonical_smiles
+        subject = re.match(r'^\s*(?:请\s*)?(?:比较|对比)\s*(.+?)的', input_query)
+        if subject and re.search(r'和|与|、|\band\b', subject.group(1), re.I):
+            from src.agent.planning.comparison_request import _whole_subject_list
+            labeled = re.fullmatch(r'(?:SMILES\s*[:：=]\s*[^\s，。；]+\s*(?:和|与|and)\s*)+'
+                                   r'SMILES\s*[:：=]\s*[^\s，。；]+\s*', subject.group(1), re.I)
+            if not labeled and not _whole_subject_list(subject.group(1)):
+                return self._plan(status='clarification', original_query=original_query,
+                                  missing_fields=('smiles',),
+                                  message='请为比较中的每个分子提供有效 SMILES，然后重新提交；本次未进行计算。')
+        batch = len(parsed_values) > 1
+        if batch and (len(parsed_values) > 16 or required_tools not in (('property_calculator',), ('drug_likeness_assessment',), ('property_calculator', 'drug_likeness_assessment'), ('admet_predictor',), ('property_calculator', 'admet_predictor'))):
+            return self._plan(status="rejected", original_query=original_query,
+                              message='批量请求目前仅支持最多 16 个分子的性质计算和 ADMET 预测，请拆分其他计算。')
+        smiles = '\n'.join(value.smiles for value in parsed_values)
+        canonical_smiles = '\n'.join(value.canonical_smiles for value in parsed_values)
         if not required_tools:
             return self._plan(
                 status="rejected",
@@ -1145,7 +1352,7 @@ class ScientificObligationCompiler:
                 )
             )
         workflow_version = (
-            ADMET_WORKFLOW_VERSION
+            (BATCH_PROPERTY_ADMET_WORKFLOW_VERSION if 'property_calculator' in required_tools and 'admet_predictor' in required_tools else BATCH_ADMET_WORKFLOW_VERSION if 'admet_predictor' in required_tools else BATCH_PROPERTY_WORKFLOW_VERSION) if batch else ADMET_WORKFLOW_VERSION
             if "admet_predictor" in required_tools
             else WORKFLOW_VERSION
         )

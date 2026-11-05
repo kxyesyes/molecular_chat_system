@@ -19,6 +19,37 @@ from src.agent.planning.bindings import BindingResolver
 from src.agent.tools.admet_ai_backend import ADMETAIBackend
 
 
+def test_substrate_classification_is_not_an_adverse_risk_hit():
+    class Row:
+        def to_dict(self):
+            return {'CYP2C9_Substrate_CarbonMangels': .8, 'CYP3A4_Veith': .7, 'DILI': .6}
+    info = {key: {'task_type': 'classification', 'category': 'Metabolism'} for key in Row().to_dict()}
+    info['DILI']['category'] = 'Toxicity'
+    backend = ADMETAIBackend(model=object(), weights_id='test', endpoint_info=info)
+    admet = backend._row_from_prediction('CCO', 'molecule-1', Row())['admet']
+    assert admet['risk_endpoint_ids'] == ['CYP3A4_Veith', 'DILI']
+    assert admet['risk_count'] == 2 and admet['total_endpoints'] == 2
+    assert admet['endpoints']['CYP2C9_Substrate_CarbonMangels']['value'] == .8
+
+
+def test_out_of_range_regression_preserves_raw_prediction_with_invalid_marker():
+    class Row:
+        def to_dict(self):
+            return {'Half_Life_Obach': -6.2, 'Clearance_Microsome_AZ': -4.3, 'Solubility_AqSolDB': -1.2}
+    info = {
+        'Half_Life_Obach': {'task_type': 'regression', 'category': 'Excretion', 'unit': 'hr', 'minimum': 0},
+        'Clearance_Microsome_AZ': {'task_type': 'regression', 'category': 'Excretion', 'unit': 'uL/min/mg', 'minimum': 0},
+        'Solubility_AqSolDB': {'task_type': 'regression', 'category': 'Absorption', 'unit': 'log(mol/L)'},
+    }
+    backend = ADMETAIBackend(model=object(), weights_id='test', endpoint_info=info)
+    row = backend._row_from_prediction('CCO', 'molecule-1', Row())
+    endpoints = row['admet']['endpoints']
+    assert endpoints['Half_Life_Obach']['value'] == -6.2
+    assert endpoints['Half_Life_Obach']['validity'] == 'out_of_range'
+    assert endpoints['Clearance_Microsome_AZ']['validity'] == 'out_of_range'
+    assert endpoints['Solubility_AqSolDB'].get('validity') != 'out_of_range'
+
+
 def _prediction(smiles: str, *, molecule_id: str) -> dict:
     return {
         "molecule_id": molecule_id,

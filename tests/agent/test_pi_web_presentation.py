@@ -33,11 +33,43 @@ def test_web_display_uses_only_accepted_data_and_retains_audit():
         metadata={'binding_profile': 'medchat-web-v1'})
     public, terminal = [json.loads(x) for x in _result_frame(ChatHandler(None, None, None, {}), result, False)]
     assert public['final_answer'] == audit == result.final_answer
-    assert '总体评分: 0.693' in terminal['content']
+    assert '规则综合评分: 0.693' in terminal['content']
     assert 'QED评分: 0.407' in terminal['content']
     assert '不是成药成功概率' in terminal['content']
     assert 'INVENTED' not in terminal['content']
     assert public['display_answer'] == terminal['content']
+
+
+def test_lipinski_display_includes_calculated_rule_inputs():
+    from src.web.decision_chat import web_scientific_display
+    assessment = {'lipinski_rule_of_five': {'violation_count': 0, 'compliance': True},
+                  'molecular_properties': {'molecular_weight': 180.16, 'logp': 1.31,
+                                           'hba': 3, 'hbd': 1}}
+    audit = json.dumps({'acceptance': {'profile': 'medchat-web-v1'}, 'observations': [
+        {'tool': 'drug_likeness_assessment', 'evidence_id': 'e', 'status': 'succeeded',
+         'data': [{'smiles': 'CCO', 'assessment': assessment}]}]})
+    result = AgentResult('lipinski', True, audit, final_answer=audit,
+                         outcome=RunOutcome.COMPLETED,
+                         metadata={'binding_profile': 'medchat-web-v1'})
+    text = web_scientific_display(result, concise=True)
+    assert all(value in text for value in ['180.16', '1.31', 'HBA', 'HBD', '3', '1'])
+
+
+def test_optimization_display_shows_cited_candidate_comparisons():
+    from src.web.decision_chat import web_scientific_display
+    data = {'status': 'unverified', 'baseline_smiles': 'CCO', 'candidates': [
+        {'smiles': 'CCN', 'status': 'supported', 'comparisons': [
+            {'metric': 'logp', 'direction': 'lower', 'baseline_value': 1.31,
+             'candidate_value': .925, 'satisfied': True}], 'missing_evidence': [], 'unverified_constraints': []},
+        {'smiles': 'CCC', 'status': 'unverified', 'comparisons': [],
+         'missing_evidence': ['logp'], 'unverified_constraints': []}]}
+    audit = json.dumps({'acceptance': {'profile': 'medchat-web-v1'}, 'observations': [
+        {'tool': 'lead_optimization_verifier', 'evidence_id': 'e', 'status': 'succeeded', 'data': data}]})
+    result = AgentResult('optimization', False, audit, final_answer=audit, outcome=RunOutcome.PARTIAL,
+                         partial=True, metadata={'binding_profile': 'medchat-web-v1'})
+    answer = web_scientific_display(result, concise=True)
+    assert all(value in answer for value in ('CCO', 'CCN', 'CCC', '1.31', '0.925', 'logP', '未验证'))
+    assert '实验' in answer
 
 
 def test_failed_web_result_never_projects_scientific_data():
@@ -48,6 +80,20 @@ def test_failed_web_result_never_projects_scientific_data():
     public, terminal = [json.loads(x) for x in _result_frame(ChatHandler(None, None, None, {}), result, False)]
     assert 'display_answer' not in public
     assert '99' not in terminal['content']
+
+
+@pytest.mark.parametrize('reason', ['required_ranking_evidence_missing', 'ranking_count_mismatch'])
+def test_incomplete_ranking_is_not_presented_as_an_accepted_order(reason):
+    from src.web.decision_chat import web_scientific_display
+    audit = json.dumps({'acceptance': {'profile': 'medchat-web-v1'}, 'observations': [
+        {'tool': 'candidate_ranker', 'status': 'succeeded', 'evidence_id': 'e1',
+         'scientific_usable': False, 'reason_codes': [reason],
+         'data': {'top_candidates': [{'rank': 1, 'canonical_smiles': 'CCO', 'score': 0.987}]}}]})
+    result = AgentResult('ranking-partial', False, audit, final_answer=audit,
+        outcome=RunOutcome.PARTIAL, partial=True, metadata={'binding_profile': 'medchat-web-v1'})
+    answer = web_scientific_display(result, concise=True)
+    assert '未展示排名' in answer
+    assert '0.987' not in answer and '| 排名 |' not in answer
 
 
 def test_completed_web_retrieval_keeps_cards_and_truthful_attempt_flag():
@@ -98,6 +144,35 @@ def test_business_comparison_cannot_publish_uncited_raw_observation(monkeypatch)
     assert seen == [[]]
 
 
+@pytest.mark.parametrize('focused', [False, True])
+@pytest.mark.parametrize('missing', [False, True])
+def test_dynamic_admet_summary_prioritizes_requested_cited_endpoints(missing, focused):
+    from src.agent.contracts import AgentContext, ToolProvenance
+    from src.web.web_business import WebTurnProjection
+    endpoints = {f'other_{i}': {'value': .1, 'unit': '-', 'task_type': 'classification',
+                                'source': 'admet_ai_model'} for i in range(10)}
+    for name in ('hERG', 'DILI'):
+        endpoints[name] = {'value': .2, 'unit': '-', 'task_type': 'classification', 'source': 'admet_ai_model'}
+    rows = [{'smiles': smiles, 'admet': {'prediction_method': 'admet_ai',
+             'endpoints': {k: v for k, v in endpoints.items() if not (missing and smiles == 'CCN' and k == 'DILI')},
+             'total_endpoints': 12, 'risk_count': 0, 'risk_endpoint_ids': []}} for smiles in ('CCO', 'CCN')]
+    raw = ToolResult.success_result('admet_predictor', rows, quality={'validated': True, 'evidence_id': 'e1'},
+                                    provenance=ToolProvenance(tool_name='admet_predictor', input_digest='digest'))
+    audit = json.dumps({'acceptance': {'profile': 'medchat-web-v1'}, 'observations': [
+        {'tool': 'admet_predictor', 'evidence_id': 'e1', 'status': 'succeeded', 'data': rows}]})
+    result = AgentResult('fixture-run', True, audit, final_answer=audit, tool_results=[raw],
+                         outcome=RunOutcome.COMPLETED, metadata={'binding_profile': 'medchat-web-v1'})
+    query = '请比较 CCO 和 CCN 的 ADMET，列出各自的 hERG 和 DILI 预测值；不要推断人体安全性。'
+    if focused:
+        query = '比较 CCO 和 CCN 的 hERG 和 DILI 预测，只看这两个指标，给出数值和筛查判定。'
+    view = WebTurnProjection(query, 'owner', []).capture(result, context=AgentContext(query, 'fixture-run'))
+    assert all(name in view['summary_answer'] for name in ('CCO', 'CCN', 'hERG', 'DILI'))
+    assert (view['status'] == 'partial') is missing
+    assert ('模型未返回或无法使用请求端点' in view['summary_answer']) is missing
+    if focused:
+        assert 'other_' not in view['summary_answer']
+
+
 @pytest.mark.parametrize('cited_properties', [True, False])
 def test_generation_constraint_projection_preserves_audit_and_acceptance(cited_properties):
     from src.agent.contracts import AgentContext, ToolProvenance
@@ -120,6 +195,7 @@ def test_generation_constraint_projection_preserves_audit_and_acceptance(cited_p
     assert '用户约束逐项检查' in complete['content']
     if cited_properties:
         assert '46.07' in complete['content'] and '3.1 | 不满足' in complete['content']
+        assert '候选 1 `CCO`' in complete['content']
     else:
         assert '未验证' in complete['content'] and '3.1' not in complete['content']
     assert 'synthetic descriptor fixture' in complete['content']

@@ -410,11 +410,11 @@ class OllamaModel:
             max_tokens=max_tokens, timeout_seconds=timeout_seconds, temperature=temperature, input_budget=input_budget)
 
     async def propose_ordinary_intent(self, messages, *, mode="native", max_tokens=256,
-                                      timeout_seconds=30.0, _journal=None):
+                                      timeout_seconds=30.0, _journal=None, input_budget=None):
         """One injected intent transaction, not admission or execution."""
         from src.system.ollama_decisions import request_ollama_protocol
         return await request_ollama_protocol(self, 'propose_ordinary_intent', messages, mode=mode,
-            max_tokens=max_tokens, timeout_seconds=timeout_seconds, _journal=_journal)
+            max_tokens=max_tokens, timeout_seconds=timeout_seconds, _journal=_journal, input_budget=input_budget)
 
     async def propose_docking_preparation(self, messages, *, mode="native", max_tokens=256,
                                          timeout_seconds=30.0, _journal=None):
