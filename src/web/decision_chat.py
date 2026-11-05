@@ -122,7 +122,7 @@ def _requested_admet_endpoints(query):
         if name.casefold() not in {'adme', 'admet', 'and'}]
     for match in _ADMET_ENDPOINT_PREDICTION.finditer(positive):
         names.extend({'herg': 'hERG', 'dili': 'DILI', 'bbb': 'BBB_Martins'}[name.casefold()]
-                     for name in re.findall(r'hERG|DILI|BBB', match['names'], re.I))
+                     for name in re.findall(r'hERG|DILI|BBB', match.group(), re.I))
     focused_lists = re.finditer(
         r'重点(?:列出|查看|关注|给出)\s*(?:各自的)?\s*'
         r'([A-Za-z][A-Za-z0-9_-]{0,63}(?:\s*(?:、|，|,|和|与|及|and)\s*'

@@ -557,8 +557,8 @@ _CYP3A4_INHIBITION = re.compile(r'(?<![A-Za-z0-9_])CYP3A4\s*(?:抑制(?:风险|�
 _CYP3A4_SUBSTRATE = re.compile(r'(?<![A-Za-z0-9_])CYP3A4\s*(?:的\s*)?(?:底物|substrate)(?![A-Za-z0-9_])', re.I)
 _SOLUBILITY_ENDPOINT = re.compile(r'水?溶解度|\baqueous\s+solubility\b|\bsolubility\b', re.I)
 _ADMET_ENDPOINT_PREDICTION = re.compile(
-    r'(?<![A-Za-z0-9_])(?P<names>(?:hERG|DILI|BBB)'
-    r'(?:\s*(?:和|与|及|、|,|，|and)\s*(?:hERG|DILI|BBB))*)'
+    r'(?<![A-Za-z0-9_])(?:hERG|DILI|BBB)'
+    r'(?:\s*(?:和|与|及|、|,|，|and)\s*(?:hERG|DILI|BBB))*'
     r'\s*(?:的\s*)?预测(?:结果|值)?(?![A-Za-z0-9_])', re.I)
 
 
