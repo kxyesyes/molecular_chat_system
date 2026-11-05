@@ -119,6 +119,7 @@ def _decision_failure_message(reason: str) -> str:
     """Expose only safe, actionable guidance for model-loop failures."""
     messages = {
         'answer_length_mismatch': '模型未能按要求的句数完成回答，请重试。',
+        'content_review_requires_chat_finish': '模型在复核时没有返回修订后的回答，请重试。',
         'unsupported_split_claim': '现有信息不足以断定训练与测试样本的重叠或新骨架的覆盖情况，本次解释未通过核对。',
         'decision_runtime_failed': (
             '智能体决策未完成；请先在模型设置中运行连接测试，并确认模型支持工具调用或结构化输出。'
@@ -906,8 +907,11 @@ class ScientificSession:
                 decision = parse_decision_json(json.dumps(proposal, ensure_ascii=False, allow_nan=False))
             else:
                 decision = parse_decision_json(encode_observation(proposal))
-            if (binding and policy.is_web and request_kind == 'chat' and isinstance(decision, FinishDecision)
-                    and decision.response_kind == 'chat' and not decision.evidence_ids):
+            chat_finish = (isinstance(decision, FinishDecision) and decision.response_kind == 'chat'
+                           and not decision.evidence_ids)
+            if content_revision_requested and not chat_finish:
+                raise DecisionBoundaryError('content_review_requires_chat_finish')
+            if binding and policy.is_web and request_kind == 'chat' and chat_finish:
                 review = evaluation_review(context.query, decision.text)
                 if review and not content_revision_requested:
                     review_draft = decision.text
