@@ -33,6 +33,47 @@ def test_select_passages_rejects_document_mismatch_and_missing_identifier():
     assert select_passages(_payload(), 'PMC456', '分析 F999X。') == []
 
 
+def test_summary_selects_bounded_body_evidence_across_sections():
+    paragraphs = [
+        (10, 'REF', 'Citation only.'), (20, 'METHODS', 'Assay conditions were held constant.'),
+        (30, 'RESULTS', 'X' * 2501), (40, 'RESULTS', 'The first group responded.'),
+        (50, 'RESULTS', 'The second group responded.'), (60, 'RESULTS', 'Response varied.'),
+        (70, 'DISCUSS', 'Independent replication is needed.'),
+    ]
+    document = [{'documents': [{'id': 'PMC456', 'passages': [
+        {'offset': offset, 'infons': {'section_type': section, 'type': 'paragraph'}, 'text': text}
+        for offset, section, text in paragraphs]}]}]
+    selected = select_passages(document, 'PMC456', '总结 PMID 123 的全文')
+    assert [p['offset'] for p in selected] == [20, 40, 50, 70]
+
+
+def test_lowercase_drug_name_selects_only_relevant_fulltext():
+    document = _payload()
+    document[0]['documents'][0]['passages'].append({
+        'offset': 400, 'infons': {'section_type': 'RESULTS', 'type': 'paragraph'},
+        'text': 'Pseudorerlotinib also affected the cells.'})
+    assert [p['offset'] for p in select_passages(
+        document, 'PMC456', '分析 PMID 123 的全文，说明 erlotinib 的实验结果')] == [100]
+    assert select_passages(document, 'PMC456', '分析 PMID 123 的全文，说明 gefitinib 的实验结果') == []
+    assert select_passages(document, 'PMC456', '分析 PMID 123 的全文，说明 erlotinib 对 F999X 的作用') == []
+
+
+def test_drug_results_are_not_crowded_out_by_generic_words_or_methods():
+    passages = [{'offset': i * 10, 'infons': {'section_type': 'METHODS', 'type': 'paragraph'},
+                 'text': 'An erlotinib stock solution was prepared.'} for i in range(1, 6)]
+    passages.extend([
+        {'offset': 60, 'infons': {'section_type': 'RESULTS', 'type': 'paragraph'},
+         'text': 'The experimental results in the control group were recorded.'},
+        {'offset': 70, 'infons': {'section_type': 'RESULTS', 'type': 'paragraph'},
+         'text': 'Erlotinib-treated cells showed a lower growth rate.'},
+    ])
+    document = [{'documents': [{'id': 'PMC456', 'passages': passages}]}]
+    selected = select_passages(document, 'PMC456', '分析 PMID 123 的全文，说明 experimental results for erlotinib')
+    assert len(selected) == 4
+    assert 70 in [p['offset'] for p in selected]
+    assert 60 not in [p['offset'] for p in selected]
+
+
 def test_passage_selection_prioritizes_relevant_headings_over_first_keyword_hits():
     paragraphs = [{'offset': i * 100, 'infons': {'section_type': 'RESULTS', 'type': 'paragraph'},
                    'text': 'EGFR variants were tested at several ATP concentrations.'} for i in range(1, 6)]
@@ -201,14 +242,20 @@ def test_fulltext_analysis_does_not_display_model_misattributed_numeric_claim():
     assert 'respectively…' in answer
 
 
-def test_web_fulltext_request_retrieves_open_article_and_uses_configured_model(monkeypatch, tmp_path):
+@pytest.mark.parametrize('query,offset,quote', [
+    ('请分析 PMID 123 的全文，说明 T790M 对抑制常数的影响。', 200,
+     'L858R/T790M mutant showed an estimated inhibition constant of 41 nM'),
+    ('总结 PMID 123 的全文', 100, 'estimated erlotinib inhibition constants by enzyme kinetics'),
+    ('分析 PMID 123 的全文，说明 erlotinib 的实验结果', 100,
+     'estimated erlotinib inhibition constants by enzyme kinetics'),
+])
+def test_web_fulltext_request_retrieves_open_article_and_uses_configured_model(monkeypatch, tmp_path, query, offset, quote):
     from src.agent.contracts.decision import FinishDecision
     from src.agent.decision_transport import DecisionResponse
     from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
     from src.literature.europe_pmc import EuropePMCClient
     from src.target_search.remote_clients import BoundedJsonClient
     from pi_web_support import make_web_handler, run_web_turn
-    query = '请分析 PMID 123 的全文，说明 T790M 对抑制常数的影响。'
     monkeypatch.setattr(EuropePMCClient, 'search', lambda self, value, **kwargs: {'hit_count': 1, 'articles': [
         {'pmid': '123', 'pmcid': 'PMC456', 'open_access': True, 'title': 'Study', 'year': '2022'}]})
     def request(self, source, method, url, **kwargs):
@@ -220,14 +267,13 @@ def test_web_fulltext_request_retrieves_open_article_and_uses_configured_model(m
             data = json.loads(messages[-1]['content'])
             assert data['question'] == query
             value = ({'assessments': [{'index': 0, 'category': 'direct'}]} if 'claims' in data else
-                     {'claims': [{'offset': 200, 'text': '估算抑制常数为41 nM。',
-                                  'quote': 'L858R/T790M mutant showed an estimated inhibition constant of 41 nM'}]})
+                     {'claims': [{'offset': offset, 'text': '论文报告了估算的抑制常数。', 'quote': quote}]})
             return DecisionResponse(FinishDecision(version='1', action='finish', response_kind='chat',
                 text=json.dumps(value, ensure_ascii=False), evidence_ids=[]), None, 'fulltext', {})
     history = []
     handler = make_web_handler([], SQLiteAgentStateStore(tmp_path / 'fulltext.sqlite'), model=Model())
     result, _ = run_web_turn(handler, query, history=history, session='s')
-    assert result['status'] == 'partial' and '41 nM' in result['content']
+    assert result['status'] == 'partial' and quote in result['content']
     assert 'https://pmc.ncbi.nlm.nih.gov/articles/PMC456/' in result['content']
     assert history[-1]['literature_fulltext']['pmcid'] == 'PMC456'
 

@@ -13,6 +13,11 @@ from src.target_search.remote_clients import RemoteSourceError
 
 logger = logging.getLogger(__name__)
 
+_REQUEST_WORDS = frozenset(
+    'a an and are article as by compare comparison describe discuss effects effect experimental experiments '
+    'findings for from full in its key main methods of on or paper report reported results study summarize '
+    'summary text the their to vs what were with'.split())
+
 
 def select_passages(payload, pmcid, question):
     if (not isinstance(pmcid, str) or not re.fullmatch(r'PMC[1-9][0-9]{0,11}', pmcid)
@@ -26,8 +31,6 @@ def select_passages(payload, pmcid, question):
     if not identifiers:
         identifiers = [item for item in re.findall(r'(?<![A-Za-z0-9])[A-Z]{2,8}(?![A-Za-z0-9])', question)
                        if item != 'PMID']
-    if not identifiers:
-        return []
     passages, headings = [], {}
     for passage in documents[0]['passages']:
         if not isinstance(passage, dict) or not isinstance(passage.get('infons'), dict):
@@ -41,6 +44,29 @@ def select_passages(payload, pmcid, question):
         elif (kind == 'paragraph' and type(offset) is int and offset >= 0 and 1 <= len(text) <= 2500
               and not contains_secret_material(text)):
             passages.append({'offset': offset, 'section': section, 'heading': headings.get(section, ''), 'text': text})
+    if not identifiers:
+        # The article identifier identifies the document, never a scientific topic.
+        topic = re.sub(r'PMID\s*[:：]?\s*\d+', '', question, flags=re.I)
+        names = set(re.findall(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*', topic.lower())) - _REQUEST_WORDS
+        sections = (('METHODS', 'RESULTS', 'DISCUSS') if re.search(r'方法|\bmethods?\b', topic, re.I)
+                    else ('RESULTS', 'DISCUSS', 'METHODS'))
+        if names:
+            terms = re.compile(r'(?<![A-Za-z0-9])(?:' + '|'.join(map(re.escape, sorted(names)))
+                               + r')(?![A-Za-z0-9])', re.I)
+            matches = []
+            for index, passage in enumerate(passages):
+                hits = set(terms.findall((passage['heading'] + ' ' + passage['text']).lower()))
+                if hits:
+                    matches.append((-len(hits), sections.index(passage['section']), index))
+            chosen = [index for _, _, index in sorted(matches)[:4]]
+            return [passages[index] for index in sorted(chosen)]
+        # Represent the paper's methods, results and interpretation before filling
+        # remaining slots with results. Restore document order for quotation.
+        groups = [[i for i, p in enumerate(passages) if p['section'] == section][:4] for section in sections]
+        first = [indices[0] for indices in groups if indices]
+        remaining = [index for indices in groups for index in indices[1:]]
+        chosen = (first + remaining)[:4]
+        return [passages[index] for index in sorted(chosen)]
     patterns = [re.compile(r'(?<![A-Za-z0-9])' + re.escape(identifier) + r'(?![A-Za-z0-9])', re.I)
                 for identifier in set(identifiers)]
     scores = [(index, sum(bool(pattern.search(passage['text'])) for pattern in patterns)
