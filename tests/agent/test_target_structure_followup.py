@@ -240,6 +240,27 @@ def test_single_docking_candidate_can_be_referenced_on_next_turn(monkeypatch):
     assert '唯一' in structure_followup(follow, [{'target_structure_evidence': multiple['evidence']}], 's')['content']
 
 
+@pytest.mark.parametrize('query,known', [
+    ('1MOX 有 EGFR 的激酶域吗？能用它对接 ATP 竞争性抑制剂吗？', '1MOX'),
+    ('1MOX 中有哪些配体？它们是什么，能确认是抑制剂吗？', 'AQ4'),
+    ('AQ4 是什么？它是 EGFR 抑制剂吗？', 'AQ4'),
+])
+def test_structure_verification_respects_disabled_tools(query, known, monkeypatch):
+    from src.target_search.remote_clients import BoundedJsonClient
+    from src.web.web_business import WebTurnProjection
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('disabled tools opened a remote client')
+
+    monkeypatch.setattr(BoundedJsonClient, '__init__', forbidden)
+    evidence = {'session_id': 's', 'structures': [{'structure_id': '1MOX',
+        'target': 'EGFR', 'uniprot_id': 'P00533', 'ligand_ids': ['AQ4']}]}
+    projection = WebTurnProjection(query, 's', [{'target_structure_evidence': evidence}])
+    answer = projection.followup(enable_tools=False)
+    assert answer['status'] == 'partial' and known in answer['content']
+    assert '工具未启用' in answer['content']
+
+
 def test_rcsb_title_lookup_keeps_only_matching_safe_records():
     from src.target_search.remote_clients import RcsbClient
     class Http:
