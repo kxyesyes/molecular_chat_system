@@ -46,7 +46,9 @@ _ACTIVITY_CLASS_RESTATEMENT = re.compile(
     r'(?:有活性|无活性)')
 _ACTIVITY_VALUE_RESTATEMENT = re.compile(
     r'(?:但|而)?(?:回归)?\s*pIC50\s*(?:只有|为|是|=)\s*[+-]?\d+(?:\.\d+)?', re.I)
-_LOG_COMPARISON = re.compile(r'(?:请\s*)?(?:解释(?:一下)?\s*)?(logP|logD)\s*(?:和|与)\s*(logP|logD)\s*有什么区别', re.I)
+_LOG_COMPARISON = re.compile(
+    r'(?:请\s*)?(?:(?:解释|说明)(?:一下)?\s*)?(logP|logD)\s*(?:和|与)\s*(logP|logD)'
+    r'\s*(?:有什么|的)(?:区别|差异)', re.I)
 _LOG_ANAPHOR = re.compile(r'它与\s*(logP|logD)\s*有什么区别', re.I)
 _LOG_ABSORPTION = re.compile(r'为什么不能只凭\s*logP\s*判断口服吸收', re.I)
 _LOGD_PREMISE = re.compile(
