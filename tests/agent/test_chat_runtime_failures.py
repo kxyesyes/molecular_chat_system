@@ -49,6 +49,16 @@ def assert_single_dispatch(state):
     assert json.loads(request.content)['stream'] is False
 
 
+@pytest.mark.parametrize('result_format', [None, 'summary_details_v1'])
+def test_agent_reports_model_authentication_failure(local_web, result_format):
+    handler, state = local_web(lambda request: httpx.Response(401, text='private-provider-body'))
+    terminal, frames = run_web_turn(handler, 'Explain logP', enable_tools=False, result_format=result_format)
+    assert terminal['status'] == 'failed'
+    assert 'HTTP 401' in terminal['content'] and '凭据' in terminal['content']
+    assert 'private-provider-body' not in json.dumps(frames)
+    assert_single_dispatch(state)
+
+
 def assert_failure(terminal, frames, code):
     public, = [frame for frame in frames if frame['type'] == 'agent_result']
     assert terminal['status'] == 'failed'

@@ -41,6 +41,7 @@ _DECISION_FAILURE_MESSAGES = {
     "model_decision_unavailable": (
         "模型未能完成 Agent 决策；请先在模型设置中运行连接测试，并确认模型支持工具调用或结构化输出。"
     ),
+    "model_authentication_failed": "模型服务返回 HTTP 401。请在模型设置中核对凭据并运行连接测试。",
     "invalid_decision_schema": (
         "模型返回的决策格式不符合 MedChat 协议；请更换支持工具调用或结构化输出的模型。"
     ),

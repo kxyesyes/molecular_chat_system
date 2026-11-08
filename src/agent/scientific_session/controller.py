@@ -127,6 +127,7 @@ def _decision_failure_message(reason: str) -> str:
         'model_decision_unavailable': (
             '模型未能完成 Agent 决策；请先在模型设置中运行连接测试，并确认模型支持工具调用或结构化输出。'
         ),
+        'model_authentication_failed': '模型服务返回 HTTP 401。请在模型设置中核对凭据并运行连接测试。',
         'invalid_decision_schema': (
             '模型返回的决策格式不符合 MedChat 协议；请更换支持工具调用或结构化输出的模型。'
         ),
@@ -882,9 +883,15 @@ class ScientificSession:
             if binding:
                 await boundary()
             if not response.success:
-                if (self.runtime.binding_profile == 'medchat-web-v1'
-                        and response.error.code == AgentErrorCode.INVALID_INPUT
-                        and response.error.details.get('reason') == 'decision_input_budget_exceeded'):
+                error = response.error
+                details = (error.details or {}) if error else {}
+                if (error and error.code == AgentErrorCode.PROVIDER_ERROR
+                        and details.get('reason') == 'decision_http_error'
+                        and details.get('http_status') == 401):
+                    raise DecisionBoundaryError('model_authentication_failed')
+                if (self.runtime.binding_profile == 'medchat-web-v1' and error
+                        and error.code == AgentErrorCode.INVALID_INPUT
+                        and details.get('reason') == 'decision_input_budget_exceeded'):
                     raise DecisionBoundaryError('decision_input_budget_exceeded')
                 feedback = schema_correction(response)
                 if feedback is None or state.protocol_repairs:
