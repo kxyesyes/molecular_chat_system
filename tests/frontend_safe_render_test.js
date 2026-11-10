@@ -393,22 +393,20 @@ assert(
   homeChatRendererSource.includes("connectionStatus.textContent"),
   "Connection status must render through textContent",
 );
-[
-  "formatSynthesisRoute",
-  "formatReactionPrediction",
-  "formatADMETResults",
-  "formatReActResults",
-].forEach((functionName) => {
-  const body = extractFunction(homeMain, functionName);
-  assert(
-    body.includes("escapeHtml(content)") || body.includes("safeContent"),
-    `${functionName} must escape raw content before legacy HTML formatting`,
-  );
-  assert(
-    !body.includes("return content.replace"),
-    `${functionName} fallback must not return raw content.replace(...) HTML`,
-  );
-});
+vm.runInContext(homeFormatters, sandbox);
+const formatterInputs = {
+  formatSynthesisRoute: "**路线 1** 步骤 1: `CCO` → `PAYLOAD`",
+  formatReactionPrediction: "反应物: `PAYLOAD`",
+  formatLiteratureResults: "文献 PAYLOAD",
+  formatADMETResults: "ADMET PAYLOAD",
+  formatDrugLikenessResults: "Lipinski PAYLOAD",
+  formatMolecularProperties: "关键属性 PAYLOAD",
+  formatReActResults: "分析结果 PAYLOAD",
+};
+for (const [name, template] of Object.entries(formatterInputs)) {
+  const html = sandbox.window.HomeFormatters[name](template.replace("PAYLOAD", payload));
+  assert(!html.includes("<img") && html.includes("&lt;img"), name + " must escape user HTML");
+}
 
 const executableUrlAttributes = new Set([
   "formaction",

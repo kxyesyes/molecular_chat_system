@@ -1378,9 +1378,6 @@
       }
     }
 
-    // 处理模型切换
-    function bindToolbarControls() {}
-
   function renderTransportStatus() {
     const socketIsOpen = Boolean(ws) && typeof WebSocket !== "undefined" && ws.readyState === WebSocket.OPEN;
     HomeChatRenderer.updateConnectionStatus(socketIsOpen ? "connected" : "disconnected");
@@ -1495,7 +1492,6 @@
     document.body.classList.remove("chat-active");
 
     closeToolPanels();
-    updateToolbarControlStates();
   }
 
   function clearCurrentConversation() {
@@ -1518,12 +1514,7 @@
       elements.chatContainer.innerHTML = "";
     }
 
-    updateToolbarControlStates();
   }
-
-  function updateToolbarControlStates() {}
-
-  function bindToolPanels() {}
 
   function openFileManagerPanel() {
     if (elements.helpPanel) {
@@ -2095,7 +2086,6 @@
     // 保存到历史
     currentMessages.push({ role: "user", content: content });
     HomeState.currentMessages = currentMessages.slice();
-    updateToolbarControlStates();
     if (typeof dockingUI !== "undefined") dockingUI?.begin(ws, messageWrapper);
   }
 
@@ -2180,7 +2170,6 @@
     // 保存到历史
     currentMessages.push({ role: "assistant", content: content });
     HomeState.currentMessages = currentMessages.slice();
-    updateToolbarControlStates();
     return messageBox;
   }
 
@@ -2381,7 +2370,6 @@
       lastMessage.setAttribute("data-content", finalContent);
       currentMessages.push({ role: "assistant", content: finalContent });
       HomeState.currentMessages = currentMessages.slice();
-      updateToolbarControlStates();
 
       displayCandidateCollections(lastMessage, candidatePayloads);
     } finally {
@@ -3631,416 +3619,6 @@
             }
         `;
     document.head.appendChild(style);
-  }
-
-  // 格式化合成路线数据
-  function formatSynthesisRoute(content) {
-    // 提取路线信息 - 修复正则表达式
-    const routeMatches = content.match(
-      /\*\*路线 \d+\*\*[\s\S]*?(?=\*\*路线 \d+\*\*|✅|$)/g
-    );
-
-    if (routeMatches && routeMatches.length > 0) {
-      let visualContent = `
-        <div style="background: linear-gradient(135deg, #667eea20 0%, #764ba220 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
-          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
-            <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">🔬</div>
-            <div>
-              <h3 style="margin: 0; color: #2d3748; font-size: 20px;">逆合成分析结果</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">反应路线分析</p>
-            </div>
-          </div>
-      `;
-
-      routeMatches.forEach((route, index) => {
-        // 提取置信度 - 修复正则表达式以匹配百分比格式
-        const confidenceMatch = route.match(/总体置信度:\s*(\d+\.?\d*%)/);
-        const confidence = confidenceMatch ? confidenceMatch[1] : "未知%";
-
-        // 提取步骤
-        const stepMatches = route.match(
-          /步骤 \d+:\s*`([^`]+)`\s*→\s*`([^`]+)`/g
-        );
-
-        visualContent += `
-          <div style="background: white; border-radius: 12px; padding: 20px; margin: 16px 0; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
-              <h4 style="margin: 0; color: #2d3748; font-size: 18px;">🛤️ 路线 ${
-                index + 1
-              }</h4>
-              <div style="background: linear-gradient(135deg, #48bb78 0%, #38a169 100%); color: white; padding: 6px 12px; border-radius: 20px; font-size: 14px; font-weight: bold;">
-                置信度: ${confidence}
-              </div>
-            </div>
-        `;
-
-        if (stepMatches) {
-          stepMatches.forEach((step, stepIndex) => {
-            const stepMatch = step.match(
-              /步骤 \d+:\s*`([^`]+)`\s*→\s*`([^`]+)`/
-            );
-            if (stepMatch) {
-              const reactants = stepMatch[1];
-              const products = stepMatch[2];
-
-              visualContent += `
-                <div style="display: flex; align-items: center; margin: 12px 0; padding: 12px; background: #f8fafc; border-radius: 8px;">
-                  <div style="background: #e2e8f0; padding: 8px 12px; border-radius: 6px; font-family: monospace; font-size: 12px; color: #4a5568; margin-right: 12px; flex: 1;">
-                    ${escapeHtml(reactants)}
-                  </div>
-                  <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 6px 12px; border-radius: 20px; font-size: 20px; margin: 0 12px;">→</div>
-                  <div style="background: #e6fffa; padding: 8px 12px; border-radius: 6px; font-family: monospace; font-size: 12px; color: #234e52; flex: 1;">
-                    ${escapeHtml(products)}
-                  </div>
-                </div>
-              `;
-            }
-          });
-        } else {
-          // 如果没有匹配到步骤，显示提示信息
-          visualContent += `
-            <div style="padding: 12px; background: #fdf2e9; border-radius: 8px; color: #744210; text-align: center;">
-              暂无详细步骤信息
-            </div>
-          `;
-        }
-
-        visualContent += `</div>`;
-      });
-
-      visualContent += `
-          <div style="margin-top: 20px; padding: 16px; background: rgba(102, 126, 234, 0.1); border-radius: 8px; border-left: 4px solid #667eea;">
-            <p style="margin: 0; font-size: 14px; color: #4a5568;">
-              💡 <strong>说明：</strong>合成路线按总体置信度排序，考虑了反应的可行性和文献报道的先例。
-            </p>
-          </div>
-        </div>
-      `;
-
-      return visualContent;
-    }
-
-    // 如果没有匹配到路线格式，返回基础格式化
-    return escapeHtml(content).replace(/\n/g, "<br>");
-  }
-
-  // 格式化反应预测结果
-  function formatReactionPrediction(content) {
-    const safeContent = escapeHtml(content);
-    if (content.includes("预测的可能产物")) {
-      let visualContent = `
-        <div style="background: linear-gradient(135deg, #fbb6ce20 0%, #f687b320 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
-          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
-            <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #ec4899 0%, #be185d 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">🧪</div>
-            <div>
-              <h3 style="margin: 0; color: #2d3748; font-size: 20px;">反应预测结果</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">反应预测</p>
-            </div>
-          </div>
-      `;
-
-      // 提取反应物
-      const reactantMatch = content.match(/反应物:\s*`([^`]+)`/);
-      if (reactantMatch) {
-        visualContent += `
-          <div style="background: white; border-radius: 12px; padding: 20px; margin: 16px 0; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-            <h4 style="margin: 0 0 12px 0; color: #2d3748;">⚗️ 反应物</h4>
-            <div style="background: #f0f9ff; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 16px; color: #0c4a6e; border: 2px solid #7dd3fc;">
-              ${escapeHtml(reactantMatch[1])}
-            </div>
-          </div>
-        `;
-      }
-
-      // 提取产物
-      const productMatches = content.match(
-        /\d+\.\s*`([^`]+)`\s*\(置信度:\s*(\d+\.?\d*)%\)/g
-      );
-      if (productMatches) {
-        visualContent += `
-          <div style="background: white; border-radius: 12px; padding: 20px; margin: 16px 0; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-            <h4 style="margin: 0 0 16px 0; color: #2d3748;">📊 预测产物</h4>
-        `;
-
-        productMatches.forEach((product, index) => {
-          const productMatch = product.match(
-            /\d+\.\s*`([^`]+)`\s*\(置信度:\s*(\d+\.?\d*)%\)/
-          );
-            if (productMatch) {
-              const productSMILES = productMatch[1];
-              const confidence = productMatch[2];
-            const confidenceNum = parseFloat(confidence);
-
-            let confidenceColor = "#ef4444";
-            if (confidenceNum >= 80) confidenceColor = "#22c55e";
-            else if (confidenceNum >= 60) confidenceColor = "#f59e0b";
-
-            visualContent += `
-              <div style="display: flex; align-items: center; margin: 12px 0; padding: 16px; background: #f8fafc; border-radius: 8px; border-left: 4px solid ${confidenceColor};">
-                <div style="margin-right: 16px; font-size: 18px; font-weight: bold; color: #4a5568; min-width: 40px;">
-                  ${index + 1}.
-                </div>
-                <div style="flex: 1; margin-right: 16px;">
-                  <div style="background: #e0f2fe; padding: 10px; border-radius: 6px; font-family: monospace; font-size: 14px; color: #0c4a6e;">
-                    ${escapeHtml(productSMILES)}
-                  </div>
-                </div>
-                <div style="background: ${confidenceColor}; color: white; padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: bold; min-width: 80px; text-align: center;">
-                  ${escapeHtml(confidence)}%
-                </div>
-              </div>
-            `;
-          }
-        });
-
-        visualContent += `</div>`;
-      }
-
-      visualContent += `
-          <div style="margin-top: 20px; padding: 16px; background: rgba(236, 72, 153, 0.1); border-radius: 8px; border-left: 4px solid #ec4899;">
-            <p style="margin: 0; font-size: 14px; color: #4a5568;">
-              💡 <strong>说明：</strong>预测结果按置信度排序，置信度越高表示反应越可能发生。
-            </p>
-          </div>
-        </div>
-      `;
-
-      return visualContent;
-    }
-
-    return safeContent.replace(/\n/g, "<br>");
-  }
-
-  // 格式化文献搜索结果
-  function formatLiteratureResults(content) {
-    const safeContent = escapeHtml(content);
-    if (content.includes("相关文献") || content.includes("相关专利")) {
-      let visualContent = `
-        <div style="background: linear-gradient(135deg, #a7f3d020 0%, #6ee7b720 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
-          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
-            <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">📚</div>
-            <div>
-              <h3 style="margin: 0; color: #2d3748; font-size: 20px;">文献数据搜索结果</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">文献检索结果</p>
-            </div>
-          </div>
-      `;
-
-      // 简单地格式化内容，保持原有的结构但增加样式
-      const formattedContent = safeContent
-        .replace(
-          /\*\*(.*?)\*\*/g,
-          '<strong style="color: #2d3748;">$1</strong>'
-        )
-        .replace(/📄/g, '<span style="font-size: 20px;">📄</span>')
-        .replace(/📋/g, '<span style="font-size: 20px;">📋</span>')
-        .replace(/🔍/g, '<span style="font-size: 20px;">🔍</span>')
-        .replace(/📊/g, '<span style="font-size: 20px;">📊</span>')
-        .replace(/💡/g, '<span style="font-size: 20px;">💡</span>')
-        .replace(/\n/g, "<br>");
-
-      visualContent += `
-        <div style="background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-          ${formattedContent}
-        </div>
-      `;
-
-      visualContent += `</div>`;
-      return visualContent;
-    }
-
-    return safeContent.replace(/\n/g, "<br>");
-  }
-
-  // 格式化ADMET预测结果
-  function formatADMETResults(content) {
-    const safeContent = escapeHtml(content);
-    if (
-      content.includes("增强ADMET属性预测结果") ||
-      content.includes("**理化性质:**")
-    ) {
-      let visualContent = `
-        <div style="background: linear-gradient(135deg, #ffecd120 0%, #fed7aa20 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
-          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
-            <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">💊</div>
-            <div>
-              <h3 style="margin: 0; color: #2d3748; font-size: 20px;">ADMET属性分析</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">药代动力学与毒理学预测</p>
-            </div>
-          </div>
-      `;
-
-      // 格式化内容并添加样式
-      let formattedContent = safeContent
-        .replace(/💊 增强ADMET属性预测结果/g, "")
-        .replace(
-          /\*\*(.*?)\*\*/g,
-          '<div style="background: #f7fafc; margin: 16px 0; padding: 12px; border-radius: 8px; border-left: 4px solid #4299e1;"><strong style="color: #1a365d; font-size: 16px;">$1</strong></div>'
-        )
-        .replace(
-          /• (.*?): (.*?)$/gm,
-          '<div style="margin: 8px 0; padding: 10px; background: white; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);"><span style="color: #4a5568; font-weight: 500;">$1:</span> <span style="color: #2d3748;">$2</span></div>'
-        )
-        .replace(
-          /🔽|🔄|⚙️|🚪|⚠️|📈/g,
-          '<span style="font-size: 18px;">$&</span>'
-        )
-        .replace(
-          /SMILES: `([^`]+)`/g,
-          '<div style="background: #edf2f7; padding: 10px; border-radius: 6px; margin: 12px 0; font-family: monospace; color: #e53e3e; font-weight: 500;">SMILES: $1</div>'
-        );
-
-      visualContent += `
-        <div style="background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-          ${formattedContent}
-        </div>
-      `;
-
-      visualContent += `</div>`;
-      return visualContent;
-    }
-    return safeContent.replace(/\n/g, "<br>");
-  }
-
-  // 格式化类药评估结果
-  function formatDrugLikenessResults(content) {
-    const safeContent = escapeHtml(content);
-    if (
-      content.includes("类药性评估结果") ||
-      content.includes("**综合评估:**")
-    ) {
-      let visualContent = `
-        <div style="background: linear-gradient(135deg, #e0e7ff20 0%, #c7d2fe20 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
-          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
-            <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">🎯</div>
-            <div>
-              <h3 style="margin: 0; color: #2d3748; font-size: 20px;">类药性评估</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">药物相似性与成药性分析</p>
-            </div>
-          </div>
-      `;
-
-      let formattedContent = safeContent
-        .replace(/💊 类药性评估结果/g, "")
-        .replace(
-          /\*\*(.*?)\*\*/g,
-          '<div style="background: #f8fafc; margin: 16px 0; padding: 12px; border-radius: 8px; border-left: 4px solid #8b5cf6;"><strong style="color: #1a202c; font-size: 16px;">$1</strong></div>'
-        )
-        .replace(
-          /• (.*?): (.*?)$/gm,
-          '<div style="margin: 8px 0; padding: 10px; background: white; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);"><span style="color: #4a5568; font-weight: 500;">$1:</span> <span style="color: #2d3748;">$2</span></div>'
-        )
-        .replace(
-          /✓/g,
-          '<span style="color: #10b981; font-size: 16px;">✓</span>'
-        )
-        .replace(
-          /✗/g,
-          '<span style="color: #ef4444; font-size: 16px;">✗</span>'
-        )
-        .replace(/🎯|📏|🔬|📊/g, '<span style="font-size: 18px;">$&</span>')
-        .replace(
-          /SMILES: `([^`]+)`/g,
-          '<div style="background: #edf2f7; padding: 10px; border-radius: 6px; margin: 12px 0; font-family: monospace; color: #e53e3e; font-weight: 500;">SMILES: $1</div>'
-        );
-
-      visualContent += `
-        <div style="background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-          ${formattedContent}
-        </div>
-      `;
-
-      visualContent += `</div>`;
-      return visualContent;
-    }
-    return safeContent.replace(/\n/g, "<br>");
-  }
-
-  // 格式化基础分子属性结果
-  function formatMolecularProperties(content) {
-    const safeContent = escapeHtml(content);
-    if (content.includes("基础分子属性计算结果")) {
-      let visualContent = `
-        <div style="background: linear-gradient(135deg, #ecfdf520 0%, #d1fae520 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
-          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
-            <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">🧬</div>
-            <div>
-              <h3 style="margin: 0; color: #2d3748; font-size: 20px;">分子属性计算</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">基础理化性质分析</p>
-            </div>
-          </div>
-      `;
-
-      let formattedContent = safeContent
-        .replace(/🧬 基础分子属性计算结果/g, "")
-        .replace(
-          /📊 关键属性:/g,
-          '<div style="background: #f0fdfa; margin: 16px 0; padding: 12px; border-radius: 8px; border-left: 4px solid #10b981;"><strong style="color: #134e4a; font-size: 16px;">📊 关键属性</strong></div>'
-        )
-        .replace(
-          /• (.*?): (.*?)$/gm,
-          '<div style="margin: 6px 0; padding: 8px 12px; background: white; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);"><span style="color: #374151; font-weight: 500;">$1:</span> <span style="color: #1f2937;">$2</span></div>'
-        )
-        .replace(
-          /SMILES: `([^`]+)`/g,
-          '<div style="background: #edf2f7; padding: 10px; border-radius: 6px; margin: 12px 0; font-family: monospace; color: #e53e3e; font-weight: 500;">SMILES: $1</div>'
-        );
-
-      visualContent += `
-        <div style="background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-          ${formattedContent}
-        </div>
-      `;
-
-      visualContent += `</div>`;
-      return visualContent;
-    }
-    return safeContent.replace(/\n/g, "<br>");
-  }
-
-  // 格式化ReAct推理结果
-  function formatReActResults(content) {
-    const safeContent = escapeHtml(content);
-    if (
-      content.includes("**推理过程:**") ||
-      content.includes("**使用工具:**")
-    ) {
-      let visualContent = `
-        <div style="background: linear-gradient(135deg, #fef3c720 0%, #fde68a20 100%); border-radius: 16px; padding: 24px; margin: 16px 0;">
-          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px;">
-            <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">🤔</div>
-            <div>
-              <h3 style="margin: 0; color: #2d3748; font-size: 20px;">智能推理分析</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">ReAct推理框架结果</p>
-            </div>
-          </div>
-      `;
-
-      let formattedContent = safeContent
-        .replace(
-          /\*\*(推理过程|使用工具|分析结果):\*\*/g,
-          '<div style="background: #fffbeb; margin: 16px 0; padding: 12px; border-radius: 8px; border-left: 4px solid #f59e0b;"><strong style="color: #92400e; font-size: 16px;">🔧 $1</strong></div>'
-        )
-        .replace(
-          /   \d+\. (.+)/g,
-          '<div style="margin: 8px 0 8px 20px; padding: 10px; background: white; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border-left: 3px solid #fbbf24;"><span style="color: #1f2937;">$1</span></div>'
-        )
-        .replace(
-          /      → 使用了 (.+?) 工具/g,
-          '<div style="margin: 4px 0 4px 40px; padding: 6px 10px; background: #f3f4f6; border-radius: 4px; font-size: 13px; color: #6b7280;">🔧 使用了 <strong style="color: #374151;">$1</strong> 工具</div>'
-        )
-        .replace(/🤔|🔧|📋/g, '<span style="font-size: 18px;">$&</span>');
-
-      visualContent += `
-        <div style="background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-          ${formattedContent}
-        </div>
-      `;
-
-      visualContent += `</div>`;
-      return visualContent;
-    }
-    return safeContent.replace(/\n/g, "<br>");
   }
 
   // 渲染后端已验证并规范化的候选分子。

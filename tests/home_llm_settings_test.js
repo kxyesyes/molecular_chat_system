@@ -19,7 +19,7 @@ const defaults = {
 function extractFunction(name) {
   const start = new RegExp(`^([ \\t]*)(?:async\\s+)?function ${name}\\(`, "m").exec(source);
   assert.ok(start, `Missing production function ${name}`);
-  const next = new RegExp(`^${start[1]}(?:async\\s+)?function \\w+\\(`, "gm");
+  const next = new RegExp(`^[ \\t]{0,${start[1].length}}(?:async\\s+)?function \\w+\\(`, "gm");
   next.lastIndex = start.index + start[0].length;
   const end = next.exec(source);
   assert.ok(end, `Missing next declaration after ${name}`);
