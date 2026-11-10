@@ -149,7 +149,9 @@ def test_agent_and_execution_agree_on_sandbox_pose_identity(tmp_path, monkeypatc
             try:
                 alias.symlink_to(pose)
             except OSError as exc:
-                pytest.skip(f"File symlinks unavailable: {exc}")
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("Windows file symlink privilege unavailable")
+                raise
             pose = alias
         values["pose"] = pose
         values["artifacts"][0].path = str(pose)
