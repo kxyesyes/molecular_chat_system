@@ -92,7 +92,7 @@ def actual_app(tmp_path, monkeypatch):
     monkeypatch.setenv('AGENT_STATE_DB', str(tmp_path / 'agent.sqlite'))
     monkeypatch.setattr('src.agent.tools.get_all_tools',
                         lambda model, **kwargs: get_core_tools(model))
-    rag = Mock()
+    rag = Mock(is_initialized=False)
     rag.retrieve.side_effect = AssertionError('RAG retrieval is forbidden')
     monkeypatch.setattr('src.rag.service.RAGSystem', Mock(return_value=rag))
     generator = Mock(model_name='gmm-llama:latest')
@@ -173,6 +173,19 @@ def actual_app(tmp_path, monkeypatch):
                 finally:
                     sys.setprofile(previous_profile)
     return build
+
+
+def test_idle_web_fixture_reports_rag_readiness_as_a_boolean(actual_app):
+    async def run():
+        async with actual_app() as browser:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=browser.app.app), base_url='http://test',
+            ) as client:
+                response = await client.get('/health')
+                assert response.status_code == 200
+                assert response.json()['rag_enabled'] is False
+
+    asyncio.run(run())
 
 
 async def cookie_for(application):

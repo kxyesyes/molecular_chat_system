@@ -24,6 +24,7 @@ _MAX_DEPTH = 32
 _MAX_NODES = 65536
 _TTL = 86400
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+_ASCII_ESCAPE = re.compile(r'[\x00-\x1f"\\]')
 _FIELDS = frozenset({
     "schema_version", "presentation_id", "revision", "source_trace_id",
     "source_version", "source_status", "created_at", "expires_at",
@@ -57,17 +58,22 @@ def _check_json_bounds(value: Any) -> None:
         if kind is str:
             if len(item) > _MAX_BYTES - size:
                 raise ValueError("reference JSON exceeds byte limit")
-            charge(2)
-            for character in item:
-                code = ord(character)
-                if 0xD800 <= code <= 0xDFFF:
-                    raise ValueError("reference JSON requires valid Unicode")
-                if character in '"\\\b\f\n\r\t':
-                    charge(2)
-                elif code < 32:
-                    charge(6)
-                else:
-                    charge(1 if code < 128 else 2 if code < 2048 else 3 if code < 65536 else 4)
+            # Unescaped ASCII has exactly one UTF-8 byte per character. Keep
+            # preflight allocation-free and retain the original fallback.
+            if item.isascii() and _ASCII_ESCAPE.search(item) is None:
+                charge(len(item) + 2)
+            else:
+                charge(2)
+                for character in item:
+                    code = ord(character)
+                    if 0xD800 <= code <= 0xDFFF:
+                        raise ValueError("reference JSON requires valid Unicode")
+                    if character in '"\\\b\f\n\r\t':
+                        charge(2)
+                    elif code < 32:
+                        charge(6)
+                    else:
+                        charge(1 if code < 128 else 2 if code < 2048 else 3 if code < 65536 else 4)
         elif item is None:
             charge(4)
         elif kind is bool:
