@@ -16,11 +16,12 @@ from typing import Dict, Any, List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Response, Body, Query
 from starlette.concurrency import run_in_threadpool
 
-from src.agent.persistence.redaction import redact_sensitive
 from src.web.api_response import api_success
-from src.web.process_isolation import IsolatedProcess, start_isolated_process
+from src.web.process_isolation import (
+    IsolatedProcess, start_isolated_process, stop_isolated_process as _stop_pharm3d_process,
+)
 
-from .docking_routes import setup_docking_routes
+from .docking_routes import _normalize_warning_strings, setup_docking_routes
 from .molecule_utility_routes import register_molecule_utility_routes
 from .docking_report_routes import register_docking_report_routes
 from .reverse_target_routes import setup_reverse_target_routes
@@ -133,22 +134,6 @@ _ROUTE_DOCKING_LIMITS = _DynamicSupportCallable("_validate_docking_limits")
 _ROUTE_DOCKING_WARNINGS = _DynamicSupportCallable("_normalize_warning_strings")
 _ROUTE_DOCKING_INT_ENV = _DynamicSupportCallable("_get_int_env")
 _ROUTE_API_SUCCESS = _DynamicSupportCallable("api_success")
-
-
-def _normalize_warning_strings(values: Any) -> List[str]:
-    if not isinstance(values, list):
-        return []
-    warnings = []
-    for value in values:
-        if not isinstance(value, str):
-            continue
-        warning = value.strip()
-        if not warning:
-            continue
-        warning = redact_sensitive(warning)
-        if isinstance(warning, str) and warning not in warnings:
-            warnings.append(warning)
-    return warnings
 
 
 def _parse_positive_int_env(name: str, default: int) -> int:
@@ -424,25 +409,6 @@ def _pharm3d_candidates_job(
         limit=limit,
         organism_filter=organism_filter,
     )
-
-
-async def _stop_pharm3d_process(process, waiter):
-    await asyncio.to_thread(process.terminate)
-    if waiter is not None:
-        try:
-            await asyncio.wait_for(asyncio.shield(waiter), timeout=1.0)
-        except asyncio.TimeoutError:
-            # ``to_thread`` cannot stop the native wait itself, but cancelling
-            # its asyncio wrapper prevents a late child error becoming an
-            # unobserved task exception after the request has returned.
-            waiter.cancel()
-            try:
-                await waiter
-            except BaseException:
-                pass
-        except BaseException:
-            pass
-    await asyncio.to_thread(process.close)
 
 
 async def _run_pharm3d_job(target, *args, timeout_seconds: Optional[float] = None):
