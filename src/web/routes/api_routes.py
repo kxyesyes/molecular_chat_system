@@ -16,12 +16,13 @@ from typing import Dict, Any, List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Response, Body, Query
 from starlette.concurrency import run_in_threadpool
 
+from src.system.redaction import normalize_warning_strings as _normalize_warning_strings
 from src.web.api_response import api_success
 from src.web.process_isolation import (
     IsolatedProcess, start_isolated_process, stop_isolated_process as _stop_pharm3d_process,
 )
 
-from .docking_routes import _normalize_warning_strings, setup_docking_routes
+from .docking_routes import setup_docking_routes
 from .molecule_utility_routes import register_molecule_utility_routes
 from .docking_report_routes import register_docking_report_routes
 from .reverse_target_routes import setup_reverse_target_routes
