@@ -398,6 +398,8 @@ def test_lipinski_absorption_limitations_question_is_explanatory():
     'LogP 是什么？它与 LogD 有什么区别？',
     'LogD 是什么？它与 LogP 有什么区别？',
     'LogP 和 LogD 有什么区别？',
+    '解释 logP 和 logD 的区别。',
+    '请说明 LogD 与 LogP 的差异。',
     '解释 logP 和 logD 有什么区别，为什么它们对药物设计重要？',
     '在先导化合物优化中，LogP 和 LogD 有什么区别？为什么不能只凭 LogP 判断口服吸收？',
 ])
@@ -410,6 +412,7 @@ def test_concept_comparison_does_not_enter_property_compiler(query):
 
 
 def test_concept_comparison_cannot_hide_calculation():
+    assert not _concept_explanation('解释 logP 和 logD 的区别，再计算 CCO 的 logP。')
     assert not _concept_explanation('简单解释 logP 在药物设计中的作用。计算 CCO 的 LogP。')
     assert not _concept_explanation('解释 logP 和 logD 有什么区别，为什么它们对药物设计重要？计算 CCO 的 LogP。')
     assert not _concept_explanation('LogP 是什么？它与 LogD 有什么区别？计算 CCO 的 LogP。')
@@ -779,15 +782,22 @@ def test_affinity_followup_without_assay_context_requests_data(tmp_path):
     assert '结合亲和力通常用 Kd 或 IC50 表示' not in answer['content']
 
 
-def test_clarified_measured_kd_is_not_sent_to_predictor(tmp_path):
+@pytest.mark.parametrize('question,measurements', [
+    ('这意味着它对 EGFR 的结合亲和力一定是 HER2 的 25 倍吗？', 'EGFR 40 nM、HER2 1 μM'),
+    ('这意味着它对 EGFR 的结合亲和力一定是 HER2 的 25 倍吗？', 'HER2 1 μM、EGFR 40 nM'),
+    ('这是否意味着 EGFR 的结合亲和力是 HER2 的 25 倍？', 'HER2 1 μM、EGFR 40 nM'),
+])
+def test_clarified_measured_kd_is_not_sent_to_predictor(tmp_path, question, measurements):
     handler, activity, admet = handler_for(tmp_path, [])
     history = []
-    turn(handler, '这意味着它对 EGFR 的结合亲和力一定是 HER2 的 25 倍吗？', history, 'kd-clarification')
-    answer, _ = turn(handler, '化合物 B 的 Kd 是 EGFR 40 nM、HER2 1 μM，'
+    turn(handler, question, history, 'kd-clarification')
+    answer, _ = turn(handler, f'化合物 B 的 Kd 是 {measurements}，'
                      '均由同一缓冲体系下平衡结合实验测得。请据此回答刚才的问题。',
                      history, 'kd-clarification')
-    assert '25 倍' in answer['content']
-    assert 'Kd' in answer['content']
+    assert 'HER2 的 Kd ÷ EGFR 的 Kd = 25 倍' in answer['content']
+    assert 'EGFR 的结合亲和力较强' in answer['content']
+    assert answer['status'] == 'completed'
+    assert not handler.model.messages
     assert not activity.calls and not admet.calls
     assert not _concept_explanation('化合物 B 的 Kd 是 EGFR 40 nM、HER2 1 μM，'
         '均由同一缓冲体系下平衡结合实验测得。请据此回答刚才的问题。预测 CCO 的活性。')
@@ -799,18 +809,16 @@ def test_clarified_measured_kd_is_not_sent_to_predictor(tmp_path):
     ('2 μM', '2', 'EGFR 的结合亲和力较强'),
 ])
 def test_measured_kd_affinity_direction(other, ratio, conclusion):
-    from src.agent.contracts import AgentResult, RunOutcome
     from src.web.web_business import WebTurnProjection
 
     query = (f'化合物 B 的 Kd 是 EGFR 1 μM、HER2 {other}，'
              '均由同一缓冲体系下平衡结合实验测得。请据此回答刚才的问题。')
     prior = '这意味着它对 EGFR 的结合亲和力一定是 HER2 的 25 倍吗？'
-    context = AgentContext(query, 't', session_id='s', memory=[{'user': prior}])
-    result = AgentResult('t', True, '已收到测量值。', final_answer='已收到测量值。',
-                         outcome=RunOutcome.COMPLETED, metadata={'binding_profile': 'medchat-web-v1'})
-    view = WebTurnProjection(query, 's', []).capture(result, context=context)
-    assert f'HER2 的 Kd ÷ EGFR 的 Kd = {ratio} 倍' in view['final_answer']
-    assert conclusion in view['final_answer']
+    previous = WebTurnProjection(prior, 's', [])
+    previous.followup(enable_tools=False)
+    view = WebTurnProjection(query, 's', [previous.entry]).followup(enable_tools=False)
+    assert f'HER2 的 Kd ÷ EGFR 的 Kd = {ratio} 倍' in view['content']
+    assert conclusion in view['content'] and view['status'] == 'completed'
 
 
 def test_measured_kd_requires_matching_prior_question(tmp_path):
@@ -819,6 +827,23 @@ def test_measured_kd_requires_matching_prior_question(tmp_path):
                      '均由同一缓冲体系下平衡结合实验测得。请据此回答刚才的问题。', [], 'kd-fresh')
     assert '无法确认' in answer['content']
     assert '25 倍' not in answer['content']
+
+
+@pytest.mark.parametrize('prior_session,measurements', [
+    ('other-session', 'HER2 1 μM、EGFR 40 nM'),
+    ('current-session', 'HER2 1 μM、BRAF 40 nM'),
+    ('current-session', 'EGFR 1 μM、EGFR 40 nM'),
+])
+def test_kd_clarification_requires_two_matching_targets_in_this_session(prior_session, measurements):
+    from src.web.web_business import WebTurnProjection
+
+    query = f'化合物 B 的 Kd 是 {measurements}，均由同一缓冲体系下平衡结合实验测得。请据此回答刚才的问题。'
+    previous = WebTurnProjection('这是否意味着 EGFR 的结合亲和力是 HER2 的 25 倍？', prior_session, [])
+    previous.followup(enable_tools=False)
+    projection = WebTurnProjection(query, 'current-session', [previous.entry])
+    view = projection.followup(enable_tools=False)
+    assert view['status'] == 'partial' and '无法确认' in view['content']
+    assert '25 倍' not in view['content']
 
 
 @pytest.mark.parametrize('mode', ['foreign-session', 'prose-only', 'intervening'])

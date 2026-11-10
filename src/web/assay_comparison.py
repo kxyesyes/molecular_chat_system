@@ -1,4 +1,4 @@
-"""Compare explicitly supplied paired IC50 values without predicting activity."""
+"""Compare paired assay measurements supplied by the user."""
 
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, localcontext
 from fractions import Fraction
@@ -18,6 +18,32 @@ _REQUEST = re.compile(
     rf'对\s*(?P=target)\s*更有选择性[。.!！]?\s*', re.I)
 _SCALES = {'pm': Decimal('1e-12'), 'nm': Decimal('1e-9'),
            'μm': Decimal('1e-6'), 'um': Decimal('1e-6'), 'mm': Decimal('1e-3')}
+
+
+def compare_supplied_kd(measurements, question, session_id):
+    values = {measurements[key].casefold():
+              Decimal(measurements[key + '_value']) * _SCALES[measurements[key + '_unit'].casefold()]
+              for key in ('target', 'off')}
+    if (not session_id or not question or question['session_id'] != session_id or len(values) != 2
+            or {question['first'].casefold(), question['second'].casefold()} != values.keys()):
+        return {'content': '请将要比较的两个靶点和各自的 Kd 一起提供，目前无法确认上一问题。', 'status': 'partial'}
+
+    first, second = question['first'], question['second']
+    first_kd, second_kd = values[first.casefold()], values[second.casefold()]
+    if min(first_kd, second_kd) <= 0:
+        return {'content': 'Kd 必须为正数，请核对测量值。', 'status': 'partial'}
+    with localcontext() as ctx:
+        ctx.prec = 6
+        ratio = (second_kd / first_kd).normalize()
+    display_ratio = format(ratio, 'f') if -4 <= ratio.adjusted() <= 6 else format(ratio, 'g')
+    if first_kd == second_kd:
+        affinity = '两者的结合亲和力相同'
+    else:
+        direction = '较强' if first_kd < second_kd else '较弱'
+        affinity = f'{first} 的结合亲和力{direction}，为 {second} 的 {display_ratio} 倍'
+    return {'content': (f'按你提供的平衡结合实验数据，{second} 的 Kd ÷ {first} 的 Kd = {display_ratio} 倍。'
+                        f'若这些测量可比，{affinity}。比较时还需核对实验方法、重复测量与不确定度。'),
+            'status': 'completed'}
 
 
 def compare_supplied_ic50(query):

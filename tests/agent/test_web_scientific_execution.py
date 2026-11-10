@@ -47,6 +47,18 @@ def admet_web_handler():
         handler.agent_system.tool_registry.close()
 
 
+def test_property_request_with_result_only_clause_executes_rdkit(web_handler):
+    _, frames = run_web_turn(web_handler, "请计算 CCO 的分子量和 QED，并只输出工具结果。")
+    result = result_of(frames)
+    assert result["status"] == "completed"
+    step, = result["tool_result_sequence"]
+    assert step["tool_name"] == "property_calculator"
+    record, = step["data"]
+    assert record["smiles"] == "CCO"
+    assert record["properties"]["molecular_weight"] == pytest.approx(46.07, abs=0.01)
+    assert record["properties"]["qed"] == pytest.approx(0.407, abs=0.001)
+
+
 def test_ready_property_plan_executes_real_rdkit_tool_and_publishes_evidence(web_handler):
     _, frames = run_web_turn(
         web_handler,

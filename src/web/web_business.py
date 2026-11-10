@@ -19,6 +19,12 @@ from .scientific_obligations import OPTIMIZATION_INTERPRETATION
 
 
 logger = logging.getLogger(__name__)
+_AFFINITY_COMPARISON = re.compile(
+    r'\s*这是否意味着\s*(?P<first>[A-Za-z0-9_-]+)\s*的结合亲和力是\s*'
+    r'(?P<second>[A-Za-z0-9_-]+)\s*的\s*\d+(?:\.\d+)?\s*倍[？?。]?\s*', re.I)
+_AFFINITY_INFERENCE = re.compile(
+    r'\s*这意味着它对\s*(?P<first>[A-Za-z0-9_-]+)\s*的结合亲和力一定是\s*'
+    r'(?P<second>[A-Za-z0-9_-]+)\s*的\s*\d+(?:\.\d+)?\s*倍吗[？?]?\s*', re.I)
 _PRIOR_RESULT_REFERENCE = re.compile(
     r'刚才|之前|先前|上一轮|上次|上述|前述|上面(?:的)?(?=(?:这|两|候选|分子|结果|计算|预测))|这(?:个|些|两|说明|意味|能)|'
     r'那(?:个|些|两)|两者|二者|它|第\s*[一二三四五六七八九十0-9]+\s*个|'
@@ -571,9 +577,20 @@ class WebTurnProjection:
             self.entry['pending_named_admet'] = self.invalid_named_admet_request
             return {'content': '提供的 SMILES 无效，请检查并在下一条消息重新提供，'
                     '格式为“SMILES: 分子结构”；本次未进行预测。', 'status': 'rejected'}
-        affinity_question = re.fullmatch(
-            r'\s*这是否意味着\s*(?P<first>[A-Za-z0-9_-]+)\s*的结合亲和力是\s*'
-            r'(?P<second>[A-Za-z0-9_-]+)\s*的\s*\d+(?:\.\d+)?\s*倍[？?。]?\s*', self.query, re.I)
+        from src.agent.contracts.concept_request import _MEASURED_KD_CLARIFICATION
+        kd = _MEASURED_KD_CLARIFICATION.fullmatch(self.query)
+        if kd:
+            from .assay_comparison import compare_supplied_kd
+            previous = self.history[-1].get('affinity_question') if self.history else None
+            return compare_supplied_kd(kd, previous, self.session_id)
+        affinity_question = _AFFINITY_COMPARISON.fullmatch(self.query)
+        inference = _AFFINITY_INFERENCE.fullmatch(self.query)
+        question = affinity_question or inference
+        if question:
+            self.entry['affinity_question'] = {'session_id': self.session_id, **question.groupdict()}
+            if not self.history:
+                return {'content': '目前无法确认这两个靶点的亲和力比值。请提供化合物、两个靶点的测量值、指标及实验条件。',
+                        'status': 'partial'}
         ratio_question = re.fullmatch(
             r'\s*(?:换个角度说[，,]\s*)?(?P<first>[A-Za-z0-9_-]+)\s*的\s*IC50\s*是\s*'
             r'(?P<second>[A-Za-z0-9_-]+)\s*的\s*(?P<ratio>\d+(?:\.\d+)?)\s*倍[，,]\s*对吗[？?。]?\s*', self.query, re.I)
@@ -1981,50 +1998,17 @@ class WebTurnProjection:
             if answer != result.final_answer:
                 view = {'final_answer': answer, 'summary_answer': answer,
                         'suppress_raw_answer': True, 'status': 'completed', 'warnings': []}
-        from src.agent.contracts.concept_request import _MEASURED_SELECTIVITY, _MEASURED_KD_CLARIFICATION
+        from src.agent.contracts.concept_request import _MEASURED_SELECTIVITY
         measured = _MEASURED_SELECTIVITY.fullmatch(self.query)
-        kd = _MEASURED_KD_CLARIFICATION.fullmatch(self.query)
-        followup = re.fullmatch(
-            r'这意味着它对\s*(?P<target>[A-Za-z0-9_-]+)\s*的结合亲和力一定是\s*'
-            r'(?P<off>[A-Za-z0-9_-]+)\s*的\s*\d+(?:\.\d+)?\s*倍吗[？?]?\s*', self.query, re.I)
+        followup = _AFFINITY_INFERENCE.fullmatch(self.query)
         memory = getattr(context, 'memory', [])
-        if kd and result.outcome == RunOutcome.COMPLETED and not result.tool_results:
-            prior = re.fullmatch(
-                r'这意味着它对\s*(?P<target>[A-Za-z0-9_-]+)\s*的结合亲和力一定是\s*'
-                r'(?P<off>[A-Za-z0-9_-]+)\s*的\s*\d+(?:\.\d+)?\s*倍吗[？?]?\s*',
-                memory[-1]['user'], re.I) if memory else None
-            if not prior or any(prior[key].casefold() != kd[key].casefold() for key in ('target', 'off')):
-                answer = '无法确认你要补充的上一问题；请将具体问题与测量数据一起提供。'
-            else:
-                from decimal import Decimal, localcontext
-                scales = {'pm': Decimal('1e-12'), 'nm': Decimal('1e-9'),
-                          'μm': Decimal('1e-6'), 'um': Decimal('1e-6'), 'mm': Decimal('1e-3')}
-                target = Decimal(kd['target_value']) * scales[kd['target_unit'].casefold()]
-                off = Decimal(kd['off_value']) * scales[kd['off_unit'].casefold()]
-                if target <= 0 or off <= 0:
-                    answer = 'Kd 必须为正数，无法根据所给数值计算比值；请检查实验数据。'
-                else:
-                    with localcontext() as ctx:
-                        ctx.prec = 6
-                        ratio = (off / target).normalize()
-                    display_ratio = format(ratio, 'f') if -4 <= ratio.adjusted() <= 6 else format(ratio, 'g')
-                    if target == off:
-                        affinity = '两者的结合亲和力相同'
-                    else:
-                        direction = '较强' if target < off else '较弱'
-                        affinity = f'{kd["target"]} 的结合亲和力{direction}，为 {kd["off"]} 的 {display_ratio} 倍'
-                    answer = (f'按你提供的平衡结合实验数据，{kd["off"]} 的 Kd ÷ {kd["target"]} 的 Kd = {display_ratio} 倍。'
-                              f'若这些 Kd 是可比且可靠的平衡测量，{affinity}。'
-                              '同一缓冲体系并不能单独证明所有条件和数据质量可比；还需核对实验方法、重复和不确定度。')
-            return {'final_answer': answer, 'summary_answer': answer,
-                    'suppress_raw_answer': True, 'status': 'partial', 'warnings': []}
         if followup and memory:
             previous = memory[-1]['user']
             if re.fullmatch(r'刚才那两个数值统一成\s*nM\s*各是多少[？?]?', previous, re.I) and len(memory) > 1:
                 previous = memory[-2]['user']
             candidate = _MEASURED_SELECTIVITY.fullmatch(previous)
-            if candidate and all(followup[key].casefold() == candidate[key].casefold()
-                                 for key in ('target', 'off')):
+            if candidate and {followup['first'].casefold(), followup['second'].casefold()} == {
+                    candidate['target'].casefold(), candidate['off'].casefold()}:
                 measured = candidate
         if followup and measured is None and result.outcome == RunOutcome.COMPLETED and not result.tool_results:
             answer = ('未找到可确认的对应测量数据。请提供化合物及两个靶点的具体数值、'
