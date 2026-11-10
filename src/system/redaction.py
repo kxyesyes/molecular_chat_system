@@ -107,6 +107,19 @@ def redact_sensitive(value: Any, sensitive_fields: set[str] | None = None) -> An
     return value
 
 
+def normalize_warning_strings(values: Any) -> list[str]:
+    """Redact warning text and keep unique, nonempty messages in input order."""
+    if not isinstance(values, list):
+        return []
+    warnings = []
+    for value in values:
+        if isinstance(value, str):
+            warning = redact_sensitive(value.strip())
+            if warning and warning not in warnings:
+                warnings.append(warning)
+    return warnings
+
+
 def contains_credential(value: Any) -> bool:
     if isinstance(value, Mapping):
         return any(

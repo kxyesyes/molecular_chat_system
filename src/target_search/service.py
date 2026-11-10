@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import threading
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+from src.system.file_lock import interprocess_lock, thread_lock
 
 from .authoritative_resolver import AuthoritativeTargetResolver, TargetResolution
 from .cache import CachedEvidence, TargetCacheRepository
@@ -34,8 +35,6 @@ PDE_CATALYTIC_TARGETS = {
     "PDE5A", "PDE6A", "PDE6B", "PDE6C", "PDE7A", "PDE7B", "PDE8A", "PDE8B", "PDE9A", "PDE10A", "PDE11A",
 }
 PDE_REGULATORY_TARGETS = {"PDE6D", "PDE6G", "PDE6H"}
-_SEED_LOCKS: dict[Path, threading.RLock] = {}
-_SEED_LOCKS_GUARD = threading.Lock()
 _TARGET_SEED_FILENAMES = (
     "seed_targets.csv",
     "common_targets.csv",
@@ -53,57 +52,6 @@ _ORGANISM_ALIASES = {
     "mouse": "Mus musculus",
     "10090": "Mus musculus",
 }
-def _seed_lock(db_path: Path) -> threading.RLock:
-    resolved = db_path.resolve()
-    with _SEED_LOCKS_GUARD:
-        return _SEED_LOCKS.setdefault(resolved, threading.RLock())
-
-
-class _InterprocessSeedLock:
-    def __init__(self, db_path: Path) -> None:
-        resolved = db_path.resolve()
-        self._lock_path = resolved.with_name(f"{resolved.name}.seed.lock")
-        self._stream = None
-
-    def __enter__(self) -> "_InterprocessSeedLock":
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        self._stream = self._lock_path.open("a+b", buffering=0)
-        self._stream.seek(0, os.SEEK_END)
-        if self._stream.tell() == 0:
-            self._stream.write(b"\0")
-        self._stream.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(self._stream.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._stream.fileno(), fcntl.LOCK_EX)
-        except Exception:
-            self._stream.close()
-            self._stream = None
-            raise
-        return self
-
-    def __exit__(self, exc_type, exc, traceback) -> bool:
-        if self._stream is None:
-            return False
-        try:
-            self._stream.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(self._stream.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._stream.fileno(), fcntl.LOCK_UN)
-        finally:
-            self._stream.close()
-            self._stream = None
-        return False
 
 
 def _json_copy(value: Any) -> Any:
@@ -291,9 +239,9 @@ class TargetSearchService:
         seed_dir = get_target_db_dir(self.project_root)
         if not any((seed_dir / filename).is_file() for filename in _TARGET_SEED_FILENAMES):
             return False
-        db_path = get_db_path(self.project_root).resolve()
-        lock = _seed_lock(db_path)
-        with lock, _InterprocessSeedLock(db_path):
+        db_path = get_db_path(self.project_root)
+        lock_path = db_path.with_name(f"{db_path.name}.seed.lock")
+        with thread_lock(lock_path), interprocess_lock(lock_path):
             if self._target_count() != 0:
                 return False
             if not any(

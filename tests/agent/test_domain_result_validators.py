@@ -1,4 +1,5 @@
 import hashlib
+from copy import deepcopy
 import json
 from types import SimpleNamespace
 import math
@@ -131,6 +132,33 @@ def test_docking_validator_accepts_complete_opensandbox_trust_contract(tmp_path)
 
     assert validated.success is True
     assert validated.status == ObservationStatus.SUCCEEDED
+
+
+@pytest.mark.parametrize("path_kind", ["absolute", "relative", "symlink"])
+def test_agent_and_execution_agree_on_sandbox_pose_identity(tmp_path, monkeypatch, path_kind):
+    from src.docking.result_validator import DockingExecutionResultValidator
+
+    monkeypatch.chdir(tmp_path)
+
+    def select_pose(values):
+        pose = values["pose"]
+        if path_kind == "relative":
+            pose = pose.relative_to(tmp_path)
+        elif path_kind == "symlink":
+            alias = tmp_path / "alias.pdbqt"
+            try:
+                alias.symlink_to(pose)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("Windows file symlink privilege unavailable")
+                raise
+            pose = alias
+        values["pose"] = pose
+        values["artifacts"][0].path = str(pose)
+
+    result = _opensandbox_docking_result(tmp_path, select_pose)
+    for validator in (AgentResultValidator(), DockingExecutionResultValidator()):
+        assert validator.validate_tool_result(deepcopy(result)).success is (path_kind == "absolute")
 
 
 def test_docking_validator_scrubs_adversarial_already_failed_result(tmp_path):

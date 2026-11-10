@@ -63,6 +63,26 @@ async def start_isolated_process(
         raise
 
 
+async def stop_isolated_process(process: "IsolatedProcess", waiter: asyncio.Task | None) -> None:
+    """Terminate the child, drain its result waiter, and close the process handles."""
+    await asyncio.to_thread(process.terminate)
+    if waiter is not None:
+        try:
+            await asyncio.wait_for(asyncio.shield(waiter), timeout=1.0)
+        except asyncio.TimeoutError:
+            # ``to_thread`` cannot stop the native wait itself, but cancelling
+            # its asyncio wrapper prevents a late child error becoming an
+            # unobserved task exception after the request has returned.
+            waiter.cancel()
+            try:
+                await waiter
+            except BaseException:
+                pass
+        except BaseException:
+            pass
+    await asyncio.to_thread(process.close)
+
+
 _CHILD_ENV_ALLOWLIST = frozenset({
     "PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE",
     "HOME", "LANG", "LC_ALL", "CUDA_VISIBLE_DEVICES", "OMP_NUM_THREADS",

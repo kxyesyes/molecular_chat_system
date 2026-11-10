@@ -10,7 +10,10 @@ import threading
 from typing import Optional
 from fastapi import UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
-from src.web.process_isolation import IsolatedProcess, ProcessExecutionError, start_isolated_process
+from src.web.process_isolation import (
+    IsolatedProcess, ProcessExecutionError, start_isolated_process,
+    stop_isolated_process as _stop_activity_process,
+)
 from src.web.request_auth import require_browser_session
 
 from .route_compat import lazy_dependency
@@ -57,24 +60,6 @@ def _activity_child_job(payload, target):
         return {"kind": "timeout"}
     except BaseException:
         return {"kind": "error"}
-
-
-async def _stop_activity_process(process, waiter):
-    await asyncio.to_thread(process.terminate)
-    if waiter is not None:
-        # Retrieve completed failures too: terminating the child can close its
-        # pipe before cleanup reaches this waiter.
-        try:
-            await asyncio.wait_for(asyncio.shield(waiter), timeout=1.0)
-        except asyncio.TimeoutError:
-            waiter.cancel()
-            try:
-                await waiter
-            except BaseException:
-                pass
-        except BaseException:
-            pass
-    await asyncio.to_thread(process.close)
 
 
 async def _invoke_isolated_activity(

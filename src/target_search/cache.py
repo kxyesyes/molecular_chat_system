@@ -9,7 +9,6 @@ import math
 import os
 import re
 import stat
-import threading
 import uuid
 import unicodedata
 from dataclasses import dataclass
@@ -17,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Optional
+
+from src.system.file_lock import interprocess_lock, is_reparse_or_symlink, thread_lock
 
 from .database import (
     get_cache_dir,
@@ -59,8 +60,7 @@ WINDOWS_RESERVED_NAMES = frozenset(
     | {f"COM{index}" for index in range(1, 10)}
     | {f"LPT{index}" for index in range(1, 10)}
 )
-_CACHE_THREAD_LOCKS: dict[Path, threading.RLock] = {}
-_CACHE_THREAD_LOCKS_GUARD = threading.Lock()
+_CACHE_LOCK_NAME = ".target-cache.lock"
 
 
 @dataclass(frozen=True)
@@ -156,7 +156,8 @@ class TargetCacheRepository:
         cache_root = get_cache_dir(self.project_root)
         staged = cache_root.joinpath(*staged_relative.parts)
         final = cache_root.joinpath(*final_relative.parts)
-        with _cache_thread_lock(cache_root), _InterprocessCacheLock(cache_root):
+        lock_path = cache_root / _CACHE_LOCK_NAME
+        with thread_lock(lock_path), interprocess_lock(lock_path):
             staged_state = _prevalidate_regular_file(
                 cache_root, staged, staged_relative.parts
             )
@@ -713,9 +714,10 @@ class TargetCacheRepository:
 
     def _reconcile_publication_intents(self) -> None:
         cache_root = get_cache_dir(self.project_root)
-        with _cache_thread_lock(cache_root):
+        lock_path = cache_root / _CACHE_LOCK_NAME
+        with thread_lock(lock_path):
             try:
-                with _InterprocessCacheLock(cache_root):
+                with interprocess_lock(lock_path):
                     self._reconcile_publication_intents_locked()
             except OSError:
                 return
@@ -1185,9 +1187,10 @@ class TargetCacheRepository:
         files_deleted = 0
         attempts = 0
         cache_root = get_cache_dir(self.project_root)
-        with _cache_thread_lock(cache_root):
+        lock_path = cache_root / _CACHE_LOCK_NAME
+        with thread_lock(lock_path):
             try:
-                cache_lock = _InterprocessCacheLock(cache_root)
+                cache_lock = interprocess_lock(lock_path)
                 cache_lock.__enter__()
             except OSError:
                 return {"records_deleted": 0, "files_deleted": 0}
@@ -1517,12 +1520,6 @@ def _parse_utc_timestamp(value: Any) -> datetime:
     return canonical
 
 
-def _cache_thread_lock(cache_root: Path) -> threading.RLock:
-    resolved = cache_root.resolve()
-    with _CACHE_THREAD_LOCKS_GUARD:
-        return _CACHE_THREAD_LOCKS.setdefault(resolved, threading.RLock())
-
-
 def _validate_identifier(name: str, value: Any) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a string")
@@ -1724,118 +1721,6 @@ def _validate_quarantine_relative_path(value: Any, generation_id: str) -> Path:
     ):
         raise ValueError("quarantine path does not match its cache generation")
     return relative_path
-
-
-class _InterprocessCacheLock:
-    def __init__(self, cache_root: Path) -> None:
-        self._cache_root = cache_root
-        self._stream: Any = None
-
-    def __enter__(self) -> "_InterprocessCacheLock":
-        root_stat = os.lstat(self._cache_root)
-        if _is_reparse_or_symlink(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
-            raise OSError("cache root cannot be safely locked")
-        lock_path = self._cache_root / ".target-cache.lock"
-        descriptor = (
-            _open_windows_lock_file(lock_path)
-            if os.name == "nt"
-            else os.open(
-                lock_path,
-                os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-            )
-        )
-        try:
-            descriptor_stat = os.fstat(descriptor)
-            path_stat = os.lstat(lock_path)
-            if (
-                _is_reparse_or_symlink(path_stat)
-                or not stat.S_ISREG(descriptor_stat.st_mode)
-                or (descriptor_stat.st_dev, descriptor_stat.st_ino)
-                != (path_stat.st_dev, path_stat.st_ino)
-            ):
-                raise OSError("cache lock file cannot be safely verified")
-            self._stream = os.fdopen(descriptor, "r+b", buffering=0)
-            descriptor = -1
-            self._stream.seek(0, os.SEEK_END)
-            if self._stream.tell() == 0:
-                self._stream.write(b"\0")
-            self._stream.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(self._stream.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._stream.fileno(), fcntl.LOCK_EX)
-            return self
-        except Exception:
-            if self._stream is not None:
-                self._stream.close()
-                self._stream = None
-            elif descriptor >= 0:
-                os.close(descriptor)
-            raise
-
-    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
-        if self._stream is None:
-            return False
-        try:
-            self._stream.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(self._stream.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._stream.fileno(), fcntl.LOCK_UN)
-        finally:
-            self._stream.close()
-            self._stream = None
-        return False
-
-
-def _open_windows_lock_file(lock_path: Path) -> int:
-    import ctypes
-    import msvcrt
-    from ctypes import wintypes
-
-    generic_read_write = 0x80000000 | 0x40000000
-    share_all = 0x00000001 | 0x00000002 | 0x00000004
-    open_always = 4
-    open_reparse_point = 0x00200000
-    file_attribute_normal = 0x00000080
-    invalid_handle = ctypes.c_void_p(-1).value
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    create_file = kernel32.CreateFileW
-    create_file.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.LPVOID,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        wintypes.HANDLE,
-    ]
-    create_file.restype = wintypes.HANDLE
-    handle = create_file(
-        str(lock_path),
-        generic_read_write,
-        share_all,
-        None,
-        open_always,
-        open_reparse_point | file_attribute_normal,
-        None,
-    )
-    if handle == invalid_handle:
-        raise OSError(ctypes.get_last_error(), "unable to open cache lock")
-    try:
-        return msvcrt.open_osfhandle(int(handle), os.O_RDWR | os.O_BINARY)
-    except Exception:
-        ctypes.windll.kernel32.CloseHandle(handle)
-        raise
 
 
 def _due_cleanup_jobs(
@@ -2168,7 +2053,7 @@ def _ensure_quarantine_directory(cache_root: Path) -> str:
         quarantine_stat = os.lstat(quarantine)
     except OSError:
         return "transient_error"
-    if _is_reparse_or_symlink(quarantine_stat) or not stat.S_ISDIR(
+    if is_reparse_or_symlink(quarantine_stat) or not stat.S_ISDIR(
         quarantine_stat.st_mode
     ):
         return "permanent_unsafe"
@@ -2182,7 +2067,7 @@ def _ensure_relative_directory(
         root_stat = os.lstat(cache_root)
     except OSError:
         return "transient_error"
-    if _is_reparse_or_symlink(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
+    if is_reparse_or_symlink(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
         return "permanent_unsafe"
     current = cache_root
     for part in relative_parts:
@@ -2192,7 +2077,7 @@ def _ensure_relative_directory(
             current_stat = os.lstat(current)
         except OSError:
             return "transient_error"
-        if _is_reparse_or_symlink(current_stat) or not stat.S_ISDIR(
+        if is_reparse_or_symlink(current_stat) or not stat.S_ISDIR(
             current_stat.st_mode
         ):
             return "permanent_unsafe"
@@ -2594,13 +2479,6 @@ def _thaw_json(value: Any) -> Any:
     return value
 
 
-def _is_reparse_or_symlink(path_stat: os.stat_result) -> bool:
-    attributes = getattr(path_stat, "st_file_attributes", 0)
-    return stat.S_ISLNK(path_stat.st_mode) or bool(
-        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    )
-
-
 def _paths_share_file_identity(first: Path, second: Path) -> bool:
     try:
         return os.path.samestat(os.lstat(first), os.lstat(second))
@@ -2617,7 +2495,7 @@ def _prevalidate_regular_file(
         root_stat = os.lstat(cache_root)
     except OSError:
         return "transient_error"
-    if _is_reparse_or_symlink(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
+    if is_reparse_or_symlink(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
         return "permanent_unsafe"
 
     current = cache_root
@@ -2629,7 +2507,7 @@ def _prevalidate_regular_file(
             return "missing"
         except OSError:
             return "transient_error"
-        if _is_reparse_or_symlink(component_stat) or not stat.S_ISDIR(
+        if is_reparse_or_symlink(component_stat) or not stat.S_ISDIR(
             component_stat.st_mode
         ):
             return "permanent_unsafe"
@@ -2640,7 +2518,7 @@ def _prevalidate_regular_file(
         return "missing"
     except OSError:
         return "transient_error"
-    if _is_reparse_or_symlink(candidate_stat) or not stat.S_ISREG(candidate_stat.st_mode):
+    if is_reparse_or_symlink(candidate_stat) or not stat.S_ISREG(candidate_stat.st_mode):
         return "permanent_unsafe"
     return "regular"
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Request, Response
 from src.web.api_response import api_error
-from src.system.redaction import redact_sensitive
+from src.system.redaction import normalize_warning_strings as _normalize_warning_strings
 from src.system.scientific_status import normalize_observation_status, summarize_completion
 
 from .route_compat import lazy_dependency
@@ -22,22 +22,6 @@ _SAFE_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
 _HISTORY_PAGE_SIZE = 200
 _HISTORY_SCAN_LIMIT = 10_000
 DEMO_PDE4A_APO_PATH = Path(__file__).resolve().parents[3] / "data" / "samples" / "PDE4A_apo_6FG5.pdb"
-
-
-def _normalize_warning_strings(values) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    warnings = []
-    for value in values:
-        if not isinstance(value, str):
-            continue
-        warning = value.strip()
-        if not warning:
-            continue
-        warning = redact_sensitive(warning)
-        if isinstance(warning, str) and warning not in warnings:
-            warnings.append(warning)
-    return warnings
 
 
 def _positive_float_env(name: str, default: float) -> float:

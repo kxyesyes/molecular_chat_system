@@ -2,73 +2,13 @@
 AttentiveFP shorted as AFP
 '''
 
-from typing import Optional
-from torch_geometric.typing import Adj, OptTensor
-
-import torch, math
-from torch import Tensor
+import torch
 import torch.nn.functional as F
-from torch.nn import Linear, Parameter, GRUCell
+from torch.nn import GRUCell, Linear
+from torch_geometric.nn import GATConv, global_add_pool
 from torch_scatter import scatter
-from torch_geometric.utils import softmax
-from torch_geometric.nn import GATConv, MessagePassing, global_add_pool
 
-
-def glorot(tensor):
-    if tensor is not None:
-        stdv = math.sqrt(6.0 / (tensor.size(-2) + tensor.size(-1)))
-        tensor.data.uniform_(-stdv, stdv)
-
-
-def zeros(tensor):
-    if tensor is not None:
-        tensor.data.fill_(0)
-
-
-class GATEConv(MessagePassing):
-    '''
-    bond feature of first layer
-    '''
-    def __init__(self, in_channels: int, out_channels: int, edge_dim: int,
-                 dropout: float = 0.0):
-        super(GATEConv, self).__init__(aggr='add', node_dim=0)
-
-        self.dropout = dropout
-
-        self.att_l = Parameter(torch.Tensor(1, out_channels))
-        self.att_r = Parameter(torch.Tensor(1, in_channels))
-
-        self.lin1 = Linear(in_channels + edge_dim, out_channels, False)
-        self.lin2 = Linear(out_channels, out_channels, False)
-
-        self.bias = Parameter(torch.Tensor(out_channels))
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        glorot(self.att_l)
-        glorot(self.att_r)
-        glorot(self.lin1.weight)
-        glorot(self.lin2.weight)
-        zeros(self.bias)
-
-    def forward(self, x: Tensor, edge_index: Adj, edge_attr: Tensor) -> Tensor:
-        out = self.propagate(edge_index, x=x, edge_attr=edge_attr)
-        out += self.bias
-        return out
-
-    def message(self, x_j: Tensor, x_i: Tensor, edge_attr: Tensor,
-                index: Tensor, ptr: OptTensor,
-                size_i: Optional[int]) -> Tensor:
-
-        x_j = F.leaky_relu_(self.lin1(torch.cat([x_j, edge_attr], dim=-1)))
-        alpha_j = (x_j * self.att_l).sum(dim=-1)
-        alpha_i = (x_i * self.att_r).sum(dim=-1)
-        alpha = alpha_j + alpha_i
-        alpha = F.leaky_relu_(alpha)
-        alpha = softmax(alpha, index, ptr, size_i)
-        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
-        return self.lin2(x_j) * alpha.unsqueeze(-1)
+from .ReduceGNN import GATEConv, glorot, zeros
 
 
 class AFP(torch.nn.Module):

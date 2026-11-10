@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -21,6 +22,15 @@ from src.docking.history_index import (
 class MockDockingService:
     def __init__(self, work_dir: Path):
         self.work_dir = str(work_dir)
+
+
+def test_history_rejects_hardlinked_lock_before_touching_unrelated_file(tmp_path):
+    unrelated = tmp_path / "unrelated"
+    unrelated.touch()
+    (tmp_path / history_index_module.HISTORY_LOCK_FILE).hardlink_to(unrelated)
+    with pytest.raises(OSError):
+        read_history_page(tmp_path)
+    assert unrelated.read_bytes() == b""
 
 
 def test_history_record_preserves_scientific_provenance_and_best_pose(tmp_path):

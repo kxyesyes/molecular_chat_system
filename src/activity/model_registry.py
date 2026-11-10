@@ -15,6 +15,12 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from src.system.file_lock import (
+    configured_positive_float as _configured_positive_float,
+    open_lock_file,
+    timed_file_lock,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -202,42 +208,6 @@ def validate_endpoint_metadata(metadata: dict) -> dict:
     return result
 
 
-def _configured_positive_float(name: str, default: float) -> float:
-    try:
-        value = float(os.environ.get(name, default))
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError
-        return value
-    except (TypeError, ValueError):
-        return default
-
-
-def _try_lock_file(lock_file) -> None:
-    lock_file.seek(0)
-    if os.name == "nt":
-        import msvcrt
-
-        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-        return
-
-    import fcntl
-
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-
-def _unlock_file(lock_file) -> None:
-    lock_file.seek(0)
-    if os.name == "nt":
-        import msvcrt
-
-        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-        return
-
-    import fcntl
-
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-
-
 @contextmanager
 def _interprocess_registry_lock(lock_path: Path) -> Iterator[None]:
     timeout_seconds = _configured_positive_float(
@@ -250,46 +220,15 @@ def _interprocess_registry_lock(lock_path: Path) -> Iterator[None]:
     )
     deadline = time.monotonic() + timeout_seconds
     try:
-        if lock_path.exists() and (
-            lock_path.is_symlink()
-            or not lock_path.resolve(strict=True).is_relative_to(lock_path.parent)
-        ):
-            raise OSError
-        lock_file = lock_path.open("a+b", buffering=0)
+        lock_file = open_lock_file(lock_path)
     except (OSError, RuntimeError):
         raise RuntimeError("Unable to open activity model registry lock") from None
-    acquired = False
-    try:
-        lock_file.seek(0, os.SEEK_END)
-        if lock_file.tell() == 0:
-            lock_file.write(b"\0")
-            lock_file.flush()
-            os.fsync(lock_file.fileno())
-
-        while not acquired:
-            try:
-                _try_lock_file(lock_file)
-                acquired = True
-            except (BlockingIOError, OSError) as error:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        "Timed out acquiring activity model registry lock"
-                    ) from error
-                time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
+    with lock_file, timed_file_lock(
+        lock_file, deadline=deadline, poll_seconds=poll_seconds,
+        timeout_message="Timed out acquiring activity model registry lock",
+        release_message="Failed to release activity model registry lock",
+    ):
         yield
-    finally:
-        release_error = None
-        if acquired:
-            try:
-                _unlock_file(lock_file)
-            except OSError as error:
-                release_error = RuntimeError(
-                    "Failed to release activity model registry lock"
-                )
-                release_error.__cause__ = error
-        lock_file.close()
-        if release_error is not None:
-            raise release_error
 
 
 class ActivityModelRegistry:

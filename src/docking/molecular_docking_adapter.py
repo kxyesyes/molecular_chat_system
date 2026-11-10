@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List
 
 from src.system.molecular_input import BaseMolecularTool
-from src.system.redaction import redact_sensitive
+from src.system.redaction import normalize_warning_strings as _normalize_warning_strings
 from src.system.scientific_contracts import ToolProvenance
 
 logger = logging.getLogger(__name__)
@@ -82,19 +82,6 @@ def _safe_environment_diagnostics(values: Any) -> Dict[str, Any]:
     python_env = diagnostics.get("python_env")
     safe["rdkit_available"] = bool(python_env.get("has_rdkit")) if isinstance(python_env, dict) else False
     return safe
-
-
-def _normalize_warning_strings(values: Any) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    warnings: list[str] = []
-    for value in values:
-        if not isinstance(value, str):
-            continue
-        warning = redact_sensitive(value.strip())
-        if isinstance(warning, str) and warning and warning not in warnings:
-            warnings.append(warning)
-    return warnings
 
 
 def _sha256_file(path: Path) -> str | None:

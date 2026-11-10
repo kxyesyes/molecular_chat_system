@@ -492,6 +492,55 @@ def test_second_init_does_not_rewrite_cache_rows_after_migration_marker(
     assert cache_updates == []
 
 
+@pytest.mark.parametrize("operation", ["migration", "seed", "publication"])
+@pytest.mark.parametrize("link_type", ["hardlink", "symlink"])
+def test_target_storage_lock_rejects_link_before_writing(project_root, operation, link_type):
+    from src.target_search.database import get_cache_dir, get_db_path, get_target_db_dir, init_db
+    from src.target_search.service import TargetSearchService
+
+    with TargetSearchService(project_root) as service:
+        db_path = get_db_path(project_root)
+        if operation == "publication":
+            cache_root = get_cache_dir(project_root)
+            lock_path = cache_root / ".target-cache.lock"
+            (cache_root / ".incoming").mkdir(exist_ok=True)
+            (cache_root / ".incoming/staged.cif").write_bytes(b"test coordinate")
+        else:
+            lock_path = db_path.with_name(f"{db_path.name}.{operation}.lock")
+            if operation == "seed":
+                seed_dir = get_target_db_dir(project_root)
+                seed_dir.mkdir(parents=True, exist_ok=True)
+                (seed_dir / "common_targets.csv").write_text(
+                    "gene_symbol,protein_name,uniprot_id,organism,target_type,aliases\n"
+                    "EGFR,Epidermal growth factor receptor,P00533,Homo sapiens,Kinase,ERBB1\n",
+                    encoding="utf-8",
+                )
+        lock_path.unlink(missing_ok=True)
+        unrelated = project_root / "unrelated"
+        unrelated.touch()
+        if link_type == "hardlink":
+            lock_path.hardlink_to(unrelated)
+        else:
+            try:
+                lock_path.symlink_to(unrelated)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    pytest.skip("Windows file symlink privilege unavailable")
+                raise
+
+        with pytest.raises(OSError):
+            if operation == "migration":
+                init_db(project_root)
+            elif operation == "seed":
+                service.search_targets("EGFR")
+            else:
+                service.cache.publish_coordinate(
+                    "coordinate:test", "RCSB_PDB", "test",
+                    staged_path=".incoming/staged.cif", coordinate_suffix=".cif",
+                )
+        assert unrelated.read_bytes() == b""
+
+
 def test_legacy_schema_migration_is_serialized_across_spawned_processes(project_root):
     from src.target_search.database import get_db_path
 
@@ -1290,7 +1339,7 @@ def test_metadata_upserts_do_not_acquire_coordinate_filesystem_lock(
     def forbidden_lock(_root):
         raise AssertionError("metadata upsert acquired coordinate lock")
 
-    monkeypatch.setattr(cache_module, "_InterprocessCacheLock", forbidden_lock)
+    monkeypatch.setattr(cache_module, "interprocess_lock", forbidden_lock)
     evidence = repository.upsert(
         "target:metadata", "target", "UniProt", "metadata", {"gene": "EGFR"}
     )

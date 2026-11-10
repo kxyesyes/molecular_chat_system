@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import multiprocessing
+import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -486,6 +487,29 @@ def test_multiprocess_registry_transactions_do_not_lose_state(tmp_path: Path) ->
     assert registry.get_active_model_id() in remaining | {None}
     state = json.loads(registry.state_path.read_text(encoding="utf-8"))
     assert set(state["models"]) == remaining
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle sharing")
+def test_held_registry_lock_cannot_be_renamed_on_windows(tmp_path):
+    from src.activity.model_registry import REGISTRY_LOCK_FILE, _interprocess_registry_lock
+
+    path = tmp_path / REGISTRY_LOCK_FILE
+    moved = tmp_path / "moved.lock"
+    with _interprocess_registry_lock(path):
+        with pytest.raises(PermissionError):
+            path.rename(moved)
+    path.rename(moved)
+
+
+def test_registry_rejects_hardlinked_lock_without_exposing_path(tmp_path):
+    from src.activity.model_registry import REGISTRY_LOCK_FILE
+
+    unrelated = tmp_path / "unrelated"
+    unrelated.touch()
+    (tmp_path / REGISTRY_LOCK_FILE).hardlink_to(unrelated)
+    with pytest.raises(RuntimeError, match="^Unable to open activity model registry lock$"):
+        ActivityModelRegistry(tmp_path)
+    assert unrelated.read_bytes() == b""
 
 
 def test_interprocess_lock_timeout_is_finite_and_does_not_leak_paths(
