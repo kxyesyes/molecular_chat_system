@@ -13,8 +13,21 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
-from src.task_runtime.config import _stat_identity, _stat_version
-from src.task_runtime.secure_io import read_file_snapshot
+from src.task_runtime.config import _stat_identity as _identity
+from src.task_runtime.config import _stat_version
+from src.task_runtime.secure_io import (
+    _fsync_directory,
+    _identity as _file_identity,
+    _is_reparse,
+    read_file_snapshot,
+)
+
+from .filesystem import (
+    _ensure_real_child_directory,
+    _project_without_links,
+    _real_absolute_directory,
+    _write_all,
+)
 
 
 _CHUNK_BYTES = 1024 * 1024
@@ -42,7 +55,6 @@ _ENERGY_PATTERN = re.compile(
 _ENERGY_CLAIM_PATTERN = re.compile(
     rb"^[ \t]*REMARK[ \t]+VINA[ \t]+RESULT(?=[: \t]|$)"
 )
-_WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _EXPECTED_RESULT_FIELDS = frozenset(
     {
         "schema_version",
@@ -94,91 +106,6 @@ class ValidatedScientificOutput:
     vina_version: str
     meeko_version: str
     warnings: tuple[str, ...] = field(repr=False)
-
-
-def _is_reparse(metadata: os.stat_result) -> bool:
-    return bool(getattr(metadata, "st_file_attributes", 0) & _WINDOWS_REPARSE_POINT)
-
-
-def _identity(metadata: os.stat_result) -> tuple[int, ...]:
-    return _stat_identity(metadata)
-
-
-def _file_identity(
-    metadata: os.stat_result,
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    return _stat_identity(metadata), _stat_version(metadata)
-
-
-def _absolute_components(path: Path) -> list[Path]:
-    current = Path(path.anchor)
-    components = [current]
-    for part in path.parts[1:]:
-        current /= part
-        components.append(current)
-    return components
-
-
-def _real_absolute_directory(candidate: object) -> Path:
-    if not isinstance(candidate, Path) or not candidate.is_absolute() or ".." in candidate.parts:
-        raise ValueError
-    try:
-        lexical = Path(os.path.abspath(candidate))
-        for component in _absolute_components(lexical):
-            metadata = component.lstat()
-            if (
-                not stat.S_ISDIR(metadata.st_mode)
-                or stat.S_ISLNK(metadata.st_mode)
-                or _is_reparse(metadata)
-            ):
-                raise ValueError
-        resolved = lexical.resolve(strict=True)
-        if lexical != resolved:
-            raise ValueError
-        return lexical
-    except (OSError, RuntimeError, ValueError):
-        raise ValueError from None
-
-
-def _ensure_real_child_directory(parent: Path, name: str) -> Path:
-    child = parent / name
-    try:
-        child.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    metadata = child.lstat()
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_ISLNK(metadata.st_mode)
-        or _is_reparse(metadata)
-    ):
-        raise ValueError
-    return child
-
-
-def _write_all(descriptor: int, content: bytes) -> None:
-    view = memoryview(content)
-    while view:
-        written = os.write(descriptor, view)
-        if written <= 0:
-            raise OSError
-        view = view[written:]
-
-
-def _fsync_directory(path: Path) -> None:
-    if os.name != "posix":
-        return
-    descriptor = os.open(
-        path,
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0),
-    )
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def _safe_unlink_created(
@@ -459,18 +386,6 @@ def _read_regular_snapshot(path: Path, maximum_bytes: int) -> bytes:
     ):
         raise ValueError
     return snapshot.content
-
-
-def _project_without_links(root: Path, relative: PurePosixPath) -> Path:
-    projected = root
-    for index, part in enumerate(relative.parts):
-        projected /= part
-        metadata = projected.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
-            raise ValueError
-        if index < len(relative.parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
-            raise ValueError
-    return projected
 
 
 def _pose_relative_path(value: object) -> tuple[str, PurePosixPath]:
