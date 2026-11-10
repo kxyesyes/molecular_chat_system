@@ -133,7 +133,8 @@ def _open_windows_lock_file(lock_path: Path) -> int:
     from ctypes import wintypes
 
     generic_read_write = 0x80000000 | 0x40000000
-    share_all = 0x00000001 | 0x00000002 | 0x00000004
+    # A waiter must open the same file. Deny renaming/deleting the live lock.
+    share_read_write = 0x00000001 | 0x00000002
     open_always = 4
     open_reparse_point = 0x00200000
     file_attribute_normal = 0x00000080
@@ -153,7 +154,7 @@ def _open_windows_lock_file(lock_path: Path) -> int:
     handle = create_file(
         str(lock_path),
         generic_read_write,
-        share_all,
+        share_read_write,
         None,
         open_always,
         open_reparse_point | file_attribute_normal,
