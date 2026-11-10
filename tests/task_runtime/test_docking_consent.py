@@ -3549,3 +3549,61 @@ def test_c4a_raw_failure_and_validation_paths_settle_before_lease_exit(tmp_path,
             await _c4a_runtime_finish(rig)
 
     asyncio.run(run())
+
+
+def test_c4a_precompat_factory_error_settles_before_lease_exit(tmp_path, monkeypatch, request):
+    from src.task_runtime import docking_execution as execution_module
+
+    rig = _c4a_runtime_rig(tmp_path, monkeypatch, request)
+    p = rig.physical
+    original_factory = execution_module.MolecularDocking
+    sentinel = RuntimeError("c4a_fixed_precompat_factory_failure")
+    factory_calls = []
+    returned = []
+    original_verified = rig.first.execution.run_verified
+
+    def observed_verified(*args, **kwargs):
+        result = original_verified(*args, **kwargs)
+        returned.append((result["success"], result["status"], result["error"]["code"],
+                         result["error"]["details"], result["completion"]))
+        return result
+
+    monkeypatch.setattr(rig.first.execution, "run_verified", observed_verified)
+
+    def factory(**kwargs):
+        assert kwargs["command_scope"] is p.scope
+        assert Path(kwargs["allowed_output_root"]) == rig.output
+        tool = original_factory(**kwargs)  # Real harmless constructor, no service/command.
+        assert tool._command_scope is p.scope
+        factory_calls.append(threading.get_ident())
+        p.event("factory_exit")
+        raise sentinel
+
+    monkeypatch.setattr(execution_module, "MolecularDocking", factory)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            await _c2_approve(rig, proof)
+            result = await _c2_terminal(rig, "FAILED")
+            assert result["reason_code"] == "consent_execution_failed"
+            assert returned == [(False, "failed", "internal_error", {"reason": "process_failed"}, None)]
+            assert len(factory_calls) == 1 and p.raw_calls == 0 and p.services == []
+            assert p.resources.processes == [] and p.scope.snapshot()["command_count"] == 0
+            assert p.scope.snapshot()["state"] == "settled"
+            names = [name for name, *_ in p.events]
+            assert names.index("factory_exit") < names.index("settle_true") < names.index("cleanup_true")
+            assert names.index("cleanup_true") < names.index("pre_raw_snapshot_close") < names.index("pre_raw_lease_exit")
+            assert not {"raw_return", "validate", "prepare", "finalize"}.intersection(names)
+            for name, owner, settled, joined in p.events:
+                if name in {"settle_true", "cleanup_true", "pre_raw_snapshot_close", "pre_raw_lease_exit"}:
+                    assert owner == factory_calls[0] and settled and joined
+            assert len(rig.leases) == 1 and rig.leases[0]["exited"].is_set()
+            assert len(p.snapshot_closes) == 1 and len(rig.submits) == 1
+            assert _c2_row(rig, identity())["execution_occupied"] == 0
+            assert (p.neighbor / "keep").read_bytes() == b"C4a neighbor unchanged"
+            p.resources.assert_physically_stopped()
+        finally:
+            await _c4a_runtime_finish(rig)
+
+    asyncio.run(run())
