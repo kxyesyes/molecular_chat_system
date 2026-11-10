@@ -488,6 +488,17 @@ def test_multiprocess_registry_transactions_do_not_lose_state(tmp_path: Path) ->
     assert set(state["models"]) == remaining
 
 
+def test_registry_rejects_hardlinked_lock_without_exposing_path(tmp_path):
+    from src.activity.model_registry import REGISTRY_LOCK_FILE
+
+    unrelated = tmp_path / "unrelated"
+    unrelated.touch()
+    (tmp_path / REGISTRY_LOCK_FILE).hardlink_to(unrelated)
+    with pytest.raises(RuntimeError, match="^Unable to open activity model registry lock$"):
+        ActivityModelRegistry(tmp_path)
+    assert unrelated.read_bytes() == b""
+
+
 def test_interprocess_lock_timeout_is_finite_and_does_not_leak_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
+from src.system.file_lock import interprocess_lock, thread_lock
 from src.task_runtime.private_permissions import restrict_private_path
 
 
@@ -17,8 +17,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TARGET_DB_DIR = Path("data") / "target_db"
 DB_FILENAME = "target_database.sqlite"
 CACHE_MIGRATION_STATE_KEY = "target_remote_cache_generation_v1"
-_MIGRATION_LOCKS: dict[Path, threading.RLock] = {}
-_MIGRATION_LOCKS_GUARD = threading.Lock()
 
 
 def resolve_project_root(project_root: Optional[Path | str] = None) -> Path:
@@ -102,7 +100,8 @@ def init_db(project_root: Optional[Path | str] = None) -> None:
     db_path = get_db_path(project_root)
     db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     _restrict_permissions(db_path.parent, 0o700)
-    with _migration_thread_lock(db_path), _DatabaseMigrationLock(db_path):
+    lock_path = db_path.with_name(f"{db_path.name}.migration.lock")
+    with thread_lock(lock_path), interprocess_lock(lock_path):
         _init_db_locked(project_root)
 
 
@@ -335,58 +334,6 @@ def _ensure_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str
     for name, definition in columns.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {definition}")
-
-
-def _migration_thread_lock(db_path: Path) -> threading.RLock:
-    resolved = db_path.resolve()
-    with _MIGRATION_LOCKS_GUARD:
-        return _MIGRATION_LOCKS.setdefault(resolved, threading.RLock())
-
-
-class _DatabaseMigrationLock:
-    def __init__(self, db_path: Path) -> None:
-        self._lock_path = db_path.with_name(f"{db_path.name}.migration.lock")
-        self._stream = None
-
-    def __enter__(self) -> "_DatabaseMigrationLock":
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        self._stream = self._lock_path.open("a+b", buffering=0)
-        self._stream.seek(0, os.SEEK_END)
-        if self._stream.tell() == 0:
-            self._stream.write(b"\0")
-        self._stream.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(self._stream.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._stream.fileno(), fcntl.LOCK_EX)
-        except Exception:
-            self._stream.close()
-            self._stream = None
-            raise
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> bool:
-        if self._stream is None:
-            return False
-        try:
-            self._stream.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(self._stream.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(self._stream.fileno(), fcntl.LOCK_UN)
-        finally:
-            self._stream.close()
-            self._stream = None
-        return False
 
 
 def _migration_completed(conn: sqlite3.Connection, state_key: str) -> bool:

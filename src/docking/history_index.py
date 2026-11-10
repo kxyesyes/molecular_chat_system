@@ -12,6 +12,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from src.system.file_lock import (
+    configured_positive_float as _configured_positive_float,
+    open_lock_file,
+    timed_file_lock,
+)
+
 from src.task_runtime.private_permissions import restrict_private_path
 
 
@@ -35,42 +41,6 @@ def _history_lock_path(work_dir: str | Path) -> Path:
     return Path(work_dir).resolve() / HISTORY_LOCK_FILE
 
 
-def _configured_positive_float(name: str, default: float) -> float:
-    try:
-        value = float(os.environ.get(name, default))
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError
-        return value
-    except (TypeError, ValueError):
-        return default
-
-
-def _try_lock_file(lock_file) -> None:
-    lock_file.seek(0)
-    if os.name == "nt":
-        import msvcrt
-
-        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-        return
-
-    import fcntl
-
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-
-def _unlock_file(lock_file) -> None:
-    lock_file.seek(0)
-    if os.name == "nt":
-        import msvcrt
-
-        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-        return
-
-    import fcntl
-
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-
-
 @contextmanager
 def _interprocess_history_lock(work_dir: str | Path) -> Iterator[None]:
     lock_path = _history_lock_path(work_dir)
@@ -85,41 +55,14 @@ def _interprocess_history_lock(work_dir: str | Path) -> Iterator[None]:
         DEFAULT_LOCK_POLL_SECONDS,
     )
     deadline = time.monotonic() + timeout_seconds
-    lock_file = lock_path.open("a+b", buffering=0)
-    _restrict_private_path(lock_path, 0o600)
-    acquired = False
-    try:
-        lock_file.seek(0, os.SEEK_END)
-        if lock_file.tell() == 0:
-            lock_file.write(b"\0")
-            lock_file.flush()
-            os.fsync(lock_file.fileno())
-
-        while not acquired:
-            try:
-                _try_lock_file(lock_file)
-                acquired = True
-            except (BlockingIOError, OSError) as error:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        "Timed out acquiring docking history lock "
-                        f"after {timeout_seconds:g} seconds: {lock_path}"
-                    ) from error
-                time.sleep(min(poll_seconds, max(0.0, deadline - time.monotonic())))
-        yield
-    finally:
-        release_error = None
-        if acquired:
-            try:
-                _unlock_file(lock_file)
-            except OSError as error:
-                release_error = RuntimeError(
-                    f"Failed to release docking history lock: {lock_path}"
-                )
-                release_error.__cause__ = error
-        lock_file.close()
-        if release_error is not None:
-            raise release_error
+    with open_lock_file(lock_path) as lock_file:
+        _restrict_private_path(lock_path, 0o600)
+        with timed_file_lock(
+            lock_file, deadline=deadline, poll_seconds=poll_seconds,
+            timeout_message=f"Timed out acquiring docking history lock after {timeout_seconds:g} seconds: {lock_path}",
+            release_message=f"Failed to release docking history lock: {lock_path}",
+        ):
+            yield
 
 
 @contextmanager
