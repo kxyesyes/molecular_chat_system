@@ -2,6 +2,8 @@
 
 Run from a checkout with the MedChat Python environment and the locked Pi Node dependencies installed. These offline checks exercise the current decision binding, Web admission, continuation and worker lifecycle contracts. The decisions are scripted. Molecular weights and drug-likeness results in the scientific tests come from RDKit.
 
+Use a temporary directory outside every Git checkout. The Web tests create a user configuration directory beneath it, and MedChat rejects configuration paths inside a repository.
+
 ```console
 npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund
 python scripts/run_b1_acceptance.py --list
