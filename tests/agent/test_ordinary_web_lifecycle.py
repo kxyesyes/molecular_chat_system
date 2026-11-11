@@ -510,7 +510,7 @@ def test_deadline_does_not_release_unsettled_worker_or_projection(actual_app, mo
                 try:
                     await socket.ready()
                     await socket.send({'message': '计算性质；SMILES: CCO' if phase == 'worker' else 'Explain logP'})
-                    assert await asyncio.to_thread(entered.wait, 3)
+                    assert await asyncio.to_thread(entered.wait, socket.receive_timeout)
                     turn = next(iter(b.app.decision_runtime.active_owners))
                     writer = asyncio.create_task(write())
                     logical_clock.advance(300)

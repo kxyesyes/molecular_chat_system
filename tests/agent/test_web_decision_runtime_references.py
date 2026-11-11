@@ -48,7 +48,7 @@ def test_actual_projection_schedule_exit_has_one_truthful_terminal(actual_app, m
 
                 monkeypatch.setattr(asyncio, 'create_task', schedule)
                 await socket.send({'message': 'Explain logP'})
-                await asyncio.wait_for(entered.wait(), 3)
+                await asyncio.wait_for(entered.wait(), socket.receive_timeout)
                 assert len(parents) == 1
                 owners = tuple(b.app.decision_runtime.tasks)
                 assert len(owners) == 1
@@ -146,7 +146,7 @@ def test_actual_projection_exception_closes_socket_without_rewriting_result(actu
                 monkeypatch.setattr(asyncio, 'create_task', schedule)
                 monkeypatch.setattr(b.app.decision_runtime.references, 'project', fail_project)
                 await socket.send({'message': 'Explain logP'})
-                await asyncio.wait_for(entered.wait(), 3)
+                await asyncio.wait_for(entered.wait(), socket.receive_timeout)
                 owners = tuple(b.app.decision_runtime.tasks)
                 assert len(owners) == len(parents) == 1
                 await asyncio.wait_for(asyncio.gather(*owners), 3)
@@ -191,7 +191,7 @@ def test_projection_failure_finishes_failed_and_keeps_socket_usable(actual_app, 
                 await socket.send({'message': 'Explain logP'})
                 frames = []
                 while not frames or frames[-1]['type'] != 'complete':
-                    frames.append(await asyncio.wait_for(socket.receive(), 3))
+                    frames.append(await socket.receive())
                 result = next(f for f in frames if f['type'] == 'agent_result')
                 terminal = frames[-1]
                 assert result['status'] == 'completed'
@@ -280,7 +280,7 @@ def test_actual_post_result_cancel_drains_projection_before_close(actual_app, mo
                 await socket.send({'message': 'Explain logP'})
                 turn = None
                 try:
-                    await asyncio.wait_for(entered.wait(), 3)
+                    await asyncio.wait_for(entered.wait(), socket.receive_timeout)
                     turn, = b.app.decision_runtime.active_owners
                     assert turn.displayed_answer is not None
                     for _ in range(2):
@@ -431,7 +431,7 @@ def test_actual_projection_disconnect_retains_owner_lease_and_shutdown_until_thr
             try:
                 await socket.ready()
                 await socket.send({'message': 'Explain logP'})
-                await asyncio.wait_for(entered.wait(), 3)
+                await asyncio.wait_for(entered.wait(), socket.receive_timeout)
                 runtime, gate = b.app.decision_runtime, b.app.model_request_gate
                 turn, = runtime.active_owners
                 assert gate._readers == 1 and turn.worker_owner.status == 'settled'
