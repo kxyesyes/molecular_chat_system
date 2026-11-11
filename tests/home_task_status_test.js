@@ -25,6 +25,18 @@ vm.runInContext(fs.readFileSync(sourcePath, "utf8"), sandbox, {
 const status = sandbox.window.HomeTaskStatus;
 assert(status, "HomeTaskStatus must be exposed");
 
+for (const event of ["task_completed", "task_partial", "task_rejected", "task_cancelled", "task_failed"]) {
+  const pending = {publication_stage: "pending_source_check", answer_released: false};
+  const presentation = status.resolve({event, payload: pending});
+  assert.strictEqual(presentation.terminal, false, event);
+  assert.strictEqual(presentation.progressText, "等待结果验证");
+  assert.strictEqual(status.label(event, null, pending), "等待结果验证");
+  assert.strictEqual(status.className(presentation.eventType), "is-running");
+  for (const payload of [{}, {...pending, answer_released: true}, {...pending, publication_stage: "invalidated"}]) {
+    assert.strictEqual(status.resolve({event, payload}).terminal, true);
+  }
+}
+
 assert.deepStrictEqual(JSON.parse(JSON.stringify(status.resolve({event: "task_partial", progress: 2}))), {
   eventType: "task_partial",
   progressText: "部分完成",

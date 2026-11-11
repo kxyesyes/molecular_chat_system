@@ -221,6 +221,21 @@
     turn.statusElement.textContent = text;
   }
 
+  function finishPendingSourceCheck(turn, eventType, text, itemClass) {
+    const panel = turn.taskPanel;
+    if (agentTaskState.lastEventType !== "pending_source_check" ||
+        !panel || panel.getAttribute("data-trace-id") !== turn.traceId) return;
+    const progress = panel.querySelector(".agent-task-progress");
+    const item = panel.querySelector(".agent-task-list")?.lastChild;
+    const heading = item?.querySelector("strong");
+    if (progress) progress.textContent = text;
+    if (heading) heading.textContent = text;
+    if (item) item.className = `agent-task-item ${itemClass}`;
+    agentTaskState = window.HomeTaskState.record(agentTaskState, {
+      eventType, progressText: text, terminal: true,
+    });
+  }
+
   function clearDecisionConnection() {
     window.HomeResultDetails?.abortAll?.();
     decisionResultFormat = null;
@@ -229,6 +244,9 @@
     if (decisionMode) {
       scientificReferences?.startRequest(); // invalidate pending ACKs/restores, never replay
       if (decisionActive()) {
+        if (!decisionTurn.result) {
+          finishPendingSourceCheck(decisionTurn, "disconnected", "连接已断开，结果未确认", "is-warning");
+        }
         decisionStatus(decisionTurn, decisionTurn.result
           ? `${decisionTurn.statusElement.textContent} 连接已断开，结果传输未确认结束。`
           : "连接已断开，执行结果未确认。");
@@ -399,7 +417,12 @@
       turn.result = {status: message.status, text, metadata: message.metadata || {},
         details: message.result_format === "summary_details_v1" && message.details_state === "available"
           ? message.details : null};
-      if (turn.taskPanel?.getAttribute("data-trace-id") === turn.traceId &&
+      if (agentTaskState.lastEventType === "pending_source_check") {
+        const itemClass = message.status === "completed" ? "is-complete" :
+          ["partial", "cancelled", "waiting_for_input", "not_calculated"].includes(message.status)
+            ? "is-warning" : "is-error";
+        finishPendingSourceCheck(turn, message.status, decisionStatuses[message.status], itemClass);
+      } else if (turn.taskPanel?.getAttribute("data-trace-id") === turn.traceId &&
           agentTaskState.lastEventType === "task_completed") {
         // A finished calculation can be followed by cancelled or incomplete
         // interpretation; the final result owns the overall task status.

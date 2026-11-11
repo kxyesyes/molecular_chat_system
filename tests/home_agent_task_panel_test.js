@@ -30,7 +30,7 @@ assert(!source.includes('["failed", "rejected", "cancelled", "timeout", "unavail
   "homepage must not duplicate the shared non-success status list");
 assert(template.includes("/static/js/home/task_status.js"),
   "homepage must load the Agent task status module before the entrypoint");
-assert(template.includes("/static/js/home/task_status.js?v=20261101-step-failure-v3"),
+assert(template.includes("/static/js/home/task_status.js?v=20261111-source-check-v1"),
   "optional-failure presentation changes require a refreshed task-status cache key");
 assert(template.includes("/static/js/home/task_panel.js"),
   "homepage must load the Agent task panel renderer before the entrypoint");
