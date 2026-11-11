@@ -1286,24 +1286,42 @@ def test_actual_route_nested_timeout_retains_physical_workers(
 
     async def run():
         entered, exited, release, timed_out, allow_join = (threading.Event() for _ in range(5))
+        decision_sent = asyncio.Event()
+        timeout_sources = []
         allow_child = threading.Event()
         join_started = threading.Event()
         records = route_executors(monkeypatch, allow_join, join_started)
         original_step = WorkflowOrchestrator._execute_step
-        def observe_timeout(self, *args, **kwargs):
-            result = original_step(self, *args, **kwargs)
+        def observe_timeout(self, tool_view, input_data, step, **kwargs):
+            assert tool_view.adapter is adapter
+            assert (step.timeout_seconds > adapter.spec.timeout_seconds) is adapter_first
+            result = original_step(self, tool_view, input_data, step, **kwargs)
             if result.error and result.error.code == AgentErrorCode.TOOL_TIMEOUT:
+                details = result.error.details or {}
+                if details.get("step") == step.name and details.get("timeout_seconds") == step.timeout_seconds:
+                    timeout_sources.append("workflow")
+                elif result.quality.get("deadline_exceeded") and result.quality.get("invocation_may_still_be_running"):
+                    timeout_sources.append("adapter")
                 timed_out.set()
             return result
         monkeypatch.setattr(WorkflowOrchestrator, '_execute_step', observe_timeout)
         if not adapter_first:
-            # Real loop, with only its existing run deadline shortened. No run,
-            # Session, admission, result or executor future is substituted.
+            # Include a real Pi cold start. The scripted provider below consumes
+            # the surplus budget so the actual workflow deadline still wins.
             monkeypatch.setattr(decision_runtime, 'PiAgentRuntime',
-                                partial(decision_runtime.PiAgentRuntime, timeout_seconds=2))
+                                partial(decision_runtime.PiAgentRuntime, timeout_seconds=15))
         async def respond(payload):
+            decision_sent.set()
             return tool().model_dump()
         async with actual_app(mode='decision_a2', respond=respond) as b:
+            if not adapter_first:
+                decide = b.model.decide
+                async def decide_near_deadline(messages, *, timeout_seconds, **kwargs):
+                    clock = asyncio.get_running_loop().time
+                    deadline = clock() + timeout_seconds
+                    await asyncio.sleep(max(0, timeout_seconds - 1.5))
+                    return await decide(messages, timeout_seconds=deadline - clock(), **kwargs)
+                monkeypatch.setattr(b.model, 'decide', decide_near_deadline)
             runtime, gate = b.app.decision_runtime, b.app.model_request_gate
             adapter = runtime.registry.resolve('property_calculator')
             monkeypatch.setattr(adapter, 'spec', replace(adapter.spec, timeout_seconds=0.03 if adapter_first else 4))
@@ -1334,6 +1352,7 @@ def test_actual_route_nested_timeout_retains_physical_workers(
                 await socket.send({'message': '计算性质；SMILES: CCO'})
                 accepted = await socket.receive()
                 assert accepted['type'] == 'request_accepted'
+                await asyncio.wait_for(decision_sent.wait(), 16)
                 if delayed_child:
                     await signalled(timed_out)
                     assert len(records) == 1 and gate._readers == 1
@@ -1344,6 +1363,7 @@ def test_actual_route_nested_timeout_retains_physical_workers(
                         'status': result['status'], 'reason': result['metadata'].get('stop_reason'),
                         'calls': len(b.calls), 'executors': len(records)}))
                 await signalled(timed_out)
+                assert timeout_sources == ["adapter" if adapter_first else "workflow"]
                 turn, = runtime.active_owners
                 assert turn.worker_owner.pending_roots == 1
                 epoch = b.app.model_generation

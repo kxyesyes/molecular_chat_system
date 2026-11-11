@@ -19,6 +19,7 @@
 
 ## 领域与运行手册
 
+- 运行专项验收可查阅 [B1 科学对话矩阵](runbooks/b1_acceptance.md)、[C4a 对接资源保留与清理](runbooks/c4a_retention_acceptance.md) 和 [G3 本地生成验收](runbooks/g3_generation_canary.md)。
 - Agent：[架构与维护入口](AGENT_MAINTENANCE.md)、[工具契约](AGENT_TOOL_CONTRACTS.md)。
 - Pi：[安装、配置、checkpoint 迁移与回滚](PI_RUNTIME.md)。当前网页通用运行时为 Pi；云端/本地真实端到端验收仍为 PENDING（待验收）。
 - 科学工具：[对接工具安装](../deployment/docking_tools.md)、[靶点数据库](target_search_local_db.md)、[反向寻靶](../src/reverse_target/README.md)、[ADMET-AI](admet_ai_140.md)。
