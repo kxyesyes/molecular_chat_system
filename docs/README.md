@@ -32,6 +32,7 @@
 
 - [交接汇总](handoff/latest.md)：按日期、commit 和 PR 确认适用范围；其中旧记录不是当前状态保证。
 - [专项交接](handoff/)：改动范围、审查和验证证据。
+- [B1 科学对话与 C4a 对接资源的历史设计记录](handoff/2026-11-11-b1-c4a-design-history.md)列出两个开发分支的原始设计、验证意图及现行测试入口。
 - [设计](superpowers/specs/)、[执行计划](superpowers/plans/)、[验收记录](superpowers/validation/)与[测试报告](reports/)：保留当时的条件、失败和限制。
 - [早期问题清单](issues_and_improvement_plan.md)、[Agent 化实施记录](agentization_phase2_phase3_implementation.md)：仅用于历史背景，当前代码入口优先查维护文档。
 

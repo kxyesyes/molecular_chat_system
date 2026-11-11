@@ -17,6 +17,7 @@ window.HomeTaskStatus = (() => {
     not_calculated: "尚未计算",
   });
   const labels = Object.freeze({
+    pending_source_check: "等待结果验证",
     planning_started: "任务规划",
     planning_completed: "规划完成",
     task_started: "任务开始",
@@ -39,6 +40,8 @@ window.HomeTaskStatus = (() => {
   });
 
   function displayEventType(type, payload) {
+    if (terminalEvents.has(type) && payload?.publication_stage === "pending_source_check" &&
+        payload.answer_released === false) return "pending_source_check";
     // Presentation-only variants: the transport still emits tool_completed.
     // main.js selects styling using eventType, without access to the payload.
     if (type === "tool_completed" && payload) {
@@ -78,7 +81,8 @@ window.HomeTaskStatus = (() => {
     const outcome = outcomeLabel(event && event.payload);
     return {
       eventType,
-      progressText: eventType === "tool_partial" ? "部分完成"
+      progressText: eventType === "pending_source_check" ? labels.pending_source_check
+        : eventType === "tool_partial" ? "部分完成"
         : eventType === "tool_not_calculated" ? notCalculatedLabel(event && event.payload)
         : outcome && eventType === "task_failed"
         ? outcome

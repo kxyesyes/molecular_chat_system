@@ -173,6 +173,48 @@ async function run() {
   const lifecycle = (h, event, t = turn, tr = trace, message = event) => h.sockets.at(-1).emit({
     type: "agent_event", turn_id: t, event: {trace_id: tr, event, message},
   });
+  for (const [event, status, label] of [
+    ["task_completed", "failed", "失败"], ["task_failed", "completed", "已完成"],
+    ["task_rejected", "waiting_for_input", "等待补充输入"], ["task_cancelled", "partial", "部分完成"],
+  ]) await test(`source check stays pending until its own ${status} result`, () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    lifecycle(h, "task_started");
+    h.socket.emit({type: "agent_event", turn_id: turn, event: {event, trace_id: trace,
+      message: "Decision terminal attempt pending verification",
+      payload: {publication_stage: "pending_source_check", answer_released: false}}});
+    const panel = h.chat.querySelector(".agent-task-panel");
+    const progress = panel.querySelector(".agent-task-progress");
+    const latest = () => panel.querySelector(".agent-task-list").lastChild;
+    assert.equal(progress.textContent, "等待结果验证");
+    assert.equal(latest().querySelector("strong").textContent, "等待结果验证");
+    h.socket.emit(result(status, turn, "5".repeat(32)));
+    assert.equal(progress.textContent, "等待结果验证");
+    h.socket.emit(result(status));
+    assert.equal(progress.textContent, label);
+    assert.equal(latest().querySelector("strong").textContent, label);
+    h.socket.emit(complete(status));
+    assert.equal(progress.textContent, label);
+  });
+  for (const confirmed of [false, true]) await test(`disconnect after source check (result received: ${confirmed})`, () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    lifecycle(h, "task_completed");
+    h.socket.emit(result("completed")); h.socket.emit(complete("completed"));
+    const history = h.chat.querySelector(".agent-task-panel"), before = history.textContent;
+    const t2 = "4".repeat(32), tr2 = "5".repeat(32);
+    start(h, t2, tr2);
+    h.socket.emit({type: "agent_event", turn_id: t2, event: {event: "task_completed", trace_id: tr2,
+      payload: {publication_stage: "pending_source_check", answer_released: false}}});
+    const panel = h.chat.querySelectorAll(".agent-task-panel")[1];
+    assert.equal(panel.querySelector(".agent-task-progress").textContent, "等待结果验证");
+    h.socket.emit(result("completed", t2, confirmed ? tr2 : trace));
+    h.socket.close();
+    const expected = confirmed ? "已完成" : "连接已断开，结果未确认";
+    const item = panel.querySelector(".agent-task-list").lastChild;
+    assert.equal(panel.querySelector(".agent-task-progress").textContent, expected);
+    assert.equal(item.querySelector("strong").textContent, expected);
+    assert(item.classList.contains(confirmed ? "is-complete" : "is-warning"));
+    assert.equal(history.textContent, before);
+  });
   for (const status of ["completed", "cancelled"]) await test(`${status} task history belongs to its request after the next request`, () => {
     const h = loadHome(); h.ready("pi"); start(h);
     lifecycle(h, "task_started"); lifecycle(h, status === "completed" ? "task_completed" : "task_cancelled");
@@ -845,7 +887,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261104-multiline-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261111-source-check-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");

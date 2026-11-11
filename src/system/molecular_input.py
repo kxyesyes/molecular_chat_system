@@ -12,6 +12,8 @@ import logging
 import re
 import sys
 
+from .molecular_input_parser import parse_molecular_inputs
+
 try:
     from rdkit import Chem
     RDKIT_AVAILABLE = True
@@ -43,6 +45,17 @@ class BaseMolecularTool:
         }
 
     def extract_smiles(self, text: str) -> List[str]:
+        value = text.strip()
+        if value and (len(value.splitlines()) > 1 or not re.search(r"\s", value)):
+            # Use the whole-input parser for standalone structures and workflow rows.
+            if not _rdkit_available():
+                return []
+            try:
+                parsed = parse_molecular_inputs(text, self)
+            except ValueError:
+                return []
+            return list(dict.fromkeys(item.canonical_smiles for item in parsed))
+
         candidates: list[str] = []
         complex_smiles_pattern = r"[A-Za-z][A-Za-z0-9@+\-\[\]\(\)=#\.\\/:]{5,}"
         for match in re.findall(complex_smiles_pattern, text):

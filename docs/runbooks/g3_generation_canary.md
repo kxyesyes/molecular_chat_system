@@ -28,7 +28,7 @@ The parent uses its current Python interpreter, a private temporary working dire
 
 The report records digests for seven checked-out source files and the parent compares them to the same checkout. These are reproducibility details. The historical `G3Bootstrap` manifest pinned a particular Windows/Python installation, DLL identities, import inventory and load paths. This portable command does not reproduce that host qualification, attest native-code isolation, or verify Ollama's downstream state. The separate metadata probe remains available in `scripts/g3_ollama_metadata.py`.
 
-The historical cold-readiness run stopped at `system_membership/unmatched` before scientific imports, client construction or any generation POST. An unlisted `python3.DLL` was considered as a possible cause and remained unconfirmed. The historical live smoke was a separate run and cannot establish that cold-readiness gate passed.
+The historical cold-readiness run stopped at `system_membership/unmatched` before scientific imports, client construction or any generation POST. An unlisted `python3.DLL` was considered as a possible cause and remained unconfirmed. In a separate live smoke on 2026-09-30, one adapter invocation requested ten candidates from the local `gmm-llama:latest` model. The saved report recorded ten valid, unique candidates and completed local cleanup in a run lasting 29.125 seconds. Host qualification remained unverified.
 
 Run the focused offline regressions with the active interpreter.
 
