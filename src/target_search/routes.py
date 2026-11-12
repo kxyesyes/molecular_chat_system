@@ -20,7 +20,7 @@ def setup_target_search_routes(app: FastAPI) -> None:
     service = TargetSearchService()
 
     @app.get("/api/target-db/stats")
-    async def get_database_stats():
+    def get_database_stats():
         try:
             return service.get_database_stats()
         except Exception as exc:
@@ -28,7 +28,7 @@ def setup_target_search_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/target-db/health")
-    async def get_database_health():
+    def get_database_health():
         try:
             return service.get_database_health()
         except Exception as exc:
@@ -36,7 +36,7 @@ def setup_target_search_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/target-db/validation")
-    async def validate_database(
+    def validate_database(
         expected_pde: str | None = Query(None),
         require_cache: bool = Query(False),
     ):
@@ -51,7 +51,7 @@ def setup_target_search_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/target-db/pde-overview")
-    async def get_pde_overview(top_structures_per_target: int = Query(3, ge=0, le=10)):
+    def get_pde_overview(top_structures_per_target: int = Query(3, ge=0, le=10)):
         try:
             return service.get_pde_overview(top_structures_per_target=top_structures_per_target)
         except Exception as exc:
@@ -89,7 +89,7 @@ def setup_target_search_routes(app: FastAPI) -> None:
     app.router.add_event_handler("shutdown", close_target_search_service)
 
     @app.get("/api/target-db/targets/{target_id}")
-    async def get_target_detail(target_id: int):
+    def get_target_detail(target_id: int):
         try:
             return service.get_target_detail(target_id)
         except ValueError as exc:
@@ -99,7 +99,7 @@ def setup_target_search_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/target-db/targets/{target_id}/structures")
-    async def get_target_structures(target_id: int):
+    def get_target_structures(target_id: int):
         try:
             return service.get_target_structures(target_id)
         except ValueError as exc:
@@ -109,7 +109,7 @@ def setup_target_search_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=500, detail=str(exc))
 
     @app.get("/api/target-db/structures/{structure_db_id}/preflight")
-    async def preflight_structure(structure_db_id: int, format: str = Query("cif")):
+    def preflight_structure(structure_db_id: int, format: str = Query("cif")):
         try:
             return service.preflight_structure(structure_db_id, requested_format=format)
         except ValueError as exc:

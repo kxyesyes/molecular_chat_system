@@ -18,9 +18,12 @@
 
 - TaskStore、Agent 状态、靶点数据库、浏览器会话、分子设计和 docking 历史/产物路径统一经过私有权限 helper；POSIX 使用目录 `0700`、文件 `0600`，Windows 使用当前用户、SYSTEM 和本机管理员的受保护 SID ACL，并在写入后复核。
 - 分子设计保存结果按浏览器 session 的不可逆 SHA-256 目录隔离，目录为 `0700`、CSV 为 `0600`；没有匿名读取或导出入口。
-- 用户主动保存的设计历史不自动删除，直到提供显式删除或管理员按批准流程清理。当前仓库没有公开的历史删除 API，因此不能宣称已实现用户自助删除。
-- TaskStore 终态记录现在可通过 `src.task_runtime.retention.purge_terminal_tasks` 执行显式留存清理。函数默认只预览；只有部署侧明确传入 `apply=True`、提供批准的保留天数和受控 artifact 根目录时才删除。活动任务、近期任务、活动/未结算 docking consent、损坏元数据和越界/链接 artifact 均跳过并返回原因。该函数不会由本地开发服务器隐式启动；生产部署仍必须把预览、备份确认、执行和删除审计纳入批准的外部作业。
-- 运维入口为 `python scripts/retention_cleanup.py --db <tasks.sqlite> --artifact-root <private-root> --days 90`；确认备份和删除审计后才可追加 `--apply`。
+- 用户主动保存的分子设计历史由管理员按批准流程清理。当前分子设计历史未提供用户自助删除 API。
+- 部署运维负责通过 `scripts/retention_cleanup.py` 清理超过批准留存期的终态任务，默认阈值为 90 天。先预览、核对数据库与文件备份，再加 `--apply` 执行，并保存返回的任务 ID 与跳过原因。活动任务和近期任务保留。凡有持久化 docking consent 记录的任务一律保留，包括已撤销、过期和已结算任务。
+- 对有暂存清单的旧 docking 任务，预览命令为 `python scripts/retention_cleanup.py --db <tasks.sqlite> --staging-root <task-staging-root> --days 90`。根目录应取自该数据库对应部署的 `MEDCHAT_TASK_STAGING_ROOT`，默认目录为 `scratch/task_inputs`。清理器只接受此根目录下与记录 task ID 完全匹配的绝对 `<task-id>/input_manifest.json`。它检查归属标记、清单、输入哈希、目录树中的链接以及记录中声明的姿态和附加产物。执行时在 TaskStore 写事务中排除 consent，再由暂存服务持有任务执行租约，隔离并删除整个任务目录，最后删除任务及事件。租约占用时可在任务释放后重跑。
+- 清理器按任务提交数据库事务。任务目录隔离或删除后、数据库提交前发生中断时，此任务的记录与磁盘可能不一致，已提交任务的删除仍然有效。运维需核对该任务 ID 的行、事件、暂存区 `.trash` 残留及备份，按批准清单逐项恢复或完成清理。根目录缺失、历史路径含义不明或文件损坏时保留记录，依据跳过原因核实旧部署和备份。
+- 对有历史索引的旧 docking 作业，所有者会话可通过 `DELETE /api/docking/history/{job_id}` 删除一项，通过 `DELETE /api/docking/history` 清理该会话可删除的已索引作业。接口在删除前复核会话归属并排除 consent 作业。对于索引无法匹配的原始 `temp_docking` 输出、旧全局历史和孤立文件，部署运维逐项与任务记录、历史索引和备份核对。归属待确认项继续保留。确认归属和留存期限且备份可恢复后，按批准的删除清单人工处理，禁止按整个目录自动清空。consent 私有输出仍随 consent 生命周期管理。沙箱 broker 自己管理 job 目录，见[部署留存说明](../deployment/opensandbox/README.md#broker-job-retention)。
+- 普通相对产物的预览入口仍为 `python scripts/retention_cleanup.py --db <tasks.sqlite> --artifact-root <private-artifact-root> --days 90`。同一次调用可以同时指定两个根目录，两者须互不包含。`--artifact-root` 仅指本作业专用的普通产物目录。对接产物 `artifacts/docking_pose.pdbqt` 和附加文件相对于各自任务目录解释。
 
 ## 日志与备份
 

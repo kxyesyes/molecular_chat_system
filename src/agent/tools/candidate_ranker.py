@@ -63,6 +63,7 @@ class CandidateRanker:
         ignored_admet_count = 0
         ignored_activity_count = 0
         missing_required_count = 0
+        scored_activity_scope = None
 
         for canonical_smiles, candidate in candidates.items():
             property_record = properties.get(canonical_smiles)
@@ -81,7 +82,13 @@ class CandidateRanker:
             admet_score = self._admet_score(admet.get(canonical_smiles))
             activity_record = activity.get(canonical_smiles)
             activity_reason = self._activity_exclusion_reason(activity_record)
-            activity_score = self._activity_score(activity_record)
+            activity_score = None
+            if activity_reason is None:
+                scope = self._activity_scope(activity_record)
+                if scored_activity_scope is not None and scope != scored_activity_scope:
+                    return self._error("activity_scope_mismatch", "Activity evidence mixes targets, endpoints, or units")
+                scored_activity_scope = scope
+                activity_score = self._validated_activity_score(activity_record)
             missing_evidence: list[str] = []
             if admet_score is None:
                 missing_evidence.append("admet")
@@ -399,11 +406,7 @@ class CandidateRanker:
         return 1.0 - min(risk_count / max(total_endpoints, 1), 1.0)
 
     @staticmethod
-    def _activity_score(record: Mapping[str, Any] | None) -> float | None:
-        if not isinstance(record, Mapping) or record.get("success") is not True:
-            return None
-        if CandidateRanker._activity_exclusion_reason(record) is not None:
-            return None
+    def _validated_activity_score(record: Mapping[str, Any]) -> float:
         value = record.get("normalized_activity")
         if value is None:
             value = record.get("probability")
@@ -511,8 +514,6 @@ class CandidateRanker:
                 continue
             actual_family, actual_endpoint, actual_units = cls._activity_scope(record)
             observed_scopes.add((actual_family, actual_endpoint, actual_units))
-            if not any(value is not None for value in (expected_target, expected_endpoint, expected_units)):
-                continue
             if expected_target is not None:
                 if expected_family is None or actual_family is None or expected_family != actual_family:
                     raise _RankingInputError(

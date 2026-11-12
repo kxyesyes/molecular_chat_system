@@ -1,6 +1,10 @@
 from datetime import datetime, timezone
 from contextlib import contextmanager
 import sqlite3
+import os
+from pathlib import Path
+import stat
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +13,8 @@ from src.task_runtime.models import TaskStatus
 from src.task_runtime.database import connection
 from src.task_runtime.retention import purge_terminal_tasks
 from src.task_runtime.store import TaskStore
+from src.task_runtime.staging import DockingInputStager
+from tests.task_runtime.test_staging import _stage_file
 from tests.task_runtime.test_docking_consent import identity, policy
 
 
@@ -89,6 +95,30 @@ def test_retention_skips_recent_active_and_unsafe_artifacts(tmp_path):
     assert store.get("unsafe").task_id == "unsafe"
     assert store.get("recent").task_id == "recent"
     assert store.get("active").status is TaskStatus.RUNNING
+
+
+def test_generic_artifact_paths_require_unanchored_strict_descendants(tmp_path):
+    drive = tmp_path.drive or "C:"
+    for candidate in (".", "./", drive, drive + "relative.txt",
+                      r"\rooted.txt", "/rooted.txt", r"\\server\share"):
+        assert retention._safe_artifact_path(tmp_path, candidate) is None
+    assert retention._safe_artifact_path(tmp_path, "results/pose.txt") == tmp_path / "results/pose.txt"
+
+
+def test_generic_artifact_classification_rejects_reparse_directory(tmp_path, monkeypatch):
+    directory = tmp_path / "results"
+    directory.mkdir()
+    lstat = Path.lstat
+
+    def metadata(path):
+        status = lstat(path)
+        if path == directory:
+            return SimpleNamespace(st_mode=status.st_mode,
+                                   st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        return status
+
+    monkeypatch.setattr(Path, "lstat", metadata)
+    assert retention._safe_artifact_path(tmp_path, "results/pose.txt") is None
 
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -198,6 +228,114 @@ def test_retention_still_purges_non_members_even_with_c_prefix(tmp_path, status,
     assert result.skipped_task_ids == ()
     assert not any(_evidence(store, "c-task-legacy").values())
     assert not path.exists()
+
+
+def _staged_terminal(tmp_path, task_id="old", *, consent=False):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    if consent:
+        _reserve_consent(store, task_id)
+    root = tmp_path / "stage"
+    stager = DockingInputStager(root)
+    manifest = _stage_file(stager, task_id)
+    _old_terminal(store, task_id, artifacts=[{"path": "artifacts/docking_pose.pdbqt"}])
+    with connection(store.db_path) as conn:
+        conn.execute("UPDATE tasks SET input_manifest_path=? WHERE task_id=?",
+                     (str(manifest), task_id))
+    artifacts = manifest.parent / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "docking_pose.pdbqt").write_bytes(b"synthetic pose")
+    return store, stager, manifest
+
+
+def test_staged_terminal_preview_apply_and_retry(tmp_path):
+    store, stager, manifest = _staged_terminal(tmp_path)
+    sibling = _stage_file(stager, "active")
+    store.create("active", "docking", {}, input_manifest_path=str(sibling))
+    root = manifest.parent.parent
+    result = purge_terminal_tasks(store.db_path, staging_root=root, now=NOW)
+    assert result.eligible_task_ids == ("old",) and manifest.is_file()
+    with stager.task_execution_lease("old"):
+        busy = purge_terminal_tasks(store.db_path, staging_root=root, now=NOW, apply=True)
+    assert busy.skip_reasons == {"old": "manifest_busy"}
+    assert store.get("old").input_manifest_path == str(manifest) and manifest.is_file()
+    result = purge_terminal_tasks(store.db_path, staging_root=root, now=NOW, apply=True)
+    assert result.deleted_task_ids == ("old",)
+    assert not manifest.parent.exists() and not any(_evidence(store, "old").values())
+    assert sibling.is_file() and store.get("active").input_manifest_path == str(sibling)
+    assert purge_terminal_tasks(store.db_path, staging_root=root, now=NOW, apply=True).deleted_task_ids == ()
+
+
+def test_later_database_failure_keeps_prior_stage_and_record_deletion_committed(tmp_path):
+    store, _, first = _staged_terminal(tmp_path, "first")
+    _, _, last = _staged_terminal(tmp_path, "last")
+    with connection(store.db_path) as conn:
+        conn.execute("""
+            CREATE TRIGGER fail_last BEFORE DELETE ON tasks WHEN OLD.task_id='last'
+            BEGIN SELECT RAISE(ABORT, 'simulated interruption'); END
+        """)
+    with pytest.raises(sqlite3.IntegrityError, match="simulated interruption"):
+        purge_terminal_tasks(store.db_path, staging_root=first.parent.parent, now=NOW, apply=True)
+    assert not first.parent.exists() and not _evidence(store, "first")["tasks"]
+    assert not _evidence(store, "first")["task_events"]
+    assert not last.parent.exists() and _evidence(store, "last")["tasks"]
+    assert _evidence(store, "last")["task_events"]
+
+
+@pytest.mark.parametrize("changed_column", ["status='running'", "finished_at='2026-01-01T00:00:00Z'"])
+def test_apply_rechecks_task_age_and_status_after_listing(tmp_path, changed_column):
+    store, _, first = _staged_terminal(tmp_path, "first")
+    _, _, last = _staged_terminal(tmp_path, "last")
+    with connection(store.db_path) as conn:
+        conn.execute(f"""
+            CREATE TRIGGER update_last AFTER DELETE ON tasks WHEN OLD.task_id='first'
+            BEGIN UPDATE tasks SET {changed_column} WHERE task_id='last'; END
+        """)
+    result = purge_terminal_tasks(store.db_path, staging_root=first.parent.parent, now=NOW, apply=True)
+    assert result.deleted_task_ids == ("first",) and last.is_file()
+    assert _evidence(store, "last")["tasks"]
+
+
+@pytest.mark.parametrize("case", ["unconfigured", "wrong_root", "sibling", "relative_manifest",
+                                  "missing_marker", "outside_artifact", "damaged_input", "linked_output",
+                                  "consent", "missing_manifest", "missing_artifact"])
+def test_staged_terminal_retains_ambiguous_or_protected_tasks(tmp_path, case):
+    store, stager, manifest = _staged_terminal(tmp_path, consent=case == "consent")
+    root = manifest.parent.parent
+    outside = tmp_path / "protected.txt"
+    outside.write_bytes(b"keep")
+    if case == "unconfigured":
+        root = None
+    elif case == "wrong_root":
+        root = tmp_path / "unrelated"
+        root.mkdir()
+    elif case in {"sibling", "relative_manifest", "missing_manifest"}:
+        sibling = _stage_file(stager, "other")
+        value = {"sibling": str(sibling), "relative_manifest": "old/input_manifest.json",
+                 "missing_manifest": None}[case]
+        with connection(store.db_path) as conn:
+            conn.execute("UPDATE tasks SET input_manifest_path=?", (value,))
+    elif case == "missing_marker":
+        (manifest.parent / ".medchat-staging-owner").unlink()
+    elif case == "outside_artifact":
+        with connection(store.db_path) as conn:
+            conn.execute("UPDATE tasks SET artifacts_json=?", ('[{"path":"../protected.txt"}]',))
+    elif case == "damaged_input":
+        (manifest.parent / "inputs" / "receptor.pdb").write_bytes(b"changed")
+    elif case == "linked_output":
+        os.link(outside, manifest.parent / "artifacts" / "alias.txt")
+    elif case == "missing_artifact":
+        (manifest.parent / "artifacts" / "docking_pose.pdbqt").unlink()
+    before = _evidence(store, "old")
+    generic_root = tmp_path / "generic"
+    generic_root.mkdir()
+    for apply in (False, True):
+        result = purge_terminal_tasks(store.db_path, staging_root=root, artifact_root=generic_root,
+                                      now=NOW, apply=apply)
+        assert result.skipped_task_ids == ("old",) and result.deleted_task_ids == ()
+        assert _evidence(store, "old") == before and manifest.exists()
+        assert outside.read_bytes() == b"keep"
+        if case == "wrong_root":
+            assert list(root.iterdir()) == []
 
 
 @pytest.mark.parametrize("apply", [False, True])

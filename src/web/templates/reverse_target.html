@@ -25,7 +25,7 @@
             onerror="markReverseTarget3D(false)"></script>
 
     <!-- 独立样式表 -->
-    <link rel="stylesheet" href="/static/css/reverse_target.css?v=20260516a" />
+    <link rel="stylesheet" href="/static/css/reverse_target.css?v=20261111-assay" />
     <link rel="stylesheet" href="/static/css/mobile_baseline.css?v=20260511a" />
     <link rel="stylesheet" href="/static/css/subpage_header.css?v=20260525a" />
   </head>
@@ -100,9 +100,6 @@
                 精准模式
                 <span>Top 20 · 阈值 0.6</span>
               </button>
-              <div class="preset-note">
-                对标 Swiss 的广谱检索时建议使用广谱召回；需要高置信靶点时切换精准模式。
-              </div>
             </div>
 
             <form id="predictForm" novalidate>
@@ -219,10 +216,9 @@
                   <th>靶点名称</th>
                   <th>生物体</th>
                   <th>关联ID</th>
-                  <th>活性类型</th>
-                  <th>活性值 (nM)</th>
-                  <th>相似分子</th>
-                  <th width="200">综合相似度</th>
+                  <th>相似分子活性</th>
+                  <th>证据与评分</th>
+                  <th>操作</th>
                 </tr>
               </thead>
               <tbody id="resultsBody"></tbody>
@@ -333,10 +329,10 @@
     <!-- ═══════════ 模块化 JS（按依赖顺序加载） ═══════════ -->
     <script src="/static/js/shared/safe_render.js?v=20261018-ellipse-sanitizer-v1"></script>
     <script src="/static/js/reverse_target/config.js?v=20260516a"></script>
-    <script src="/static/js/reverse_target/api_client.js?v=20260508a"></script>
-    <script src="/static/js/reverse_target/ui_manager.js?v=20261014-batch-input-state-v1"></script>
-    <script src="/static/js/reverse_target/results_renderer.js?v=20261018-prefilter-details-v1"></script>
+    <script src="/static/js/reverse_target/api_client.js?v=20261111-query-details"></script>
+    <script src="/static/js/reverse_target/ui_manager.js?v=20261111-assay"></script>
+    <script src="/static/js/reverse_target/results_renderer.js?v=20261111-target-links"></script>
     <script src="/static/js/reverse_target/viewer_3d.js?v=20261007-safe-dom-v3"></script>
-  <script src="/static/js/reverse_target/main.js?v=20261015-numeric-validation-v3"></script>
+  <script src="/static/js/reverse_target/main.js?v=20261111-query-details"></script>
   </body>
 </html>

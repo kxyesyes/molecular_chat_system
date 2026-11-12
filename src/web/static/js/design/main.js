@@ -218,10 +218,7 @@
     var reader = new FileReader();
     reader.onload = function () {
       if (mutationToken !== S.mutationSeq) return;
-      var text = String(reader.result || "").trim();
-      var lines = text.split(/\r?\n/).map(function (line) { return line.trim(); }).filter(Boolean);
-      var smiles = lines[0] || "";
-      if (lines.length > 1 && /^\s*(name\s*,\s*)?smiles\s*$/i.test(lines[0])) smiles = lines[1].split(",").pop().trim();
+      var smiles = window.MedChatSmilesFile.extractUploadedSmiles(file.name, reader.result);
       if (!smiles) { UI.toast("文件中没有找到 SMILES", "error"); return; }
       Editor.restoreCandidate(smiles, "已导入分子，属性已更新。").then(function (success) {
         if (success) UI.toast("已导入分子", "success");

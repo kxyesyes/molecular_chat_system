@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 from rdkit import rdBase
 
+from src.reverse_target.receipt import UNIT_VERIFICATION_REQUIRED
+
 from src.system.scientific_diagnostics import (
     REVERSE_PROOF_DIAGNOSTICS as _PROOF_DIAGNOSTICS,
     sanitize_reverse_target_diagnostics,
@@ -564,7 +566,7 @@ def validate_envelope(envelope, *, smiles, controls, expected):
         indices, targets, total, previous = set(), set(), 0, math.inf
         strings = "target_name organism canonical_smiles molecule_chembl_id standard_type chembl_search_url uniprot_search_url".split()
         required_record_keys = set(strings + "standard_value morgan_similarity maccs_similarity final_similarity row_index similar_count score_semantics similarity_metric evidence provenance".split())
-        optional_record_keys = set("target_chembl_id target_uniprot_id taxon_id assay_id document_chembl_id publication_id standard_relation standard_units assay_confidence_score data_validity_comment".split())
+        optional_record_keys = set("target_chembl_id target_uniprot_id taxon_id assay_id assay_chembl_id document_chembl_id publication_id standard_relation standard_units measurement_status assay_confidence_score data_validity_comment".split())
         for record in records:
             if type(record) is not dict:
                 raise ReverseProofError("record_type", "records")
@@ -573,9 +575,14 @@ def validate_envelope(envelope, *, smiles, controls, expected):
                 raise ReverseProofError("record_schema", "records")
             for key in strings:
                 v = record[key]
-                if type(v) is not str or len(v) > 8192 or (key != "organism" and not v.strip()):
+                may_be_empty = key in ("organism", "chembl_search_url", "uniprot_search_url")
+                if type(v) is not str or len(v) > 8192 or (not may_be_empty and not v.strip()):
                     raise ReverseProofError("record_field", key)
-            if not _number(record["standard_value"], 0):
+            if "measurement_status" in record:
+                if (record["measurement_status"] != UNIT_VERIFICATION_REQUIRED or record["standard_value"] is not None
+                        or "standard_units" in record or "standard_relation" in record):
+                    raise ReverseProofError("record_field", "standard_value")
+            elif not _number(record["standard_value"], 0):
                 raise ReverseProofError("record_field", "standard_value")
             if record.get("score_semantics") != "2d_structure_similarity_rank_only":
                 raise ReverseProofError("record_field", "score_semantics")
@@ -584,7 +591,9 @@ def validate_envelope(envelope, *, smiles, controls, expected):
             evidence = record.get("evidence")
             provenance = record.get("provenance")
             if (not isinstance(evidence, dict) or evidence.get("type") != "similarity_neighbor"
-                    or evidence.get("source") != "ChEMBL"):
+                    or evidence.get("source") != "ChEMBL"
+                    or (evidence.get("quality_eligible") is not None and type(evidence["quality_eligible"]) is not bool)
+                    or ("measurement_status" in record and ("standard_units" in evidence or "standard_relation" in evidence))):
                 raise ReverseProofError("provenance", "evidence")
             if (not isinstance(provenance, dict)
                     or not isinstance(provenance.get("data_version"), str)

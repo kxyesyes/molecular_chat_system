@@ -10,7 +10,7 @@
     "src/task_runtime/docking_consent.py": "8d678cde3a2e37ec43f33d0ab87957c5a72566f09f41e075d3cf972a5d2be466",
     "src/task_runtime/docking_execution.py": "b07407bc1fc9ae28c6f48486201a8d9bdfccc07054a052408f0d48e171912d72",
     "src/task_runtime/runtime.py": "eead423c6577bdd2637f344c602ce28c2bc792745d44c920c724aa20acceef0f",
-    "src/task_runtime/staging.py": "af317ebf04e22203d6ba1f834722b74af7299ab9c07263de6fa6cb5b00ba2e87",
+    "src/task_runtime/staging.py": "e399d9323e5d54db61ffdc10e7721a242f634436debd663199259145887005a1",
     "src/task_runtime/store.py": "f277d3641ec7a5b48e8a3a835fd6e08ea9168a79e307544de30ce884830a3a3a",
     "tests/conftest.py": "7ad6ea397452666e2a99f9485d2a2e0506bbb1d55744349cd9ae4130311dbde3",
     "tests/task_runtime/_c4a_native.py": "90c9bacfd392fe9dfd4e42143ceccd1cfd6a82668f5f1a52d1fe9502b085a749",

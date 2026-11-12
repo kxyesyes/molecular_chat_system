@@ -30,13 +30,13 @@ def configure_console_output() -> None:
                 pass
 
 
-def get_reverse_target_data_dir() -> Path:
+def get_reverse_target_data_dir(project_root: Path | None = None) -> Path:
     """Return the configured local reverse-target data directory."""
     path = Path(
         os.environ.get("REVERSE_TARGET_DATA_DIR", "data/reverse_target")
     ).expanduser()
     if not path.is_absolute():
-        path = PROJECT_ROOT / path
+        path = (project_root or PROJECT_ROOT) / path
     return path
 
 

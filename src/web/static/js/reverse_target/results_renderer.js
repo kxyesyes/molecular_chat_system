@@ -147,8 +147,8 @@ const RtResults = (() => {
       : Number(result.final_similarity || 0);
     const percent = Math.max(0, Math.min(100, finalScore * 100));
     const scoreLabel = isRefined3D
-      ? "3D 综合"
-      : (is3DMode && result.pharm_refinement_status !== "refined" ? "2D fallback" : "综合");
+      ? "3D 综合相似度"
+      : (is3DMode && result.pharm_refinement_status !== "refined" ? "2D fallback" : "2D 结构相似度");
     const details = [];
     if (isRefined3D && result.pharm_similarity != null) {
       details.push(`药效团 ${Math.round(Number(result.pharm_similarity) * 100)}%`);
@@ -179,16 +179,13 @@ const RtResults = (() => {
       </div>`;
   }
 
-  function _confidenceMeta(result, is3DMode) {
-    const isRefined3D = is3DMode && result.pharm_refinement_status === "refined"
-      && result.final_3d_score != null;
-    if (is3DMode && !isRefined3D) return { label: "2D参考", cls: "low" };
-    const score = isRefined3D
-      ? Number(result.final_3d_score)
-      : Number(result.final_similarity || 0);
-    if (score >= 0.85) return { label: "高可信", cls: "high" };
-    if (score >= 0.65) return { label: "中可信", cls: "medium" };
-    return { label: "参考", cls: "low" };
+  function _activityValue(result) {
+    if (result.measurement_status === "unit_verification_required") return "单位待核验";
+    const raw = result.standard_value;
+    const value = typeof raw === "string" && raw.trim() ? Number(raw) : raw;
+    if (!Number.isFinite(value)) return "未提供";
+    return [result.standard_relation, String(value), result.standard_units || "（单位未提供）"]
+      .filter(Boolean).join(" ");
   }
 
   function _similarCount(result) {
@@ -199,7 +196,6 @@ const RtResults = (() => {
   function _evidenceSummary(result, is3DMode) {
     const parts = [];
     parts.push(`相似分子 ${_similarCount(result)} 个`);
-    if (result.standard_type) parts.push(`${result.standard_type} ${Number(result.standard_value || 0).toFixed(1)} nM`);
     if (is3DMode && result.pharm_refinement_status === "refined" && result.final_3d_score != null) {
       parts.push(`3D ${(Number(result.final_3d_score) * 100).toFixed(1)}%`);
       if (result.alignment_rmsd != null) parts.push(`RMSD ${Number(result.alignment_rmsd).toFixed(2)} Å`);
@@ -213,6 +209,26 @@ const RtResults = (() => {
     return `/target-search?query=${encodeURIComponent(targetName || "")}`;
   }
 
+  function _targetLinks(result) {
+    const links = [];
+    function add(url, label) {
+      links.push('<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + label + '</a>');
+    }
+    const chembl = typeof result.chembl_search_url === "string" ? result.chembl_search_url : "";
+    if (/^https:\/\/www\.ebi\.ac\.uk\/chembl\/web_components\/explore\/target\/CHEMBL[1-9][0-9]*$/.test(chembl)) {
+      add(chembl, "ChEMBL 条目");
+    } else if (chembl.startsWith("https://www.ebi.ac.uk/chembl/web_components/search_results/")) {
+      add(chembl, "搜索 ChEMBL");
+    }
+    const uniprot = typeof result.uniprot_search_url === "string" ? result.uniprot_search_url : "";
+    if (/^https:\/\/www\.uniprot\.org\/uniprotkb\/[A-Z0-9]+\/entry$/.test(uniprot)) {
+      add(uniprot, "UniProt 条目");
+    } else if (uniprot.startsWith("https://www.uniprot.org/uniprotkb?query=%22")) {
+      add(uniprot, "搜索 UniProt");
+    }
+    return links.length ? '<details><summary>外部数据库</summary>' + links.join(' · ') + '</details>' : '';
+  }
+
   function _organismTag(result) {
     const organism = result.organism || "-";
     const isHuman = organism.toLowerCase() === "human" || organism.toLowerCase() === "homo sapiens";
@@ -220,17 +236,15 @@ const RtResults = (() => {
   }
 
   function _singleResultRow(result, absoluteIndex, is3DMode) {
-    const confidence = _confidenceMeta(result, is3DMode);
     const targetName = String(result.target_name || "");
     const moleculeId = String(result.molecule_chembl_id || "");
     const standardType = String(result.standard_type || "-");
-    const standardValue = Number(result.standard_value || 0).toFixed(2);
     return `
         <tr class="rt-result-row">
           <td class="rt-rank-cell">#${absoluteIndex + 1}</td>
           <td class="rt-target-cell">
             <div class="rt-target-title" title="${escapeHtml(targetName)}">${escapeHtml(targetName)}</div>
-            <span class="confidence-badge confidence-${confidence.cls}">${confidence.label}</span>
+            ${_targetLinks(result)}
           </td>
           <td>${_organismTag(result)}</td>
           <td class="rt-id-cell">
@@ -241,7 +255,7 @@ const RtResults = (() => {
           </td>
           <td class="rt-activity-cell">
             <span class="tag tag-activity">${escapeHtml(standardType)}</span>
-            <span class="rt-activity-value">${standardValue} nM</span>
+            <span class="rt-activity-value">${escapeHtml(_activityValue(result))}</span>
           </td>
           <td class="rt-evidence-cell">
             <div class="rt-evidence-summary">${_evidenceSummary(result, is3DMode)}</div>
@@ -341,7 +355,7 @@ const RtResults = (() => {
       <th>靶点信息</th>
       <th width="105">生物体</th>
       <th width="140">关联ID</th>
-      <th width="130">活性</th>
+      <th width="130">相似分子活性</th>
       <th width="360">证据与评分</th>
       <th width="128">操作</th>`;
 
@@ -405,7 +419,7 @@ const RtResults = (() => {
   // ──────────────────────────────────────
   //  显示批量预测结果
   // ──────────────────────────────────────
-  function displayBatchResults(resultsData) {
+  function displayBatchResults(resultsData, detailOptions) {
     const results = $("results");
     const resultsBody = $("resultsBody");
     const resultCount = $("resultCount");
@@ -432,7 +446,7 @@ const RtResults = (() => {
       <th>查询SMILES</th>
       <th>预测靶点</th>
       <th>生物体</th>
-      <th>活性类型</th>
+      <th>相似分子活性</th>
       <th>相似度</th>
       <th>操作</th>`;
 
@@ -452,9 +466,10 @@ const RtResults = (() => {
             <tr data-batch-row="${rowKey}">
               <td>#${idx++}</td>
               <td data-batch-smiles style="font-family:monospace;font-size:12px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></td>
-              <td style="font-weight:600;color:#1e293b;">${escapeHtml(targetName)}</td>
+              <td style="font-weight:600;color:#1e293b;">${escapeHtml(targetName)}${_targetLinks(target)}</td>
               <td>${_organismTag(target)}</td>
-              <td><span class="tag tag-activity">${escapeHtml(standardType)}</span></td>
+              <td><span class="tag tag-activity">${escapeHtml(standardType)}</span>
+                <span class="rt-activity-value">${escapeHtml(_activityValue(target))}</span></td>
               <td>
                 <div class="similarity-wrapper">
                   <div class="similarity-bar" style="width:${target.final_similarity * 100}%"></div>
@@ -495,7 +510,7 @@ const RtResults = (() => {
       if (errorCell) errorCell.textContent = binding.errorText || "无匹配靶点";
       const similarButton = row.querySelector("[data-batch-similar]");
       if (similarButton) {
-        similarButton.addEventListener("click", () => onShowSimilar(binding.targetName, binding.querySmiles));
+        similarButton.addEventListener("click", () => showSimilarMolecules(binding.targetName, binding.querySmiles, detailOptions));
       }
     });
     results.classList.add("show");
@@ -523,7 +538,7 @@ const RtResults = (() => {
     return baseThreshold;
   }
 
-  async function showSimilarMolecules(targetName, querySmiles) {
+  async function showSimilarMolecules(targetName, querySmiles, detailOptions) {
     const requestId = ++similarRequestId;
     if (similarAbortController) similarAbortController.abort();
     similarAbortController = new AbortController();
@@ -541,9 +556,10 @@ const RtResults = (() => {
       const data = await RtApi.fetchSimilarMolecules(
         resolvedQuerySmiles,
         targetName,
-        _detailsThreshold(),
+        detailOptions?.threshold ?? _detailsThreshold(),
         50,
         similarAbortController.signal,
+        detailOptions?.organismFilter,
       );
 
       if (requestId !== similarRequestId) return;
@@ -554,10 +570,10 @@ const RtResults = (() => {
         return;
       }
 
-      modalBody.replaceChildren(_buildSimilarModalContent(data.results));
+      modalBody.replaceChildren(_buildSimilarModalContent(data.results, resolvedQuerySmiles));
 
       // 异步加载 MCS
-      _loadMCSSection(resolvedQuerySmiles, data.results[0]?.canonical_smiles);
+      _loadMCSSection(resolvedQuerySmiles, data.results[0]?.canonical_smiles, requestId);
     } catch (error) {
       if (error && error.name === "AbortError") return;
       if (requestId !== similarRequestId) return;
@@ -566,12 +582,13 @@ const RtResults = (() => {
   }
 
   function closeSimilarModal() {
+    ++similarRequestId;
+    similarAbortController?.abort();
     $("similarModal").classList.remove("show");
   }
 
   // ── 构建相似分子弹窗内部 HTML ──
-  function _buildSimilarModalContent(molecules) {
-    const querySmiles = String(window.currentQuerySmiles || "");
+  function _buildSimilarModalContent(molecules, querySmiles) {
     const root = document.createElement("div");
     const cardSkeletons = molecules.map((_, idx) => `
       <div data-molecule-index="${idx}" style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:0;overflow:hidden;transition:all 0.2s;display:flex;flex-direction:column;box-shadow:0 1px 2px rgba(0,0,0,0.05);">
@@ -621,7 +638,6 @@ const RtResults = (() => {
       const molSmiles = String(mol.canonical_smiles || "");
       const molId = String(mol.molecule_chembl_id || "");
       const similarity = Number(mol.final_similarity);
-      const standardValue = Number.isFinite(Number(mol.standard_value)) ? Number(mol.standard_value).toFixed(2) : "未计算";
       card.querySelector('[data-field="rank"]').textContent = `#${idx + 1}`;
       card.querySelector('[data-field="similarity"]').textContent = `${Number.isFinite(similarity) ? (similarity * 100).toFixed(1) : "-"}% 相似`;
       setSameOriginImage(card.querySelector('[data-field="image"]'), RtApi.smilesImageUrl(molSmiles, 360, 300));
@@ -633,7 +649,7 @@ const RtResults = (() => {
         molIdNode.removeAttribute("href");
       }
       card.querySelector('[data-field="standard-type"]').textContent = String(mol.standard_type || "-");
-      card.querySelector('[data-field="standard-value"]').textContent = `${standardValue} nM`;
+      card.querySelector('[data-field="standard-value"]').textContent = _activityValue(mol);
       card.querySelector('[data-field="morgan"]').textContent = `Morgan: ${(Number(mol.morgan_similarity || 0) * 100).toFixed(0)}%`;
       card.querySelector('[data-field="maccs"]').textContent = `MACCS: ${(Number(mol.maccs_similarity || 0) * 100).toFixed(0)}%`;
       const smilesNode = card.querySelector('[data-field="smiles"]');
@@ -644,7 +660,7 @@ const RtResults = (() => {
   }
 
   // ── 异步加载 MCS ──
-  async function _loadMCSSection(querySmiles, topHitSmiles) {
+  async function _loadMCSSection(querySmiles, topHitSmiles, requestId) {
     const mcsEl = $("mcsContent");
     if (!mcsEl) return;
     if (!topHitSmiles) {
@@ -656,6 +672,7 @@ const RtResults = (() => {
         querySmiles,
         topHitSmiles,
       );
+      if (requestId !== similarRequestId) return;
       if (ok && mcsData && mcsData.success) {
         mcsEl.innerHTML = `
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;align-items:start;">
@@ -689,7 +706,7 @@ const RtResults = (() => {
         mcsEl.textContent = `结构解释生成失败：${(mcsData && (mcsData.error || mcsData.detail)) || "MCS 不可用"}`;
       }
     } catch {
-      mcsEl.textContent = "结构解释生成失败";
+      if (requestId === similarRequestId) mcsEl.textContent = "结构解释生成失败";
     }
   }
 

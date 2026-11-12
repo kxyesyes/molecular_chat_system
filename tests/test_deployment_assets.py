@@ -179,6 +179,7 @@ docking:
                 "data/molecular_faiss_index.index",
                 "data/samples/5.sdf",
                 "data/samples/MAGL_5zun.pdb",
+                "data/samples/PDE4A_apo_6FG5.pdb",
                 "deployment/medchat.service",
                 "deployment/nginx-medchat.conf",
             ]:

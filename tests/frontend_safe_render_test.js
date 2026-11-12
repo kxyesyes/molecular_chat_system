@@ -144,7 +144,7 @@ assert(
   "Target search external links must use DOM APIs and the trusted URL policy",
 );
 assert(
-  targetSearchHtml.includes('/static/js/target_search/main.js?v=20261027-cache-state-v4'),
+  targetSearchHtml.includes('/static/js/target_search/main.js?v=20261111-selection'),
   "Target search must invalidate the cached script after safety changes",
 );
 assert(
@@ -200,7 +200,7 @@ assert(
   "3D feature colors must pass the style allowlist",
 );
 assert(
-  reverseResults.includes("modalBody.replaceChildren(_buildSimilarModalContent(data.results))") &&
+  reverseResults.includes("modalBody.replaceChildren(_buildSimilarModalContent(data.results, resolvedQuerySmiles))") &&
     reverseResults.includes("smilesNode.textContent = molSmiles") &&
     !reverseResults.includes("${escapeHtml(molSmiles)}") &&
     !reverseResults.includes("${escapeHtml(RtApi.smilesImageUrl(molSmiles, 360, 300))}"),

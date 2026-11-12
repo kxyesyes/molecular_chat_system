@@ -105,3 +105,13 @@ test("valid batch and 2D forms still submit once", async () => {
   assert.deepEqual(h.calls.requests.map(row => row.mode), ["2d", "batch"]);
   assert.deepEqual(h.calls.validation, ["predictForm", "batchForm"]);
 });
+
+test("batch details retain the submitted threshold and organism independently of single searches", async () => {
+  const h = setup();
+  h.context.lastOrganismFilter = "Human";
+  h.context.RtResults.displayBatchResults = (rows, options) => { h.calls.detailOptions = options; };
+  h.ids.batchForm.fields = [["threshold", "0"]];
+  await h.submit("batchForm");
+  assert.deepEqual({...h.calls.detailOptions}, {threshold: 0, organismFilter: ""});
+  assert.equal(h.context.lastOrganismFilter, "Human");
+});

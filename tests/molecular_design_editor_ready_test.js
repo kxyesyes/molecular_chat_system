@@ -33,9 +33,10 @@ function setup(initialEditor, initialState = {}) {
     setInterval(fn) { intervals.set(++sequence, fn); return sequence; },
     clearInterval(id) { intervals.delete(id); },
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/web/static/js/shared/smiles_file.js"), "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/web/static/js/design/main.js"), "utf8"), context);
   return {
-    state, status, toasts, intervals, timers, listeners,
+    context, state, status, toasts, intervals, timers, listeners,
     get reads() { return reads; },
     setEditor(value) { editor = value; },
     async tick() {
@@ -47,6 +48,21 @@ function setup(initialEditor, initialState = {}) {
 }
 
 function readyEditor() { return { getSmiles() {}, setMolecule() {} }; }
+
+test("file uploads import the SMILES field from a design export or titled SMI record", () => {
+  const { context } = setup(null);
+  const imported = [];
+  context.FileReader = class {
+    readAsText(file) { this.result = file.content; this.onload(); }
+  };
+  context.MoleculeEditor.restoreCandidate = async smiles => { imported.push(smiles); };
+  for (const file of [
+    { name: "history.csv", content: "step,SMILES,mw\n1,CCO,46\n" },
+    { name: "ligand.smi", content: "CCN ethylamine\n" },
+    { name: "group.smi", content: "C[*:1] |$;_R1$| scaffold\n" },
+  ]) context.window.handleUpload({ target: { files: [file] } });
+  assert.deepEqual(imported, ["CCO", "CCN", "C[*:1] |$;_R1$|"]);
+});
 
 test("polling never starts a conversion during an owned editor write", async () => {
   const app = setup(readyEditor(), { editorWriteInFlight: true });

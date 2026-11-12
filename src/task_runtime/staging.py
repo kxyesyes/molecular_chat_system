@@ -20,13 +20,15 @@ import threading
 import time
 import unicodedata
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Iterator, Mapping
+
+from .completion import is_docking_artifact_locator
 
 if os.name == "nt":
     import msvcrt
@@ -425,7 +427,7 @@ class DockingTaskExecution:
 class DockingInputStager:
     """Atomically stage docking inputs below a task-owned directory."""
 
-    def __init__(self, root: str | os.PathLike[str]) -> None:
+    def __init__(self, root: str | os.PathLike[str], *, existing_only: bool = False) -> None:
         try:
             raw_root = Path(root)
         except (TypeError, ValueError):
@@ -437,8 +439,9 @@ class DockingInputStager:
             resolved = raw_root.resolve(strict=False)
             if resolved == Path(resolved.anchor):
                 raise ManifestError("manifest_invalid_root")
-            resolved.mkdir(parents=True, exist_ok=True, mode=0o700)
-            _restrict_directory(resolved)
+            if not existing_only:
+                resolved.mkdir(parents=True, exist_ok=True, mode=0o700)
+                _restrict_directory(resolved)
             _reject_link_components(resolved)
             if not resolved.is_dir():
                 raise ManifestError("manifest_invalid_root")
@@ -449,8 +452,14 @@ class DockingInputStager:
         self._root = resolved
         self._lock = _root_lock(resolved)
         with self._lock:
-            self._ensure_trash()
-            self._ensure_leases()
+            if existing_only:
+                for name in (_TRASH_NAME, _LEASES_NAME):
+                    _reject_link_components(resolved / name)
+                    if not _has_valid_ownership_marker(resolved / name):
+                        raise ManifestError("manifest_invalid_root")
+            else:
+                self._ensure_trash()
+                self._ensure_leases()
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(root=<redacted>)"
@@ -1028,6 +1037,29 @@ class DockingInputStager:
             timeout_seconds=timeout_seconds,
             cancel_check=cancel_check,
         )
+
+    def purge_terminal_stage(
+        self, task_id: str, manifest_path: str, artifact_locators: Iterable[str], *, apply: bool,
+    ) -> None:
+        """Inspect or remove the exact owned tree selected by terminal-task retention.
+
+        The caller holds the TaskStore writer transaction on apply, covering
+        age, terminal status and consent exclusion across physical removal.
+        """
+        expected = self.resolve_manifest_locator(task_id, _MANIFEST_NAME)
+        if Path(manifest_path) != expected:
+            raise ManifestError("manifest_path_invalid")
+        lease = self.task_execution_lease(task_id, lease_timeout_seconds=0) if apply else nullcontext()
+        with lease, self._lock:
+            self._load_verified_unlocked(task_id, expected)
+            task_root = expected.parent
+            if not _has_valid_ownership_marker(task_root) or not _tree_is_owned_without_links(task_root):
+                raise ManifestError("manifest_cleanup_invalid")
+            for locator in artifact_locators:
+                if not is_docking_artifact_locator(locator) or not (task_root / locator).is_file():
+                    raise ManifestError("manifest_path_invalid")
+            if apply and not self._quarantine_active(task_root, task_id):
+                raise ManifestError("manifest_io_error")
 
     def cleanup_expired(
         self,
@@ -2613,6 +2645,8 @@ def _tree_is_owned_without_links(task_root: Path) -> bool:
             for name in (*directories, *files):
                 status = (current_path / name).lstat()
                 if stat.S_ISLNK(status.st_mode) or _stat_is_reparse(status):
+                    return False
+                if stat.S_ISREG(status.st_mode) and status.st_nlink != 1:
                     return False
         return True
     except (ManifestError, OSError, RuntimeError):

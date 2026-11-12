@@ -214,7 +214,9 @@ def build_fallback_reply(
     examples = [frag.get("fragment_smiles") for frag in recommended_fragments[:3] if frag.get("fragment_smiles")]
     if examples:
         lines.append("可优先尝试的片段：" + "，".join(examples))
-    lines.append("建议先做 1 到 2 个片段替换，再结合 LogP、QED、TPSA 的变化继续迭代。")
+        lines.append("建议先做 1 到 2 个片段替换，再结合 LogP、QED、TPSA 的变化继续迭代。")
+    else:
+        lines.append("未找到符合条件的本地片段。")
     return "\n".join(lines)
 
 

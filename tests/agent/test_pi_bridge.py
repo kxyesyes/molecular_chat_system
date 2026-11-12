@@ -3,8 +3,11 @@ import asyncio
 from functools import wraps
 import importlib
 import importlib.util
+import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -100,6 +103,39 @@ def test_oversized_frame_is_rejected():
     module = bridge_module()
     with pytest.raises(module.PiBridgeError, match='pi_frame_too_large'):
         module.decode_frame(b' ' * (module.MAX_FRAME_BYTES + 1))
+
+
+def test_large_coalesced_frames_use_chunked_pipe_reads(monkeypatch):
+    module = bridge_module()
+    run_id = 'a' * 32
+    frames = [
+        {'type': 'ready'},
+        {'type': 'event', 'runId': run_id, 'event': {'detail': 'x' * (128 * 1024)}},
+        {'type': 'result', 'runId': run_id, 'result': {'runtime': 'pi', 'terminated': True}},
+    ]
+    wire = io.BytesIO(b''.join(
+        (json.dumps({'v': 1, **frame}) + '\n').encode() for frame in frames
+    ))
+
+    class Pipe(io.RawIOBase):
+        reads = 0
+
+        def readable(self):
+            return True
+
+        def readinto(self, buffer):
+            self.reads += 1
+            return wire.readinto(buffer)
+
+    pipe = Pipe()
+    process = Mock(stdin=io.BytesIO(), stdout=pipe, pid=1)
+    monkeypatch.setattr(module.subprocess, 'Popen', lambda *args, **kwargs: process)
+    monkeypatch.setattr(module, 'uuid4', lambda: SimpleNamespace(hex=run_id))
+    events = []
+    bridge = module.PiRuntimeBridge(node='fixture')
+    result = asyncio.run(bridge.run({}, request_model=None, execute_tool=None, on_event=events.append))
+    assert result == frames[-1]['result'] and events == [frames[1]['event']]
+    assert pipe.closed and pipe.reads < 100
 
 
 @async_test

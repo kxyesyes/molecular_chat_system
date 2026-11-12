@@ -54,7 +54,7 @@ assert(template.includes('id="structure-file"'), 'provide a real file input');
 assert(template.includes('id="file-help"'), 'explain supported upload formats');
 assert(styles.includes('align-items: stretch'), 'keep both workspace columns at the same row height');
 assert(template.includes('/static/css/admet.css?v=20261005-38874c3'), 'bust stale ADMET stylesheet caches after layout changes');
-assert(template.includes('/static/js/admet.js?v=20261008-status-v1'), 'bust stale ADMET script caches after behavior changes');
+assert(template.includes('/static/js/admet.js?v=20261111-smiles-file'), 'bust stale ADMET script caches after behavior changes');
 assert(!template.includes('置信度'), 'do not imply a confidence score that the API does not return');
 assert(styles.includes('max(460px, calc(100vh - 260px))'), 'fill the initial workspace with meaningful content');
 assert(!styles.includes('min-height: 620px'), 'do not force a large empty result panel');
@@ -67,6 +67,7 @@ function createUI(fetchImpl) {
   const document = { getElementById: id => elements[id], createElement: tag => new Element(tag) };
   const sandbox = { document, window: {}, fetch: fetchImpl, console, AbortController, setTimeout, clearTimeout };
   vm.runInNewContext(statusSource, sandbox, { filename: 'shared/status.js' });
+  vm.runInNewContext(read('src/web/static/js/shared/smiles_file.js'), sandbox);
   vm.runInNewContext(source, sandbox, { filename: 'admet.js' });
   return { elements, ui: sandbox.window.MedChatADMET };
 }
@@ -194,6 +195,12 @@ async function main() {
   assert.equal(calls.length, 1, 'loading an example does not run prediction');
   assert.equal(app.ui.extractUploadedSmiles('aspirin.smi', 'CCO aspirin\n'), 'CCO', 'read the first SMILES from a text structure file');
   assert.equal(app.ui.extractUploadedSmiles('molecules.csv', 'name,smiles\nethanol,CCO\n'), 'CCO', 'read the SMILES column from CSV uploads');
+  assert.equal(app.ui.extractUploadedSmiles('molecules.csv', 'name,canonical_smiles\r\n"label, ""with""\nnewline",CCO\r\n'), 'CCO');
+  assert.equal(app.ui.extractUploadedSmiles('molecules.csv', 'smiles,name\n,empty\nCO,methanol'), 'CO');
+  assert.equal(app.ui.extractUploadedSmiles('headerless.csv', 'CCO,ethanol'), 'CCO');
+  assert.equal(app.ui.extractUploadedSmiles('labels.csv', 'name,smiles\n#1,CCO\n#2,CCN'), 'CCO');
+  assert.equal(app.ui.extractUploadedSmiles('commented.csv', '# export, batch 1\nname,smiles\nethanol,CCO'), 'CCO');
+  assert.equal(app.ui.extractUploadedSmiles('multiline.csv', 'name,smiles\n; ignore, "unused\n"label, first line\n# still part of the label",CN'), 'CN');
 
   for (const [httpStatus, status, message] of [
     [503, 'unavailable', 'Model weights unavailable'],

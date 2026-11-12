@@ -165,9 +165,11 @@ function _bindBatchForm() {
       const formData = new FormData(e.target);
       const organismFilter = document.getElementById("batchHumanOnly")?.checked ? "Human" : "";
       if (organismFilter) formData.append("organism_filter", organismFilter);
-      window.lastOrganismFilter = organismFilter;
       const data = await RtApi.batchPredict(formData);
-      RtResults.displayBatchResults(data.results);
+      RtResults.displayBatchResults(data.results, {
+        threshold: Number(formData.get("threshold") || "0.6"),
+        organismFilter,
+      });
     } catch (err) {
       RtUI.showError(err.message);
     } finally {

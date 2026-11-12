@@ -1279,6 +1279,13 @@ def _parse_result_metadata(value: Any) -> DockingResultMetadata:
     )
 
 
+def is_docking_artifact_locator(value: Any) -> bool:
+    """Return whether completion capture can publish this task-relative path."""
+    return isinstance(value, str) and (
+        value == _POSE_RELATIVE_PATH or _EXTRA_ARTIFACT_PATH.fullmatch(value) is not None
+    )
+
+
 def _pose_path(task_root: Path, relative_text: str) -> Path:
     if "\\" in relative_text:
         raise CompletionError("completion_artifact_invalid")

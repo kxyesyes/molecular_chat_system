@@ -374,6 +374,27 @@ verify the UDS owner/mode and zero labelled containers before resuming traffic.
 
 ## Cleanup and rollback
 
+### Broker job retention
+
+`medchat-sandbox-broker.service` runs a retention sweep after startup recovery
+and repeats it hourly while the Broker is running. It stops the retention task
+on shutdown and catches up on the next startup. The service owns
+`MEDCHAT_SANDBOX_BROKER_STATE`, set to `/var/lib/medchat-sandbox` in the
+shipped systemd unit.
+
+Retention uses each job's last update in `broker.sqlite`. After 24 hours the
+Broker removes that job's input, output and published artifacts under
+`jobs/<job_id>/`. After 30 days it removes the terminal job, transition and
+artifact records from SQLite once remote cleanup is confirmed. Jobs with active
+local work, including late sandbox creation or destruction, are skipped.
+Unresolved cleanup keeps its audit record for startup recovery, which can
+reconcile by job ID when the sandbox ID was never persisted.
+The Broker checks the state directory identity
+and skips unsafe job trees. Keep this directory out of host temporary-file
+cleanup jobs. Files without a corresponding job record require operator review.
+
+### Deployment rollback
+
 Preserve a failed report only if it contains no sensitive material. Never copy
 service environment files or journal output into an issue or chat. To rollback
 the QEMU deployment:

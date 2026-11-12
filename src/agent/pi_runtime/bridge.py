@@ -6,6 +6,7 @@ Callbacks retain their existing cancellation and physical-settlement ownership.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 from pathlib import Path
@@ -129,6 +130,8 @@ class PiRuntimeBridge:
             )
         except OSError:
             raise PiBridgeError('pi_runtime_unavailable') from None
+        # Raw FileIO.readline reads one byte per system call on a pipe.
+        process.stdout = io.BufferedReader(process.stdout)
         self.active_pid = process.pid
         run_id = uuid4().hex
         seen = set()

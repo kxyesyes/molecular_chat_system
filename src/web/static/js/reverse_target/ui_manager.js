@@ -139,7 +139,7 @@ const RtUI = (() => {
     });
   }
 
-  // ── CSV 导出（占位） ──
+  // ── CSV 导出 ──
   function exportData() {
     const data = window.currentBatchResults || window.currentSingleResults;
     if (!data) return;
@@ -161,7 +161,10 @@ const RtUI = (() => {
       "organism",
       "molecule_chembl_id",
       "standard_type",
+      "standard_relation",
       "standard_value",
+      "standard_units",
+      "measurement_status",
       "similar_count",
       "morgan_similarity",
       "maccs_similarity",

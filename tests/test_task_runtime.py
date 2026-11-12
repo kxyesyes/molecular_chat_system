@@ -123,6 +123,35 @@ def test_task_manager_preserves_non_mapping_json_result(tmp_path):
     assert finished.result == ["complete", 1]
 
 
+@pytest.mark.parametrize("source", ["manager", "legacy_receipt"])
+def test_not_calculated_alias_persists_failed_task_and_public_reason(tmp_path, source):
+    from src.task_runtime.legacy_bridge import persist_legacy_terminal_task
+
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    result = {"success": True, "status": "not-calculated"}
+    with manager.executor:
+        if source == "manager":
+            record = manager.submit("unit_test", {}, lambda _: result)
+            manager.wait_for_completion(record.task_id)
+        else:
+            record = persist_legacy_terminal_task(
+                manager, task_type="unit_test", owner_session_id="test-owner", result=result
+            )
+    finished = manager.get(record.task_id)
+    assert finished.status is TaskStatus.FAILED
+    assert finished.to_public_dict()["scientific_status"] == "not_calculated"
+
+
+def test_generic_structured_status_remains_readable_without_scientific_status(tmp_path):
+    manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
+    result = {"status": {"phase": "running"}}
+    with manager.executor:
+        record = manager.submit("unit_test", {}, lambda _: result)
+    public = manager.get(record.task_id).to_public_dict()
+    assert public["result"] == result
+    assert "scientific_status" not in public
+
+
 def test_task_manager_generic_projection_preserves_safe_status_text(tmp_path):
     manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
     result = {

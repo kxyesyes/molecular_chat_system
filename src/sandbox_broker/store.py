@@ -1084,6 +1084,15 @@ class BrokerStore:
                     continue
                 cls._reject_sensitive_json(item)
 
+    def retention_job_page(self, after: str) -> list[tuple[str, float]]:
+        """Read one bounded page, releasing SQLite before the sweep yields."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT job_id, updated_at FROM jobs WHERE job_id>? ORDER BY job_id LIMIT 64",
+                (after,),
+            ).fetchall()
+        return [(row["job_id"], row["updated_at"]) for row in rows]
+
     def jobs_updated_before(self, cutoff: float) -> list[BrokerJobRecord]:
         if type(cutoff) not in (int, float) or not math.isfinite(float(cutoff)):
             raise ValueError("cutoff must be a finite epoch")
@@ -1111,7 +1120,11 @@ class BrokerStore:
                     connection.commit()
                     return False
                 record = self._row_to_record(row)
-                if record.status not in TERMINAL_STATUSES or record.updated_at > float(cutoff):
+                if (
+                    record.status not in TERMINAL_STATUSES
+                    or record.cleanup_status != "succeeded"
+                    or record.updated_at > float(cutoff)
+                ):
                     connection.commit()
                     return False
                 connection.execute("DELETE FROM artifacts WHERE job_id=?", (job_id,))
@@ -1218,12 +1231,13 @@ class BrokerStore:
         return [self._row_to_record(row) for row in rows]
 
     def cleanup_pending_jobs(self) -> list[BrokerJobRecord]:
-        """Return every decodable job whose persisted sandbox still needs cleanup."""
+        """Return jobs with a known sandbox or an unresolved cleanup attempt."""
 
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM jobs "
-                "WHERE sandbox_id IS NOT NULL AND cleanup_status<>? "
+                "WHERE cleanup_status<>? AND "
+                "(sandbox_id IS NOT NULL OR cleanup_status IN ('failed', 'in_progress')) "
                 "ORDER BY created_at ASC, job_id ASC",
                 ("succeeded",),
             ).fetchall()

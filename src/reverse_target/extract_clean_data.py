@@ -21,8 +21,7 @@ from src.reverse_target.config import (
 from src.reverse_target.data_quality import (
     apply_activity_quality_flags,
     deduplicate_activity_rows,
-    quality_filter_for_training,
-    training_columns,
+    training_export,
 )
 
 
@@ -125,15 +124,7 @@ class ChEMBLDataExtractor:
         # df = df[df['organism'] == 'Human']
         # print(f"过滤人类数据后: {len(df)} 条")
         
-        # 5. 转换 standard_value 为数值型
-        df['standard_value'] = pd.to_numeric(df['standard_value'], errors='coerce')
-        df = df.dropna(subset=['standard_value'])
-        
-        # 6. 过滤异常值（通常活性值在 0.001 到 100000000 nM 范围）
-        df = df[(df['standard_value'] > 0) & (df['standard_value'] < 1e8)]
-        print(f"过滤异常值后: {len(df)} 条")
-        
-        # 7. 单位、关系和 assay provenance 由统一质量门处理；未知单位不再猜作 nM
+        # 按统一的 nM 尺度检查范围，保留原始数值和单位用于审计。
         df = apply_activity_quality_flags(df)
         
         print(f"最终数据量: {len(df)} 条")
@@ -147,11 +138,7 @@ class ChEMBLDataExtractor:
         # 训练索引只接收质量门通过的记录；完整清洗结果另存为审计表
         audit_path = self.output_dir / "chembl_quality_audit.tsv"
         df.to_csv(audit_path, sep='\t', index=False)
-        training_source = quality_filter_for_training(df)
-        training_df = training_source[training_columns(training_source)].copy()
-        
-        # 重命名列以匹配要求的格式
-        training_df = training_df.rename(columns={'standard_value_nm': 'standard_value'})
+        training_df = training_export(df)
         
         # 保存训练数据
         output_path = self.output_dir / "chembl_training_data.tsv"

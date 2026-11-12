@@ -10,6 +10,7 @@ CONTROLS = dict(threshold=0.6, top_k=10, combine_by_target=True, organism_filter
 REVISION = 'reverse-target-record-v1'
 SOURCE = 'local_reverse_target_fingerprints'
 ERROR = 'Invalid reverse-target prediction observation.'
+UNIT_VERIFICATION_REQUIRED = 'unit_verification_required'
 
 
 def normalize_target_record(record: Mapping[str, Any]) -> Dict[str, Any]:

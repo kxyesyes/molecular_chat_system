@@ -13,14 +13,14 @@ from typing import Dict, Any, List
 import pandas as pd
 import numpy as np
 
-from src.activity.model_registry import ActivityModelRegistry
+from src.activity.model_registry import ActivityModelRegistry, DEFAULT_MODELS_DIR, resolve_activity_models_dir
 
 logger = logging.getLogger(__name__)
 
 # Global dictionary to track training jobs
 training_jobs: Dict[str, Dict[str, Any]] = {}
 training_jobs_lock = threading.RLock()
-MODELS_DIR = Path("data/activity/models")
+MODELS_DIR = DEFAULT_MODELS_DIR
 MODEL_IMPLEMENTATION_VERSION = 2
 
 
@@ -55,10 +55,7 @@ def _remove_training_input(file_path: str | None) -> None:
 
 def get_activity_models_dir() -> Path:
     """Resolve the model registry directory used by training and inference."""
-    configured = os.environ.get("ACTIVITY_MODEL_DIR", "").strip()
-    directory = Path(configured).expanduser() if configured else Path(MODELS_DIR)
-    if not directory.is_absolute():
-        directory = Path(__file__).resolve().parents[2] / directory
+    directory = resolve_activity_models_dir(default_dir=MODELS_DIR)
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 

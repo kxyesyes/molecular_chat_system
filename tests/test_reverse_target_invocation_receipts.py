@@ -50,6 +50,21 @@ def make_writer_database(directory, *, cached=True, smiles=("CCO", "CCC")):
     return predictor
 
 
+@pytest.mark.parametrize("compact", [True, False])
+def test_missing_target_identity_omits_external_links_in_valid_receipt(tmp_path, compact):
+    predictor = make_writer_database(tmp_path)
+    path = predictor.training_data_path
+    path.write_text(path.read_text(encoding="utf-8").replace("Synthetic A", "Unknown"), encoding="utf-8")
+    if compact:
+        predictor.initialize_compact_strict()
+    else:
+        predictor.initialize_strict()
+    envelope = predictor.predict_with_receipt("CCO")
+    record = envelope["records"][0]
+    assert record["chembl_search_url"] == record["uniprot_search_url"] == ""
+    predictor.validate_prediction_source(envelope, smiles="CCO", expected=predictor.capture_prediction_source())
+
+
 @pytest.mark.parametrize("corruption", ["extra-leading-column", "blank-record"])
 def test_strict_tsv_rejects_silently_normalized_records(tmp_path, corruption):
     p = make_writer_database(tmp_path)
@@ -63,6 +78,44 @@ def test_strict_tsv_rejects_silently_normalized_records(tmp_path, corruption):
         p.initialize_strict()
     with pytest.raises(owned.ReverseSourceUnavailable):
         p.capture_prediction_source()
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_ambiguous_export_unit_is_withheld_in_strict_records_and_receipts(tmp_path, compact):
+    from src.reverse_target.receipt import normalize_target_record, validate_prediction_observation, REVISION, SOURCE
+
+    p = make_writer_database(tmp_path)
+    header, old, new = p.training_data_path.read_text(encoding="utf-8").splitlines()
+    columns = "\tstandard_units\tstandard_relation\tunit_status\tquality_eligible\tassay_chembl_id"
+    old = old.replace("\tIC50\t1\t", "\tIC50\t2000\t")
+    lines = [header + columns, old + "\tuM\t=\tconfirmed\tTrue\tCHEMBL101",
+             new + "\tnM\t=\tconfirmed\tTrue\tCHEMBL102"]
+    p.training_data_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if compact:
+        p.initialize_compact_strict()
+    else:
+        p.initialize_strict()
+    envelope = p.predict_with_receipt("CCO")
+    record = envelope["records"][0]
+    assert record["measurement_status"] == "unit_verification_required"
+    assert record["standard_value"] is None
+    assert "standard_units" not in record and "standard_relation" not in record
+    assert record["assay_chembl_id"] == "CHEMBL101"
+    data = [normalize_target_record(row) for row in envelope["records"]]
+    evidence = [{"source": SOURCE, "normalization_revision": REVISION, "input_smiles": "CCO",
+                 "record_count": len(data), "records": envelope["records"], "prediction_receipt": envelope["receipt"]}]
+    assert validate_prediction_observation(data, evidence, smiles="CCO")
+    assert "value" not in data[0]["assay"]
+    corrected = p.predict_with_receipt("CCC")["records"][0]
+    assert (corrected["standard_value"], corrected["standard_units"]) == (2, "nM")
+    assert "measurement_status" not in corrected
+
+    for conflict in ({"standard_units": "uM"}, {"standard_value": 2000}, {"measurement_status": "verified"}):
+        invalid = copy.deepcopy(envelope)
+        invalid["records"][0].update(conflict)
+        invalid["receipt"]["result_sha256"] = owned.json_sha256(invalid["records"])
+        with pytest.raises(owned.ReverseProofError):
+            p.validate_prediction_source(invalid, smiles="CCO", expected=p.capture_prediction_source())
 
 
 @pytest.mark.parametrize("quoted", [False, True], ids=["unquoted", "quoted"])

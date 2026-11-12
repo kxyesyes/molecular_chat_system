@@ -503,6 +503,8 @@ def test_stable_target_or_structure_identity_with_provenance_is_valid(target):
     )
 
     assert serialized is not None
+    if "target_name" in target:
+        assert f'"target_name":"{target["target_name"]}"' in serialized
     assert decision.allowed is True
     assert decision.evidence_digest is not None
 
@@ -515,8 +517,6 @@ def test_alphafold_identity_url_must_match_supplied_uniprot_identity():
     }
 
     assert serialize_target_evidence(target) is None
-    if "target_name" in target:
-        assert f'"target_name":"{target["target_name"]}"' in serialized
 
 
 @pytest.mark.parametrize(

@@ -24,8 +24,10 @@ def main() -> int:
         "--artifact-root",
         type=Path,
         default=None,
-        help="Private root containing relative task artifacts",
+        help="Private root containing generic relative artifacts, separate from staging",
     )
+    parser.add_argument("--staging-root", type=Path,
+                        help="Existing private task staging root used by this deployment")
     parser.add_argument("--days", type=int, default=90, help="Retention age in days")
     parser.add_argument(
         "--apply",
@@ -36,6 +38,7 @@ def main() -> int:
     result = purge_terminal_tasks(
         args.db,
         artifact_root=args.artifact_root,
+        staging_root=args.staging_root,
         retention_days=args.days,
         apply=args.apply,
     )

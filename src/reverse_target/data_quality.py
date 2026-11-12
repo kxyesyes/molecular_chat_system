@@ -92,6 +92,7 @@ def apply_activity_quality_flags(frame: pd.DataFrame) -> pd.DataFrame:
     result["quality_reason"] = "eligible"
     result.loc[result["unit_status"] == "unknown", "quality_reason"] = "unknown_units"
     result.loc[result["unit_status"] == "invalid", "quality_reason"] = "invalid_value"
+    result.loc[result["standard_value_nm"].ge(1e8), "quality_reason"] = "out_of_range_nm"
     result.loc[(result["unit_status"] == "confirmed") & (relation != "="), "quality_reason"] = (
         "non_exact_relation"
     )
@@ -112,6 +113,7 @@ def deduplicate_activity_rows(frame: pd.DataFrame) -> pd.DataFrame:
         "organism",
         "taxon_id",
         "assay_id",
+        "assay_chembl_id",
         "document_chembl_id",
         "publication_id",
         "standard_type",
@@ -149,6 +151,7 @@ def training_columns(frame: pd.DataFrame) -> list[str]:
         "target_uniprot_id",
         "taxon_id",
         "assay_id",
+        "assay_chembl_id",
         "document_chembl_id",
         "publication_id",
         "standard_relation",
@@ -160,3 +163,11 @@ def training_columns(frame: pd.DataFrame) -> list[str]:
         "quality_eligible",
     ]
     return [column for column in required + optional if column in frame.columns]
+
+
+def training_export(frame: pd.DataFrame) -> pd.DataFrame:
+    """Publish normalized values and units together; the audit retains the source pair."""
+    eligible = quality_filter_for_training(frame)
+    result = eligible[training_columns(eligible)].rename(columns={"standard_value_nm": "standard_value"})
+    result["standard_units"] = "nM"
+    return result

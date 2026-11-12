@@ -7,8 +7,10 @@ import numpy as np
 import pandas as pd
 import os
 import json
+import re
 from pathlib import Path
 from typing import List, Dict, Tuple
+from urllib.parse import quote, urlencode
 from rdkit import Chem
 from rdkit import DataStructs
 from rdkit.Chem import AllChem, MACCSkeys
@@ -16,6 +18,7 @@ import threading
 import uuid
 
 from src.reverse_target.config import get_reverse_target_data_dir
+from src.reverse_target.receipt import UNIT_VERIFICATION_REQUIRED
 from src.reverse_target.owned_source import (
     INPUT_ERROR, REVISION, WEIGHT_REVISION, ReverseProofError, ReverseSourceSnapshot,
     ReverseSourceUnavailable, clear_failure_frames, configuration_sha256, json_sha256,
@@ -23,6 +26,73 @@ from src.reverse_target.owned_source import (
     validate_envelope, validate_popcount_rows,
 )
 from src.system.redaction import looks_like_credential
+from src.target_search.remote_clients import _is_uniprot_accession
+
+
+def _target_fields(row):
+    organism = row.get('organism')
+    fields = {'organism': str(organism) if pd.notna(organism) else ''}
+    for key in ('target_chembl_id', 'target_uniprot_id', 'taxon_id'):
+        value = row.get(key)
+        if pd.notna(value) and value != '':
+            fields[key] = value.item() if isinstance(value, np.generic) else value
+    return fields
+
+
+def _target_links(record):
+    """Only database-specific target IDs can identify an entry. Names start searches."""
+    chembl_id = str(record.get('target_chembl_id', '')).strip().upper()
+    accession = str(record.get('target_uniprot_id', '')).strip().upper()
+    raw_name = record.get('target_name')
+    name = raw_name.strip() if isinstance(raw_name, str) else ''
+    if name.casefold() in {'nan', '<na>', 'unknown', 'n/a', 'none', '-', '.', '..'}:
+        name = ''
+    base = 'https://www.ebi.ac.uk/chembl/web_components'
+    chembl = uniprot = ''
+    if re.fullmatch(r'CHEMBL[1-9][0-9]*', chembl_id):
+        chembl = f'{base}/explore/target/{chembl_id}'
+    elif name:
+        chembl = f'{base}/search_results/{quote(name, safe="")}'
+    if _is_uniprot_accession(accession):
+        uniprot = f'https://www.uniprot.org/uniprotkb/{accession}/entry'
+    elif name:
+        def phrase(value):
+            return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+        query = phrase(name)
+        taxon = str(record.get('taxon_id', '')).strip()
+        organism = record.get('organism')
+        if re.fullmatch(r'[1-9][0-9]*(?:\.0+)?', taxon):
+            query += ' AND organism_id:' + taxon.split('.')[0]
+        elif isinstance(organism, str) and organism.strip().casefold() not in {
+            '', 'unknown', 'unspecified', 'unidentified', 'not specified', 'n/a', 'none', 'nan', '-',
+        }:
+            query += ' AND organism_name:' + phrase(organism.strip())
+        uniprot = 'https://www.uniprot.org/uniprotkb?' + urlencode({'query': query})
+    return {'chembl_search_url': chembl, 'uniprot_search_url': uniprot}
+
+
+def _assay_fields(row):
+    """Project a measurement only when its number and source unit belong together."""
+    fields = {}
+    for key in ('assay_id', 'assay_chembl_id'):
+        value = row.get(key)
+        if pd.notna(value) and value != '':
+            fields[key] = value.item() if isinstance(value, np.generic) else value
+    units = row.get('standard_units')
+    # The old training export renamed standard_value_nm and kept the original
+    # unit. The quality audit instead retained both numeric columns.
+    if (isinstance(units, str) and units.strip().casefold() not in ('', 'nm', 'nanomolar')
+            and str(row.get('unit_status')) == 'confirmed' and 'quality_eligible' in row
+            and 'standard_value_nm' not in row):
+        return {**fields, 'standard_value': None, 'measurement_status': UNIT_VERIFICATION_REQUIRED}
+    value = row.get('standard_value')
+    fields['standard_value'] = float(value) if pd.notna(value) else None
+    for key in ('standard_units', 'standard_relation'):
+        value = row.get(key)
+        if pd.notna(value) and value != '':
+            fields[key] = value
+    return fields
 
 
 def _bitvect_to_numpy_array(bitvect) -> np.ndarray:
@@ -739,13 +809,15 @@ class ReverseTargetPredictor:
         # scientific payload, where it would evade the normal evidence scrub.
         if looks_like_credential(source_file):
             source_file = '[redacted]'
+        quality_eligible = row.get('quality_eligible')
+        if isinstance(quality_eligible, str):
+            quality_eligible = {'true': True, 'false': False}.get(quality_eligible.strip().casefold())
         record = {
             'target_name': target_name,
-            'organism': row.get('organism', ''),
             'canonical_smiles': row.get('canonical_smiles', ''),
             'molecule_chembl_id': row.get('molecule_chembl_id', ''),
             'standard_type': row.get('standard_type', ''),
-            'standard_value': float(row['standard_value']) if pd.notna(row.get('standard_value')) else None,
+            **_assay_fields(row),
             'morgan_similarity': float(morgan_similarity),
             'maccs_similarity': float(maccs_similarity),
             'final_similarity': float(final_similarity),
@@ -755,20 +827,18 @@ class ReverseTargetPredictor:
             'evidence': {
                 'type': 'similarity_neighbor',
                 'source': 'ChEMBL',
-                'quality_eligible': bool(row.get('quality_eligible', True)),
+                'quality_eligible': bool(quality_eligible) if isinstance(quality_eligible, (bool, np.bool_)) else None,
             },
             'provenance': {
                 'data_version': (self.metadata or {}).get('data_version', 'unknown'),
                 'source_file': source_file,
                 'row_index': int(idx),
             },
-            'chembl_search_url': f"https://www.ebi.ac.uk/chembl/target_report_card/{target_name.replace(' ', '%20')}/",
-            'uniprot_search_url': f"https://www.uniprot.org/uniprotkb?query={target_name.replace(' ', '+')}+AND+organism_id:9606",
+            **_target_fields(row),
         }
         for field in (
-            'target_chembl_id', 'target_uniprot_id', 'taxon_id', 'assay_id',
-            'document_chembl_id', 'publication_id', 'standard_relation',
-            'standard_units', 'assay_confidence_score', 'data_validity_comment',
+            'document_chembl_id',
+            'publication_id', 'assay_confidence_score', 'data_validity_comment',
         ):
             if field in frame.columns and pd.notna(row.get(field)):
                 value = row.get(field)
@@ -778,6 +848,7 @@ class ReverseTargetPredictor:
         for field in ('standard_relation', 'standard_units'):
             if field in record:
                 record['evidence'][field] = record[field]
+        record.update(_target_links(record))
         return record
     
     def get_stats(self) -> Dict:
@@ -831,17 +902,19 @@ class ReverseTargetPredictor:
 
         results = []
         for idx in top_indices:
-            results.append({
-                'target_name':       str(self.df.iloc[idx]['target_name']),
-                'organism':          str(self.df.iloc[idx]['organism']),
-                'canonical_smiles':  str(self.df.iloc[idx]['canonical_smiles']),
-                'molecule_chembl_id':str(self.df.iloc[idx]['molecule_chembl_id']),
-                'standard_type':     str(self.df.iloc[idx]['standard_type']),
-                'standard_value':    float(self.df.iloc[idx]['standard_value']),
+            row = self.df.iloc[idx]
+            candidate = {
+                'target_name':       str(row['target_name']),
+                **_target_fields(row),
+                'canonical_smiles':  str(row['canonical_smiles']),
+                'molecule_chembl_id':str(row['molecule_chembl_id']),
+                'standard_type':     str(row['standard_type']),
+                **_assay_fields(row),
                 'morgan_similarity': float(morgan_sims[idx]),
                 'maccs_similarity':  float(maccs_sims[idx]),
                 'final_similarity':  float(final_sims[idx]),
-            })
+            }
+            results.append(candidate)
         return results
 
     def _select_diverse_candidate_indices(
@@ -948,16 +1021,7 @@ def _aggregate_by_target(
 
     for target, result in target_map.items():
         result['similar_count'] = target_counts[target]
-        # 生成搜索链接
-        target_name = str(result.get('target_name', ''))
-        result.setdefault(
-            'chembl_search_url',
-            f"https://www.ebi.ac.uk/chembl/target_report_card/{target_name.replace(' ', '%20')}/"
-        )
-        result.setdefault(
-            'uniprot_search_url',
-            f"https://www.uniprot.org/uniprotkb?query={target_name.replace(' ', '+')}+AND+organism_id:9606"
-        )
+        result.update(_target_links(result))
 
     results = list(target_map.values())
     results.sort(key=lambda x: x.get(score_field, 0), reverse=True)

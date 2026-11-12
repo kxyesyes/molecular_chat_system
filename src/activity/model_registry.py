@@ -24,6 +24,16 @@ from src.system.file_lock import (
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MODELS_DIR = Path("data/activity/models")
+
+
+def resolve_activity_models_dir(project_root: Path | None = None, *, default_dir: Path = DEFAULT_MODELS_DIR) -> Path:
+    """Resolve the training and inference directory without creating it."""
+    configured = os.environ.get("ACTIVITY_MODEL_DIR", "").strip()
+    directory = Path(configured).expanduser() if configured else Path(default_dir)
+    return (project_root or Path(__file__).resolve().parents[2]) / directory
+
+
 REGISTRY_STATE_FILE = "registry_state.json"
 REGISTRY_LOCK_FILE = "registry_state.lock"
 REGISTRY_STATE_VERSION = 3
