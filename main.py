@@ -8,8 +8,10 @@ import os
 import sys
 import argparse
 import logging
+from html.parser import HTMLParser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from urllib.parse import urlsplit
 from src.system.env import load_env_file as _load_env_file
 
 DEFAULT_HOST = "127.0.0.1"
@@ -122,7 +124,8 @@ def check_environment():
     # 检查Ollama连接
     try:
         import httpx
-        response = httpx.get("http://localhost:11434/api/tags", timeout=2)
+        base_url = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+        response = httpx.get(f"{base_url}/api/tags", timeout=2)
         if response.status_code == 200:
             logger.info("✓ Ollama服务正常")
             models = response.json().get("models", [])
@@ -141,91 +144,37 @@ def check_environment():
 
 
 def setup_project_structure():
-    """创建项目目录结构"""
-    directories = [
-        "src",
-        "src/web",
-        "src/web/templates",
-        "src/web/static",
-        "config",
-        "logs",
-        "data"
-    ]
-    
-    for dir_path in directories:
-        Path(dir_path).mkdir(parents=True, exist_ok=True)
-    
-    # 创建__init__.py文件
-    init_files = [
-        "src/__init__.py",
-        "src/web/__init__.py"
-    ]
-    
-    for init_file in init_files:
-        Path(init_file).touch(exist_ok=True)
-    
-    logger.info("✓ 项目目录结构已创建")
+    """Create writable startup directories without modifying installed source files."""
+    for directory in ("config", "logs", "data"):
+        Path(directory).mkdir(parents=True, exist_ok=True)
+
+
+class _HomeAssets(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.paths = set()
+
+    def handle_starttag(self, tag, attrs):
+        attribute = {"script": "src", "link": "href"}.get(tag)
+        url = dict(attrs).get(attribute) if attribute else None
+        if url and url.startswith("/static/"):
+            self.paths.add(urlsplit(url).path.lstrip("/"))
 
 
 def check_frontend_files():
-    """检查前端文件是否存在"""
-    frontend_files = {
-        "src/web/templates/index.html": "HTML模板",
-        "src/web/static/css/style.css": "CSS样式",
-        "src/web/static/js/script.js": "JavaScript脚本"
-    }
-    
-    missing_files = []
-    for file_path, description in frontend_files.items():
-        if not Path(file_path).exists():
-            missing_files.append(f"{description} ({file_path})")
-    
-    if missing_files:
-        logger.warning("⚠ 缺少前端文件:")
-        for file in missing_files:
-            logger.warning(f"  - {file}")
-        
-        # 尝试从其他位置复制
-        possible_sources = [
-            Path("."),  # 根目录
-            Path("src/web"),  # web目录
-            Path("src"),  # src目录
-            Path("static"),  # 可能的static目录
-            Path("templates")  # 可能的templates目录
-        ]
-        
-        logger.info("\n正在搜索文件...")
-        for source in possible_sources:
-            # 查找HTML文件
-            for html_file in source.glob("**/index.html"):
-                target = Path("src/web/templates/index.html")
-                if not target.exists():
-                    import shutil
-                    os.makedirs(target.parent, exist_ok=True)
-                    shutil.copy2(html_file, target)
-                    logger.info(f"  ✓ 复制HTML: {html_file} -> {target}")
-            
-            # 查找CSS文件
-            for css_file in source.glob("**/style.css"):
-                target = Path("src/web/static/css/style.css")
-                if not target.exists():
-                    import shutil
-                    os.makedirs(target.parent, exist_ok=True)
-                    shutil.copy2(css_file, target)
-                    logger.info(f"  ✓ 复制CSS: {css_file} -> {target}")
-            
-            # 查找JS文件
-            for js_file in source.glob("**/script.js"):
-                target = Path("src/web/static/js/script.js")
-                if not target.exists():
-                    import shutil
-                    os.makedirs(target.parent, exist_ok=True)
-                    shutil.copy2(js_file, target)
-                    logger.info(f"  ✓ 复制JS: {js_file} -> {target}")
-    else:
-        logger.info("✓ 所有前端文件已就绪")
-    
-    return len(missing_files) == 0
+    web = project_root / "src" / "web"
+    template = web / "templates" / "index.html"
+    if not template.is_file():
+        logger.warning("缺少首页模板: %s", template)
+        return False
+
+    assets = _HomeAssets()
+    assets.feed(template.read_text(encoding="utf-8"))
+    assets.close()
+    missing = sorted(path for path in assets.paths if not (web / path).is_file())
+    for path in missing:
+        logger.warning("缺少首页静态文件: %s", web / path)
+    return not missing
 
 
 def create_default_config():
@@ -333,7 +282,9 @@ def main():
     )
     
     args = parser.parse_args()
-    load_env_file(args.env_file)
+    if args.config is not None and not Path(args.config).is_file():
+        logger.error("指定的配置文件不存在或不是文件: %s", args.config)
+        return 1
     
     host = args.host or os.environ.get("MEDCHAT_HOST", DEFAULT_HOST)
     port = args.port if args.port is not None else _env_int("MEDCHAT_PORT", DEFAULT_PORT)
@@ -377,7 +328,7 @@ def main():
         check_frontend_files()
         
         # 创建或使用配置文件
-        if args.config and Path(args.config).exists():
+        if args.config is not None:
             config_path = args.config
         elif args.modelscope:
             # 使用ModelScope配置
