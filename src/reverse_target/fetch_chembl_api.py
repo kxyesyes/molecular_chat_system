@@ -18,8 +18,7 @@ from src.reverse_target.config import configure_console_output, get_reverse_targ
 from src.reverse_target.data_quality import (
     apply_activity_quality_flags,
     deduplicate_activity_rows,
-    quality_filter_for_training,
-    training_columns,
+    training_export,
 )
 
 
@@ -42,13 +41,14 @@ class ChEMBLAPIFetcher:
         batch_size = 1000  # 每批获取 1000 条
         
         with tqdm(total=limit, desc="获取数据") as pbar:
-            for offset in range(0, limit, batch_size):
-                current_batch = min(batch_size, limit - offset)
+            for requested in range(0, limit, batch_size):
+                page_offset = offset + requested
+                current_batch = min(batch_size, limit - requested)
                 
                 url = f"{self.base_url}/activity.json"
                 params = {
                     'limit': current_batch,
-                    'offset': offset,
+                    'offset': page_offset,
                     'standard_type__in': 'IC50,EC50,Ki,Kd',
                     'target_organism': 'Homo sapiens',
                     'assay_type': 'B'  # Binding assay
@@ -96,7 +96,7 @@ class ChEMBLAPIFetcher:
                     time.sleep(0.1)
                     
                 except Exception as e:
-                    print(f"\n警告: 批次 {offset} 获取失败: {e}")
+                    print(f"\n警告: 批次 {page_offset} 获取失败: {e}")
                     continue
         
         print(f"\n成功获取 {len(all_data)} 条有效记录")
@@ -119,14 +119,6 @@ class ChEMBLAPIFetcher:
         df = df.rename(columns={'target_name': 'target_pref_name'})
         print(f"移除重复后: {len(df)} 条")
         
-        # 转换数值
-        df['standard_value'] = pd.to_numeric(df['standard_value'], errors='coerce')
-        df = df.dropna(subset=['standard_value'])
-        
-        # 过滤异常值
-        df = df[(df['standard_value'] > 0) & (df['standard_value'] < 1e8)]
-        print(f"过滤异常值后: {len(df)} 条")
-        
         df = df.rename(columns={'target_pref_name': 'target_name'})
         df = apply_activity_quality_flags(df)
         
@@ -144,9 +136,7 @@ class ChEMBLAPIFetcher:
         
         audit_path = self.output_dir / "chembl_quality_audit.tsv"
         df.to_csv(audit_path, sep='\t', index=False)
-        training_source = quality_filter_for_training(df)
-        training_df = training_source[training_columns(training_source)].copy()
-        training_df = training_df.rename(columns={'standard_value_nm': 'standard_value'})
+        training_df = training_export(df)
         
         # 保存
         output_path = self.output_dir / "chembl_training_data.tsv"

@@ -19,13 +19,13 @@ assert.match(
 );
 assert.match(
   template,
-  /<script\s+src="\/static\/js\/reverse_target\/main\.js\?v=20261015-numeric-validation-v3"><\/script>/,
-  'the local reverse-target entry point must invalidate validation changes',
+  /<script\s+src="\/static\/js\/reverse_target\/main\.js\?v=20261111-query-details"><\/script>/,
+  'the local reverse-target entry point must invalidate batch detail changes',
 );
 assert.match(
   template,
-  /<script\s+src="\/static\/js\/reverse_target\/ui_manager\.js\?v=20261014-batch-input-state-v1"><\/script>/,
-  'the reverse-target UI manager cache must invalidate batch file-state changes',
+  /<script\s+src="\/static\/js\/reverse_target\/ui_manager\.js\?v=20261111-assay"><\/script>/,
+  'the reverse-target UI manager cache must invalidate assay export changes',
 );
 
 const main = fs.readFileSync(

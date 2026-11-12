@@ -424,15 +424,6 @@ footer .contact span {
   box-shadow: 0 8px 20px rgba(79, 70, 229, 0.12);
 }
 
-.preset-note {
-  flex: 1 1 260px;
-  display: flex;
-  align-items: center;
-  color: #64748b;
-  font-size: 13px;
-  line-height: 1.6;
-}
-
 /* ══════════════════════════════════════
    结果表格
    ══════════════════════════════════════ */
@@ -525,31 +516,6 @@ footer .contact span {
   background: linear-gradient(90deg, #4f46e5 0%, #818cf8 100%);
   border-radius: 4px;
   transition: width 0.5s ease;
-}
-
-.confidence-badge {
-  display: inline-flex;
-  align-items: center;
-  margin-top: 6px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.confidence-high {
-  color: #166534;
-  background: #dcfce7;
-}
-
-.confidence-medium {
-  color: #92400e;
-  background: #fef3c7;
-}
-
-.confidence-low {
-  color: #475569;
-  background: #e2e8f0;
 }
 
 .evidence-text {
