@@ -11,18 +11,38 @@ from src.target_search import routes
 from src.target_search.downloader import StructureDownloadError
 
 
-def test_send_to_docking_preparation_runs_off_event_loop(monkeypatch):
+@pytest.mark.parametrize(("method", "path", "operation", "args", "kwargs"), [
+    ("POST", "structures/7/send-to-docking", "send_to_docking", (7,), {}),
+    ("GET", "stats", "get_database_stats", (), {}),
+    ("GET", "health", "get_database_health", (), {}),
+    ("GET", "targets/7", "get_target_detail", (7,), {}),
+    ("GET", "targets/7/structures", "get_target_structures", (7,), {}),
+    ("GET", "structures/9/preflight?format=pdb", "preflight_structure", (9,), {"requested_format": "pdb"}),
+    ("GET", "validation?expected_pde=PDE1A&require_cache=true", "validate_target_database",
+     (), {"expected_pde_targets": {"PDE1A"}, "require_cache": True}),
+    ("GET", "pde-overview?top_structures_per_target=2", "get_pde_overview",
+     (), {"top_structures_per_target": 2}),
+])
+def test_target_database_work_runs_off_event_loop(monkeypatch, method, path, operation, args, kwargs):
     release = threading.Event()
     started = threading.Event()
     thread_ids = []
 
-    def prepare(structure_id):
+    payload = {"operation": operation}
+
+    def work(*actual_args, **actual_kwargs):
+        assert (actual_args, actual_kwargs) == (args, kwargs)
         thread_ids.append(threading.get_ident())
         started.set()
         assert release.wait(2), "preparation was not released"
-        return {"status": "success", "structure_db_id": structure_id}
+        return payload
 
-    monkeypatch.setattr(routes, "TargetSearchService", lambda: SimpleNamespace(send_to_docking=prepare))
+    service = SimpleNamespace()
+    if operation == "validate_target_database":
+        monkeypatch.setattr(routes, operation, work)
+    else:
+        setattr(service, operation, work)
+    monkeypatch.setattr(routes, "TargetSearchService", lambda: service)
     app = FastAPI()
     routes.setup_target_search_routes(app)
 
@@ -33,15 +53,15 @@ def test_send_to_docking_preparation_runs_off_event_loop(monkeypatch):
         safety.start()
         try:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-                pending = asyncio.create_task(client.post("/api/target-db/structures/7/send-to-docking"))
+                pending = asyncio.create_task(client.request(method, f"/api/target-db/{path}"))
                 assert await asyncio.to_thread(started.wait, 2)
                 responsive = not release.is_set()
                 release.set()
                 response = await pending
-            assert responsive, "structure preparation blocked other event-loop work"
+            assert responsive, f"{operation} blocked other event-loop work"
             assert thread_ids == [thread_ids[0]] and thread_ids[0] != loop_thread
             assert response.status_code == 200
-            assert response.json() == {"status": "success", "structure_db_id": 7}
+            assert response.json() == payload
         finally:
             release.set()
             safety.cancel()

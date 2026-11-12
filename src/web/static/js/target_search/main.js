@@ -1,6 +1,7 @@
 const TargetSearchApp = (() => {
   const STRUCTURES_PER_PAGE = 8;
-  let currentResults = [];
+  let searchVersion = 0;
+  let detailVersion = 0;
   let selectedTargetId = null;
   let currentDetail = null;
   let structurePage = 1;
@@ -16,6 +17,9 @@ const TargetSearchApp = (() => {
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       runSearch(input.value);
+    });
+    input.addEventListener("input", () => {
+      if (!input.value.trim()) runSearch("");
     });
 
     document.getElementById("targetResults").addEventListener("click", (event) => {
@@ -189,33 +193,34 @@ const TargetSearchApp = (() => {
 
   async function runSearch(query) {
     const trimmed = (query || "").trim();
-    if (!trimmed) {
-      showMessage("请输入搜索关键词。", "error");
-      return;
-    }
-
+    const version = ++searchVersion;
+    ++detailVersion;
     selectedTargetId = null;
     currentDetail = null;
     structurePage = 1;
-    setLoading(true);
     hideMessage();
+    setLoading(Boolean(trimmed));
+    if (!trimmed) {
+      renderInitialState();
+      return;
+    }
     renderResultLoading(trimmed);
 
     try {
       const data = await TargetSearchApi.search(trimmed, collectFilters());
-      currentResults = data.results || [];
+      if (version !== searchVersion) return;
+      const currentResults = data.results || [];
       renderResults(data.query, currentResults);
 
       if (currentResults.length > 0) {
-        await loadDetail(currentResults[0].target_id);
-      } else {
-        renderEmptyResults(trimmed);
+        loadDetail(currentResults[0].target_id);
       }
     } catch (error) {
+      if (version !== searchVersion) return;
       showMessage(error.message, "error");
       renderInitialState();
     } finally {
-      setLoading(false);
+      if (version === searchVersion) setLoading(false);
     }
   }
 
@@ -293,6 +298,8 @@ const TargetSearchApp = (() => {
   }
 
   async function loadDetail(targetId) {
+    const version = ++detailVersion;
+    currentDetail = null;
     hideMessage();
     selectedTargetId = Number(targetId);
     structurePage = 1;
@@ -308,12 +315,14 @@ const TargetSearchApp = (() => {
 
     try {
       const data = await TargetSearchApi.detail(targetId);
+      if (version !== detailVersion) return;
       currentDetail = data;
       selectedTargetId = Number(data.target_id);
       detail.innerHTML = renderDetail(data);
       hydrateExternalLinks(detail, data.external_links);
       refreshSelectedCards();
     } catch (error) {
+      if (version !== detailVersion) return;
       renderInlineError(detail, "detail-empty", "详情加载失败", "", error.message);
     }
   }
