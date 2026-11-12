@@ -12,7 +12,7 @@ const uiSource = fs.readFileSync("src/web/static/js/docking/ui_manager.js", "utf
 assert.match(template, /载入示例[：:]\s*曼氏血吸虫 PDE4A apo（6FG5）\+ 罗氟司特/);
 assert.match(source, /已载入曼氏血吸虫 PDE4A apo（6FG5）和罗氟司特/);
 assert.match(template, /docking\/ui_manager\.js\?v=20261112-docking-resume-v3/);
-assert.match(template, /docking\/main\.js\?v=20261112-demo-ligand-v1/);
+assert.match(template, /docking\/main\.js\?v=20261112-demo-search-v2/);
 assert.match(source, /async function loadDockingDemo\(\)/);
 assert.match(source, /\/api\/docking\/demo\/pde4a-apo/);
 assert.match(source, /PDE4A_apo_6FG5\.pdb/);
@@ -51,14 +51,19 @@ async function checkDemoInputs(ligandAvailable) {
   vm.runInNewContext(source, ctx);
   const smiles = document.getElementById("smiles-input");
   smiles.value = "CCO";
+  const searchFields = ["exhaustiveness", "num_modes", "energy_range"].map(id => document.getElementById(id));
+  const originalValues = ["8", "10", "5"];
+  searchFields.forEach((field, i) => { field.value = originalValues[i]; });
   await ctx.loadDockingDemo();
   if (!ligandAvailable) {
+    assert.deepEqual(searchFields.map(field => field.value), originalValues);
     assert.deepEqual(messages, ["warning"]);
     assert.equal(document.getElementById("protein-file").files.length, 0);
     assert.equal(smiles.value, "CCO");
     return;
   }
   const [file] = document.getElementById("ligand-file").files;
+  assert.deepEqual(searchFields.map(field => field.value), ["24", "20", "3"]);
   assert.equal(file.name, "roflumilast.pdbqt");
   assert.deepEqual(Buffer.from(await file.arrayBuffer()), ligandBytes);
   assert.equal(smiles.value, "");
