@@ -1,10 +1,12 @@
 """Offline lifecycle tests; protocol fixtures are not scientific predictions."""
 
 import io
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
 import sys
+import zipfile
 from threading import Thread
 from types import SimpleNamespace
 
@@ -153,3 +155,20 @@ def test_model_does_not_enable_unbounded_molecule_cache(monkeypatch):
     monkeypatch.setattr(backend_module, "_weight_digest", lambda root: "sha256:" + "a" * 64)
     backend_module.ADMETAIBackend.from_installed_package()
     assert options == [{"num_workers": 0, "cache_molecules": False}]
+
+
+def test_weight_digest_streams_packaged_models_in_original_order(monkeypatch):
+    contents = b"z" * (2 * 1024 * 1024 + 17)
+    with zipfile.ZipFile(io.BytesIO(), "w") as archive:
+        archive.writestr("resources/models/z.pt", contents)
+        archive.writestr("resources/models/a/b.pt", b"first")
+        archive.writestr("resources/models/notes.txt", b"ignored")
+        read = zipfile.ZipExtFile.read
+
+        def bounded_read(stream, size=-1):
+            assert 0 < size < len(contents), "model weights must be read in bounded chunks"
+            return read(stream, size)
+
+        monkeypatch.setattr(zipfile.ZipExtFile, "read", bounded_read)
+        expected = sha256(b"a/b.pt\x00firstz.pt\x00" + contents).hexdigest()
+        assert backend_module._weight_digest(zipfile.Path(archive)) == f"sha256:{expected}"

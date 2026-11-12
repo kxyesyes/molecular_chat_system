@@ -106,23 +106,25 @@ def _canonical_smiles(value: str) -> str | None:
 def _weight_digest(package_root: Any) -> str:
     """Hash package-bundled model bytes without exposing their local path."""
     model_root = package_root.joinpath("resources", "models")
-    entries: list[tuple[str, bytes]] = []
+    digest = sha256()
+    found_weights = False
 
     def visit(node: Any, relative: str = "") -> None:
+        nonlocal found_weights
         if node.is_dir():
             for child in sorted(node.iterdir(), key=lambda item: item.name):
                 visit(child, f"{relative}/{child.name}".lstrip("/"))
         elif node.name.endswith(".pt"):
-            entries.append((relative, node.read_bytes()))
+            found_weights = True
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            with node.open("rb") as weight:
+                while chunk := weight.read(1024 * 1024):
+                    digest.update(chunk)
 
     visit(model_root)
-    if not entries:
+    if not found_weights:
         raise RuntimeError("ADMET-AI model weights were not found")
-    digest = sha256()
-    for name, content in entries:
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(content)
     return f"sha256:{digest.hexdigest()}"
 
 
