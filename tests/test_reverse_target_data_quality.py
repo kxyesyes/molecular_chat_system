@@ -1,3 +1,4 @@
+import json
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pandas as pd
@@ -19,8 +20,10 @@ def test_target_links_use_source_identifiers_on_both_prediction_paths(tmp_path):
     from src.reverse_target.predictor import _aggregate_by_target
 
     frame = _rows().iloc[:1].assign(target_chembl_id="CHEMBL203", target_uniprot_id="P00533")
+    file = tmp_path / "training.tsv"
+    frame.assign(organism="").to_csv(file, sep="\t", index=False)
     predictor = ReverseTargetPredictor(tmp_path)
-    predictor.df = frame
+    predictor.df = pd.read_csv(file, sep="\t")
     morgan, maccs = predictor.compute_query_fingerprints("CCO")
     predictor.morgan_fps, predictor.maccs_fps = morgan[None, :], maccs[None, :]
     predictor.morgan_popcounts, predictor.maccs_popcounts = np.array([morgan.sum()]), np.array([maccs.sum()])
@@ -28,6 +31,8 @@ def test_target_links_use_source_identifiers_on_both_prediction_paths(tmp_path):
     for row in [predictor.predict("CCO")[0], _aggregate_by_target(predictor.get_raw_similar_molecules("CCO"))[0]]:
         assert row["chembl_search_url"].endswith("/explore/target/CHEMBL203")
         assert row["uniprot_search_url"] == "https://www.uniprot.org/uniprotkb/P00533/entry"
+        assert row["organism"] == ""
+        json.dumps(row, allow_nan=False)
 
 
 @pytest.mark.parametrize("species,taxon,suffix", [

@@ -30,7 +30,8 @@ from src.target_search.remote_clients import _is_uniprot_accession
 
 
 def _target_fields(row):
-    fields = {}
+    organism = row.get('organism')
+    fields = {'organism': str(organism) if pd.notna(organism) else ''}
     for key in ('target_chembl_id', 'target_uniprot_id', 'taxon_id'):
         value = row.get(key)
         if pd.notna(value) and value != '':
@@ -813,7 +814,6 @@ class ReverseTargetPredictor:
             quality_eligible = {'true': True, 'false': False}.get(quality_eligible.strip().casefold())
         record = {
             'target_name': target_name,
-            'organism': row.get('organism', ''),
             'canonical_smiles': row.get('canonical_smiles', ''),
             'molecule_chembl_id': row.get('molecule_chembl_id', ''),
             'standard_type': row.get('standard_type', ''),
@@ -906,7 +906,6 @@ class ReverseTargetPredictor:
             candidate = {
                 'target_name':       str(row['target_name']),
                 **_target_fields(row),
-                'organism':          str(row['organism']),
                 'canonical_smiles':  str(row['canonical_smiles']),
                 'molecule_chembl_id':str(row['molecule_chembl_id']),
                 'standard_type':     str(row['standard_type']),
