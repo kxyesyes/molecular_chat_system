@@ -209,6 +209,26 @@ const RtResults = (() => {
     return `/target-search?query=${encodeURIComponent(targetName || "")}`;
   }
 
+  function _targetLinks(result) {
+    const links = [];
+    function add(url, label) {
+      links.push('<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer">' + label + '</a>');
+    }
+    const chembl = typeof result.chembl_search_url === "string" ? result.chembl_search_url : "";
+    if (/^https:\/\/www\.ebi\.ac\.uk\/chembl\/web_components\/explore\/target\/CHEMBL[1-9][0-9]*$/.test(chembl)) {
+      add(chembl, "ChEMBL 条目");
+    } else if (chembl.startsWith("https://www.ebi.ac.uk/chembl/web_components/search_results/")) {
+      add(chembl, "搜索 ChEMBL");
+    }
+    const uniprot = typeof result.uniprot_search_url === "string" ? result.uniprot_search_url : "";
+    if (/^https:\/\/www\.uniprot\.org\/uniprotkb\/[A-Z0-9]+\/entry$/.test(uniprot)) {
+      add(uniprot, "UniProt 条目");
+    } else if (uniprot.startsWith("https://www.uniprot.org/uniprotkb?query=%22")) {
+      add(uniprot, "搜索 UniProt");
+    }
+    return links.length ? '<details><summary>外部数据库</summary>' + links.join(' · ') + '</details>' : '';
+  }
+
   function _organismTag(result) {
     const organism = result.organism || "-";
     const isHuman = organism.toLowerCase() === "human" || organism.toLowerCase() === "homo sapiens";
@@ -224,6 +244,7 @@ const RtResults = (() => {
           <td class="rt-rank-cell">#${absoluteIndex + 1}</td>
           <td class="rt-target-cell">
             <div class="rt-target-title" title="${escapeHtml(targetName)}">${escapeHtml(targetName)}</div>
+            ${_targetLinks(result)}
           </td>
           <td>${_organismTag(result)}</td>
           <td class="rt-id-cell">
@@ -445,7 +466,7 @@ const RtResults = (() => {
             <tr data-batch-row="${rowKey}">
               <td>#${idx++}</td>
               <td data-batch-smiles style="font-family:monospace;font-size:12px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></td>
-              <td style="font-weight:600;color:#1e293b;">${escapeHtml(targetName)}</td>
+              <td style="font-weight:600;color:#1e293b;">${escapeHtml(targetName)}${_targetLinks(target)}</td>
               <td>${_organismTag(target)}</td>
               <td><span class="tag tag-activity">${escapeHtml(standardType)}</span>
                 <span class="rt-activity-value">${escapeHtml(_activityValue(target))}</span></td>

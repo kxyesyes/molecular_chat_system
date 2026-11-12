@@ -7,8 +7,10 @@ import numpy as np
 import pandas as pd
 import os
 import json
+import re
 from pathlib import Path
 from typing import List, Dict, Tuple
+from urllib.parse import quote, urlencode
 from rdkit import Chem
 from rdkit import DataStructs
 from rdkit.Chem import AllChem, MACCSkeys
@@ -24,6 +26,49 @@ from src.reverse_target.owned_source import (
     validate_envelope, validate_popcount_rows,
 )
 from src.system.redaction import looks_like_credential
+from src.target_search.remote_clients import _is_uniprot_accession
+
+
+def _target_fields(row):
+    fields = {}
+    for key in ('target_chembl_id', 'target_uniprot_id', 'taxon_id'):
+        value = row.get(key)
+        if pd.notna(value) and value != '':
+            fields[key] = value.item() if isinstance(value, np.generic) else value
+    return fields
+
+
+def _target_links(record):
+    """Only database-specific target IDs can identify an entry. Names start searches."""
+    chembl_id = str(record.get('target_chembl_id', '')).strip().upper()
+    accession = str(record.get('target_uniprot_id', '')).strip().upper()
+    raw_name = record.get('target_name')
+    name = raw_name.strip() if isinstance(raw_name, str) else ''
+    if name.casefold() in {'nan', '<na>', 'unknown', 'n/a', 'none', '-', '.', '..'}:
+        name = ''
+    base = 'https://www.ebi.ac.uk/chembl/web_components'
+    chembl = uniprot = ''
+    if re.fullmatch(r'CHEMBL[1-9][0-9]*', chembl_id):
+        chembl = f'{base}/explore/target/{chembl_id}'
+    elif name:
+        chembl = f'{base}/search_results/{quote(name, safe="")}'
+    if _is_uniprot_accession(accession):
+        uniprot = f'https://www.uniprot.org/uniprotkb/{accession}/entry'
+    elif name:
+        def phrase(value):
+            return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+        query = phrase(name)
+        taxon = str(record.get('taxon_id', '')).strip()
+        organism = record.get('organism')
+        if re.fullmatch(r'[1-9][0-9]*(?:\.0+)?', taxon):
+            query += ' AND organism_id:' + taxon.split('.')[0]
+        elif isinstance(organism, str) and organism.strip().casefold() not in {
+            '', 'unknown', 'unspecified', 'unidentified', 'not specified', 'n/a', 'none', 'nan', '-',
+        }:
+            query += ' AND organism_name:' + phrase(organism.strip())
+        uniprot = 'https://www.uniprot.org/uniprotkb?' + urlencode({'query': query})
+    return {'chembl_search_url': chembl, 'uniprot_search_url': uniprot}
 
 
 def _assay_fields(row):
@@ -789,11 +834,10 @@ class ReverseTargetPredictor:
                 'source_file': source_file,
                 'row_index': int(idx),
             },
-            'chembl_search_url': f"https://www.ebi.ac.uk/chembl/target_report_card/{target_name.replace(' ', '%20')}/",
-            'uniprot_search_url': f"https://www.uniprot.org/uniprotkb?query={target_name.replace(' ', '+')}+AND+organism_id:9606",
+            **_target_fields(row),
         }
         for field in (
-            'target_chembl_id', 'target_uniprot_id', 'taxon_id', 'document_chembl_id',
+            'document_chembl_id',
             'publication_id', 'assay_confidence_score', 'data_validity_comment',
         ):
             if field in frame.columns and pd.notna(row.get(field)):
@@ -804,6 +848,7 @@ class ReverseTargetPredictor:
         for field in ('standard_relation', 'standard_units'):
             if field in record:
                 record['evidence'][field] = record[field]
+        record.update(_target_links(record))
         return record
     
     def get_stats(self) -> Dict:
@@ -860,6 +905,7 @@ class ReverseTargetPredictor:
             row = self.df.iloc[idx]
             candidate = {
                 'target_name':       str(row['target_name']),
+                **_target_fields(row),
                 'organism':          str(row['organism']),
                 'canonical_smiles':  str(row['canonical_smiles']),
                 'molecule_chembl_id':str(row['molecule_chembl_id']),
@@ -976,16 +1022,7 @@ def _aggregate_by_target(
 
     for target, result in target_map.items():
         result['similar_count'] = target_counts[target]
-        # 生成搜索链接
-        target_name = str(result.get('target_name', ''))
-        result.setdefault(
-            'chembl_search_url',
-            f"https://www.ebi.ac.uk/chembl/target_report_card/{target_name.replace(' ', '%20')}/"
-        )
-        result.setdefault(
-            'uniprot_search_url',
-            f"https://www.uniprot.org/uniprotkb?query={target_name.replace(' ', '+')}+AND+organism_id:9606"
-        )
+        result.update(_target_links(result))
 
     results = list(target_map.values())
     results.sort(key=lambda x: x.get(score_field, 0), reverse=True)

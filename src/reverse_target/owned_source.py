@@ -575,7 +575,8 @@ def validate_envelope(envelope, *, smiles, controls, expected):
                 raise ReverseProofError("record_schema", "records")
             for key in strings:
                 v = record[key]
-                if type(v) is not str or len(v) > 8192 or (key != "organism" and not v.strip()):
+                may_be_empty = key in ("organism", "chembl_search_url", "uniprot_search_url")
+                if type(v) is not str or len(v) > 8192 or (not may_be_empty and not v.strip()):
                     raise ReverseProofError("record_field", key)
             if "measurement_status" in record:
                 if (record["measurement_status"] != UNIT_VERIFICATION_REQUIRED or record["standard_value"] is not None

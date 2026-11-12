@@ -1,3 +1,5 @@
+from urllib.parse import parse_qs, unquote, urlsplit
+
 import pandas as pd
 import pytest
 import numpy as np
@@ -11,6 +13,42 @@ from src.reverse_target.data_quality import (
 )
 from src.reverse_target.generate_fingerprints import FingerprintGenerator
 from src.reverse_target.predictor import ReverseTargetPredictor
+
+
+def test_target_links_use_source_identifiers_on_both_prediction_paths(tmp_path):
+    from src.reverse_target.predictor import _aggregate_by_target
+
+    frame = _rows().iloc[:1].assign(target_chembl_id="CHEMBL203", target_uniprot_id="P00533")
+    predictor = ReverseTargetPredictor(tmp_path)
+    predictor.df = frame
+    morgan, maccs = predictor.compute_query_fingerprints("CCO")
+    predictor.morgan_fps, predictor.maccs_fps = morgan[None, :], maccs[None, :]
+    predictor.morgan_popcounts, predictor.maccs_popcounts = np.array([morgan.sum()]), np.array([maccs.sum()])
+    predictor._loaded = True
+    for row in [predictor.predict("CCO")[0], _aggregate_by_target(predictor.get_raw_similar_molecules("CCO"))[0]]:
+        assert row["chembl_search_url"].endswith("/explore/target/CHEMBL203")
+        assert row["uniprot_search_url"] == "https://www.uniprot.org/uniprotkb/P00533/entry"
+
+
+@pytest.mark.parametrize("species,taxon,suffix", [
+    ("Mus musculus", 10090.0, " AND organism_id:10090"),
+    ("Mus musculus", None, ' AND organism_name:"Mus musculus"'),
+    ("", None, ""), ("Unknown", "invalid", ""),
+])
+def test_missing_target_ids_link_to_explicit_name_search(tmp_path, species, taxon, suffix):
+    from src.reverse_target.predictor import _aggregate_by_target
+
+    name = "A/B & C"
+    fields = dict(target_name=name, organism=species, taxon_id=taxon,
+                  target_chembl_id="invalid", target_uniprot_id="not an accession")
+    predictor = ReverseTargetPredictor(tmp_path)
+    for row in [predictor._similarity_record(pd.DataFrame([fields]), 0, .5, .5, .5),
+                _aggregate_by_target([fields])[0]]:
+        path = urlsplit(row["chembl_search_url"]).path
+        assert path.startswith("/chembl/web_components/search_results/")
+        assert unquote(path.rsplit("/", 1)[1]) == name
+        query = parse_qs(urlsplit(row["uniprot_search_url"]).query)
+        assert query == {"query": [f'"{name}"' + suffix]}
 
 
 def _rows():

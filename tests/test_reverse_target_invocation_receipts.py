@@ -50,6 +50,21 @@ def make_writer_database(directory, *, cached=True, smiles=("CCO", "CCC")):
     return predictor
 
 
+@pytest.mark.parametrize("compact", [True, False])
+def test_missing_target_identity_omits_external_links_in_valid_receipt(tmp_path, compact):
+    predictor = make_writer_database(tmp_path)
+    path = predictor.training_data_path
+    path.write_text(path.read_text(encoding="utf-8").replace("Synthetic A", "Unknown"), encoding="utf-8")
+    if compact:
+        predictor.initialize_compact_strict()
+    else:
+        predictor.initialize_strict()
+    envelope = predictor.predict_with_receipt("CCO")
+    record = envelope["records"][0]
+    assert record["chembl_search_url"] == record["uniprot_search_url"] == ""
+    predictor.validate_prediction_source(envelope, smiles="CCO", expected=predictor.capture_prediction_source())
+
+
 @pytest.mark.parametrize("corruption", ["extra-leading-column", "blank-record"])
 def test_strict_tsv_rejects_silently_normalized_records(tmp_path, corruption):
     p = make_writer_database(tmp_path)

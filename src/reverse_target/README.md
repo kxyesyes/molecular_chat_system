@@ -201,6 +201,12 @@ df = df[df['organism'] == 'Human']
 
 ## 进阶使用
 
+### 结果中的靶点外链
+
+展开结果行的“外部数据库”可查看来源条目或按名称搜索。ChEMBL 条目使用源数据中的 `target_chembl_id`，UniProt 条目使用 `target_uniprot_id`。仅有名称时显示“搜索 ChEMBL”或“搜索 UniProt”。UniProt 搜索优先采用来源记录的 NCBI 分类号，其次采用已知物种名称；物种缺失时搜索所有物种。ChEMBL 名称搜索覆盖多个实体类型。[ChEMBL 界面链接说明](https://chembl.gitbook.io/chembl-interface-documentation/frequently-asked-questions/chembl-interface-questions)
+
+2D、紧凑索引与 3D 聚合沿用字符串字段 `chembl_search_url` 和 `uniprot_search_url`。缺少可用名称及对应标识符时，该库的 URL 为空字符串，页面省略对应入口。生产端与严格回执消费者需配套升级以支持空链接。历史回执保留原文供校验，界面省略旧版按名称拼出的条目和默认限定人类的链接。
+
 ### 自定义指纹参数
 
 编辑 `generate_fingerprints.py`：

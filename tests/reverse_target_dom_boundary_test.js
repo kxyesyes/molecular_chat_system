@@ -8,6 +8,22 @@ const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "../src/web/static/js/reverse_target/results_renderer.js"), "utf8");
 const viewerSource = fs.readFileSync(path.join(__dirname, "../src/web/static/js/reverse_target/viewer_3d.js"), "utf8");
 
+test("target links distinguish database records from searches and omit legacy guessed links", () => {
+  const renderer = vm.runInNewContext(source + "\nRtResults;", { window: {} });
+  const render = fields => renderer._test.singleResultRow({target_name: "Target", ...fields}, 0, false);
+  const direct = render({chembl_search_url: "https://www.ebi.ac.uk/chembl/web_components/explore/target/CHEMBL203",
+    uniprot_search_url: "https://www.uniprot.org/uniprotkb/P00533/entry"});
+  assert.match(direct, />ChEMBL 条目</);
+  assert.match(direct, />UniProt 条目</);
+  const search = render({chembl_search_url: "https://www.ebi.ac.uk/chembl/web_components/search_results/Target",
+    uniprot_search_url: "https://www.uniprot.org/uniprotkb?query=%22Target%22"});
+  assert.match(search, />搜索 ChEMBL</);
+  assert.match(search, />搜索 UniProt</);
+  const legacy = render({chembl_search_url: "https://www.ebi.ac.uk/chembl/target_report_card/Target/",
+    uniprot_search_url: "https://www.uniprot.org/uniprotkb?query=Target+AND+organism_id:9606"});
+  assert.doesNotMatch(legacy, /target_report_card|organism_id:9606/);
+});
+
 test("ranked neighbor rows preserve assay precision, relation and reported units", () => {
   const renderer = vm.runInNewContext(source + "\nRtResults;", { window: {} });
   const render = fields => renderer._test.singleResultRow({ standard_type: "IC50", final_similarity: 0.98, ...fields }, 0, false);
