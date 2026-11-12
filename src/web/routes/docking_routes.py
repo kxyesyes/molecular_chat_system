@@ -1,6 +1,7 @@
 """Docking route registration."""
 import asyncio
 import copy
+import hashlib
 import logging
 import math
 import os
@@ -22,6 +23,8 @@ _SAFE_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
 _HISTORY_PAGE_SIZE = 200
 _HISTORY_SCAN_LIMIT = 10_000
 DEMO_PDE4A_APO_PATH = Path(__file__).resolve().parents[3] / "data" / "samples" / "PDE4A_apo_6FG5.pdb"
+DEMO_ROFLUMILAST_PATH = DEMO_PDE4A_APO_PATH.with_name("roflumilast.pdbqt")
+DEMO_ROFLUMILAST_SHA256 = "c19a0d8de0934fa2a11ddee86a19be4421d2970b793c8e3664992471da398b5c"
 
 
 def _positive_float_env(name: str, default: float) -> float:
@@ -802,6 +805,19 @@ def setup_docking_routes(
             media_type="chemical/x-pdb",
             headers={"Cache-Control": "private, no-store"},
         )
+
+    @app.get("/api/docking/demo/roflumilast.pdbqt")
+    def get_roflumilast_demo(request: Request):
+        _session_id(request)
+        try:
+            content = DEMO_ROFLUMILAST_PATH.read_bytes()
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="罗氟司特示例配体文件缺失。") from exc
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail="无法读取罗氟司特示例配体。") from exc
+        if hashlib.sha256(content).hexdigest() != DEMO_ROFLUMILAST_SHA256:
+            raise HTTPException(status_code=503, detail="罗氟司特示例配体校验失败。")
+        return Response(content, media_type="application/octet-stream")
 
     @app.post("/api/docking/batch_submit")
     async def submit_batch_docking_job(

@@ -141,37 +141,34 @@ document.addEventListener("DOMContentLoaded", function () {
   });
 });
 
-const ROFLUMILAST_DEMO_SMILES =
-  "C1CC1COC2=C(C=CC(=C2)C(=O)NC3=C(C=NC=C3Cl)Cl)OC(F)F";
+async function fetchDockingDemoFile(url, filename) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.detail || payload.message || `无法载入 ${filename}`);
+  }
+  return new File([await response.blob()], filename);
+}
 
 async function loadDockingDemo() {
   const button = document.getElementById("docking-demo-btn");
   const proteinInput = document.getElementById("protein-file");
+  const ligandInput = document.getElementById("ligand-file");
   const smilesInput = document.getElementById("smiles-input");
-  if (!button || !proteinInput || !smilesInput) return;
+  if (!button || !proteinInput || !ligandInput || !smilesInput) return;
 
   button.disabled = true;
   const originalText = button.textContent;
   button.textContent = "正在载入示例…";
   try {
-    const response = await fetch("/api/docking/demo/pde4a-apo", {
-      headers: { Accept: "chemical/x-pdb" },
-    });
-    if (!response.ok) {
-      let detail = "本地 PDE4A apo 示例不可用";
-      try {
-        const payload = await response.json();
-        detail = payload.detail || payload.message || detail;
-      } catch (_) {}
-      throw new Error(detail);
-    }
     if (typeof DataTransfer === "undefined" || typeof File === "undefined") {
-      throw new Error("当前浏览器不支持自动载入示例，请手动上传 PDB 文件。");
+      throw new Error("当前浏览器不支持自动载入示例，请手动上传受体和配体。");
     }
 
-    const file = new File([await response.blob()], "PDE4A_apo_6FG5.pdb", {
-      type: "chemical/x-pdb",
-    });
+    const [file, ligand] = await Promise.all([
+      fetchDockingDemoFile("/api/docking/demo/pde4a-apo", "PDE4A_apo_6FG5.pdb"),
+      fetchDockingDemoFile("/api/docking/demo/roflumilast.pdbqt", "roflumilast.pdbqt"),
+    ]);
     const transfer = new DataTransfer();
     transfer.items.add(file);
     proteinInput.files = transfer.files;
@@ -185,13 +182,12 @@ async function loadDockingDemo() {
     if (singleModeButton && typeof singleModeButton.click === "function") {
       singleModeButton.click();
     }
-    smilesInput.value = ROFLUMILAST_DEMO_SMILES;
+    smilesInput.value = "";
     smilesInput.dispatchEvent(new Event("input", { bubbles: true }));
-    const previewLoaded =
-      typeof loadSmilesPreview === "function"
-        ? await loadSmilesPreview(ROFLUMILAST_DEMO_SMILES)
-        : false;
-    if (!previewLoaded) throw new Error("罗氟司特 3D 预览生成失败");
+    const ligandTransfer = new DataTransfer();
+    ligandTransfer.items.add(ligand);
+    ligandInput.files = ligandTransfer.files;
+    ligandInput.dispatchEvent(new Event("change", { bubbles: true }));
     Utils.showToast("已载入曼氏血吸虫 PDE4A apo（6FG5）和罗氟司特。请点击“自动定位”，或输入对接盒中心坐标。", "success", 6000);
   } catch (error) {
     Utils.showToast(`示例载入失败：${error.message || "未知错误"}`, "warning", 7000);

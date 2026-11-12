@@ -20,4 +20,6 @@ def test_sample_check_includes_the_docking_demo_file(tmp_path, monkeypatch):
     assert not health_check.check_sample_assets()[0]
     demo.rmdir()
     demo.write_text("fixture", encoding="utf-8")
+    assert not health_check.check_sample_assets()[0]
+    (samples / "roflumilast.pdbqt").write_text("fixture", encoding="utf-8")
     assert health_check.check_sample_assets()[0]

@@ -627,7 +627,7 @@ def check_data_registry() -> tuple[bool, str]:
 
 def check_sample_assets() -> tuple[bool, str]:
     sample_dir = PROJECT_ROOT / "data" / "samples"
-    expected = [sample_dir / name for name in ("5.sdf", "MAGL_5zun.pdb", "PDE4A_apo_6FG5.pdb")]
+    expected = [sample_dir / name for name in ("5.sdf", "MAGL_5zun.pdb", "PDE4A_apo_6FG5.pdb", "roflumilast.pdbqt")]
     missing = [path.name for path in expected if not path.is_file()]
     if missing:
         return False, f"missing sample assets in {sample_dir}: {', '.join(missing)}"
