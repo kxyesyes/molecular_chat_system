@@ -8,9 +8,13 @@ var FragmentBrowser = (function () {
   var S = DesignState;
   var Api = DesignApi;
   var UI = DesignUI;
+  var activeRequest = null;
 
   /** 加载片段列表 */
   async function loadFrags() {
+    if (activeRequest) activeRequest.abort();
+    var request = new AbortController();
+    activeRequest = request;
     var params = { page: S.page, page_size: S.pageSize };
     if (S.search) params.search = S.search;
     S.filters.forEach(function (k) {
@@ -22,7 +26,8 @@ var FragmentBrowser = (function () {
       activeCount > 0 ? "过滤中 (" + activeCount + ")" : "加载中";
 
     try {
-      var d = await Api.fetchFragments(params);
+      var d = await Api.fetchFragments(params, request.signal);
+      if (request.signal.aborted) return;
       if (d.success) {
         renderFragGrid(d.fragments);
         var numEl = document.getElementById("dbCountNum");
@@ -38,6 +43,7 @@ var FragmentBrowser = (function () {
         UI.toast("片段库查询失败: " + (d.error || "未知错误"), "error");
       }
     } catch (e) {
+      if (request.signal.aborted) return;
       document.getElementById("fragBadge").textContent = "网络错误";
       UI.toast("片段库请求失败: " + e.message, "error");
       console.error("loadFrags error:", e);

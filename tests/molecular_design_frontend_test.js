@@ -52,3 +52,31 @@ assert.ok(!editor.includes("candidates.sort"), "candidate order must remain gene
 assert.ok(history.includes("props: props || {}"), "history must preserve unavailable properties without coercing them to zero");
 
 console.log("molecular design frontend contract passed");
+
+require("node:test").test("latest fragment query owns its grid, badge and pagination", async () => {
+  const requests = [], elements = new Map(), errors = [];
+  function element(id) {
+    if (!elements.has(id)) elements.set(id, {});
+    return elements.get(id);
+  }
+  const context = { document: {getElementById: element}, console, AbortController,
+    DesignState: {page: 1, pageSize: 10, filters: new Set()},
+    DesignApi: {fetchFragments: params => new Promise((resolve, reject) => requests.push({params, resolve, reject}))},
+    DesignUI: {escInlineJs: String, escText: String, toast: msg => errors.push(msg)},
+  };
+  const browser = require("node:vm").runInNewContext(fragments + "\nFragmentBrowser;", context);
+  element("fragSearch").value = "C";
+  browser.onSearch();
+  element("fragSearch").value = "CN";
+  browser.onSearch();
+  browser.changePage(1);
+  requests[2].resolve({success: true, total: 15, fragments: [{fragment_smiles: "CN"}]});
+  await new Promise(resolve => setImmediate(resolve));
+  requests[0].resolve({success: true, total: 7, fragments: [{fragment_smiles: "CCC"}]});
+  requests[1].reject(new Error("old query failed"));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(element("fragGrid").innerHTML, />CN</);
+  assert.equal(element("pageInfo").textContent, "2/2");
+  assert.equal(element("fragBadge").textContent, "15 个");
+  assert.deepEqual(errors, []);
+});

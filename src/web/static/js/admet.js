@@ -32,27 +32,7 @@
     return element;
   }
   function clear(element) { if (element) element.replaceChildren(); }
-  function extractUploadedSmiles(filename, content) {
-    const name = String(filename || "").toLowerCase();
-    const lines = String(content || "").split(/\r?\n/).map(line => line.trim()).filter(line => line && !/^(#|;|\/\/)/.test(line));
-    if (!lines.length) return "";
-    if (/\.csv$/.test(name)) {
-      const cells = line => line.split(",").map(value => value.trim().replace(/^\"|\"$/g, ""));
-      const header = cells(lines[0]);
-      const smilesIndex = header.findIndex(value => /^(canonical_)?smiles$/i.test(value));
-      const dataLines = smilesIndex >= 0 ? lines.slice(1) : lines;
-      for (const line of dataLines) {
-        const value = cells(line)[smilesIndex >= 0 ? smilesIndex : 0];
-        if (value && !/^(canonical_)?smiles$/i.test(value)) return value;
-      }
-      return "";
-    }
-    for (const line of lines) {
-      const candidate = line.split(/[\t\s,;]+/)[0].trim();
-      if (candidate && !/^(smiles|canonical_smiles)$/i.test(candidate)) return candidate;
-    }
-    return "";
-  }
+  const { extractUploadedSmiles } = window.MedChatSmilesFile;
   function normalizedStatus(response) {
     const status = response && typeof response.status === "string" ? response.status : "failed";
     return statusCatalog.normalize(status);

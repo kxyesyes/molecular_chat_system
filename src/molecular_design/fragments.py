@@ -194,12 +194,9 @@ class FragmentRepository:
         if df.empty:
             return []
 
-        sub = df.copy()
+        sub = df
         for label in infer_label_filters(command, df.columns):
             sub = sub[sub[label] == 1]
-
-        if sub.empty:
-            sub = df
 
         if "frequency" in sub.columns:
             sub = sub.sort_values("frequency", ascending=False)

@@ -8,9 +8,9 @@ var DesignApi = (function () {
   var _BASE = "/api/design";
 
   /** 获取片段列表（带搜索/筛选/分页） */
-  async function fetchFragments(params) {
+  async function fetchFragments(params, signal) {
     var qs = new URLSearchParams(params);
-    var r = await fetch(_BASE + "/fragments?" + qs);
+    var r = await fetch(_BASE + "/fragments?" + qs, { signal: signal });
     if (!r.ok) throw new Error("HTTP " + r.status);
     return r.json();
   }

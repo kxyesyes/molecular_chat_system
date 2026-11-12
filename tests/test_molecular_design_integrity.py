@@ -173,6 +173,26 @@ def test_lower_logp_does_not_create_contradictory_fragment_labels():
     assert labels == ["label_hydrophilic"]
 
 
+def test_empty_filtered_recommendation_keeps_unrelated_fragments_out_of_reply(tmp_path):
+    from src.molecular_design.ai import build_fallback_reply
+    from src.molecular_design.service import MolecularDesignService
+
+    csv_path = tmp_path / "fragments.csv"
+    pd.DataFrame([
+        {"fragment_smiles": "[*]C", "label_hydrophilic": 0, "frequency": 2},
+        {"fragment_smiles": "[*]CC", "label_hydrophilic": 0, "frequency": 5},
+    ]).to_csv(csv_path, index=False)
+    service = MolecularDesignService(csv_path, tmp_path)
+    generic = service.recommend_fragments("推荐常用片段")
+    assert [row["fragment_smiles"] for row in generic] == ["[*]CC", "[*]C"]
+
+    filtered = service.recommend_fragments("降低 LogP")
+    assert filtered == []
+    reply = build_fallback_reply("降低 LogP", "CCO", {}, filtered)
+    assert "未找到符合条件的本地片段" in reply
+    assert "[*]" not in reply
+
+
 def test_lower_logp_takes_precedence_over_generic_lipophilic_wording():
     labels = infer_label_filters(
         "降低 LogP，同时避免亲脂片段",
