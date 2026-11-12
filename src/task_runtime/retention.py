@@ -12,12 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 from typing import Any
 
+from .completion import is_docking_artifact_locator
 from .database import connection, get_task_db_path
 from .models import TaskStatus
+from .staging import DockingInputStager, ManifestError, _reject_link_components
 
 
 _TERMINAL_VALUES = tuple(status.value for status in (
@@ -66,40 +68,20 @@ def _safe_artifact_path(root: Path, raw: Any) -> Path | None:
         return None
     candidate_text = raw.strip()
     candidate = Path(candidate_text)
-    if candidate.is_absolute() or candidate == Path(".") or ".." in candidate.parts:
+    if candidate.anchor or PureWindowsPath(candidate_text).anchor or ".." in candidate.parts:
         return None
-    current = root
-    for part in candidate.parts:
-        current = current / part
-        try:
-            if current.is_symlink():
-                return None
-        except OSError:
-            return None
-    resolved = candidate if candidate == Path(".") else root / candidate
+    current = root / candidate
     try:
-        resolved = resolved.resolve(strict=False)
-        resolved.relative_to(root)
+        _reject_link_components(current)
+        resolved = current.resolve(strict=False)
+        if root not in resolved.parents:
+            return None
     except (OSError, ValueError):
         return None
     return resolved
 
 
-def _artifact_paths(root: Path | None, row: dict[str, Any]) -> tuple[list[Path], str | None]:
-    raw_artifacts = row.get("artifacts_json")
-    try:
-        artifacts = json.loads(raw_artifacts or "[]")
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return [], "invalid_artifacts"
-    if not isinstance(artifacts, list):
-        return [], "invalid_artifacts"
-    raw_paths: list[Any] = []
-    for item in artifacts:
-        if not isinstance(item, dict) or "path" not in item:
-            continue
-        raw_paths.append(item["path"])
-    if row.get("input_manifest_path"):
-        raw_paths.append(row["input_manifest_path"])
+def _artifact_paths(root: Path | None, raw_paths: list[Any]) -> tuple[list[Path], str | None]:
     if not raw_paths:
         return [], None
     if root is None:
@@ -112,6 +94,36 @@ def _artifact_paths(root: Path | None, row: dict[str, Any]) -> tuple[list[Path],
         if path not in paths:
             paths.append(path)
     return paths, None
+
+
+def _process_task_artifacts(
+    row: dict[str, Any], root: Path | None, staging_root: Path | None, apply: bool,
+) -> tuple[list[Path], str | None]:
+    try:
+        artifacts = json.loads(row["artifacts_json"] or "[]")
+    except (TypeError, ValueError):
+        return [], "invalid_artifacts"
+    if not isinstance(artifacts, list) or any(not isinstance(item, dict) for item in artifacts):
+        return [], "invalid_artifacts"
+    paths = [item["path"] for item in artifacts if "path" in item]
+    manifest = row["input_manifest_path"]
+    if row["task_type"] == "docking":
+        if manifest is not None:
+            if staging_root is None:
+                return [], "staging_root_required"
+            if not isinstance(manifest, str) or not Path(manifest).is_absolute():
+                return [], "manifest_path_invalid"
+            try:
+                stager = DockingInputStager(staging_root, existing_only=True)
+                stager.purge_terminal_stage(row["task_id"], manifest, paths, apply=apply)
+            except ManifestError as exc:
+                return [], exc.reason_code
+            return [], None
+        if any(is_docking_artifact_locator(path) for path in paths):
+            return [], "docking_manifest_required"
+    if manifest is not None:
+        paths.append(manifest)
+    return _artifact_paths(root, paths)
 
 
 def _consent_skip_reason(conn, task_id: str) -> str | None:
@@ -147,6 +159,7 @@ def purge_terminal_tasks(
     db_path: str | Path | None = None,
     *,
     artifact_root: str | Path | None = None,
+    staging_root: str | Path | None = None,
     retention_days: int = 90,
     now: datetime | None = None,
     apply: bool = False,
@@ -155,7 +168,8 @@ def purge_terminal_tasks(
 
     Only terminal rows are considered. Any durable docking consent membership
     excludes the task, its evidence and private files, even after settlement.
-    Malformed metadata or paths outside ``artifact_root`` are also skipped.
+    Staged docking trees require an explicit private ``staging_root`` and a
+    verified task-bound manifest. Generic paths use the separate ``artifact_root``.
     ``apply`` must be explicitly true to delete anything. Classification errors
     propagate without treating unavailable consent evidence as non-membership.
     """
@@ -166,6 +180,11 @@ def purge_terminal_tasks(
     root = Path(artifact_root).expanduser().resolve() if artifact_root is not None else None
     if root is not None and not root.is_dir():
         raise ValueError("artifact_root must be an existing directory")
+    stage = Path(staging_root).expanduser().absolute() if staging_root is not None else None
+    if stage is not None and root is not None:
+        resolved_stage = stage.resolve()
+        if root.is_relative_to(resolved_stage) or resolved_stage.is_relative_to(root):
+            raise ValueError("artifact_root and staging_root must be disjoint")
     cutoff = _as_utc(now) - timedelta(days=retention_days)
     database_path = get_task_db_path(db_path)
     eligible: list[str] = []
@@ -174,50 +193,50 @@ def purge_terminal_tasks(
     reasons: dict[str, str] = {}
 
     with connection(database_path) as conn:
-        if apply:
-            # SELECT alone does not start a write transaction. Hold the writer
-            # from classification through physical deletion and commit so a
-            # consent cannot appear between the check and a destructive step.
-            conn.execute("BEGIN IMMEDIATE")
         placeholders = ", ".join("?" for _ in _TERMINAL_VALUES)
-        rows = conn.execute(
-            f"SELECT * FROM tasks WHERE status IN ({placeholders}) "
+        candidates = conn.execute(
+            f"SELECT task_id FROM tasks WHERE status IN ({placeholders}) "
             "ORDER BY finished_at ASC, task_id ASC",
             _TERMINAL_VALUES,
         ).fetchall()
-        for row in rows:
-            task_id = str(row["task_id"])
-            finished = _parse_timestamp(row.get("finished_at")) or _parse_timestamp(row.get("updated_at"))
-            if finished is None or finished > cutoff:
-                continue
-            reason = _consent_skip_reason(conn, task_id)
-            if reason is not None:
-                skipped.append(task_id)
-                reasons[task_id] = reason
-                continue
-            paths, reason = _artifact_paths(root, row)
-            if reason is not None:
-                skipped.append(task_id)
-                reasons[task_id] = reason
-                continue
-            eligible.append(task_id)
-            if not apply:
-                continue
-            try:
-                for path in paths:
-                    _remove_path(path)
+        for candidate in candidates:
+            task_id = candidate["task_id"]
+            with conn:
+                # Hold the writer across this task's fresh state, consent check,
+                # file removal and commit. An interruption affects only this task.
+                if apply:
+                    conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+                if row is None or row["status"] not in _TERMINAL_VALUES:
+                    continue
+                finished = _parse_timestamp(row["finished_at"]) or _parse_timestamp(row["updated_at"])
+                if finished is None or finished > cutoff:
+                    continue
+                reason = _consent_skip_reason(conn, task_id)
+                if reason is None:
+                    paths, reason = _process_task_artifacts(row, root, stage, apply)
+                if reason is not None:
+                    skipped.append(task_id)
+                    reasons[task_id] = reason
+                    continue
+                eligible.append(task_id)
+                if not apply:
+                    continue
+                try:
+                    for path in paths:
+                        _remove_path(path)
+                except OSError:
+                    skipped.append(task_id)
+                    reasons[task_id] = "artifact_cleanup_failed"
+                    continue
                 conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
-                cursor = conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
-            except OSError:
-                skipped.append(task_id)
-                reasons[task_id] = "artifact_cleanup_failed"
-                continue
-            if cursor.rowcount == 1:
+                removed = conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+            if removed.rowcount:
                 deleted.append(task_id)
 
     return RetentionResult(
         dry_run=not apply,
-        scanned=len(rows),
+        scanned=len(candidates),
         eligible_task_ids=tuple(eligible),
         deleted_task_ids=tuple(deleted),
         skipped_task_ids=tuple(skipped),
