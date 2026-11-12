@@ -54,7 +54,7 @@ def reported_status(result: Any) -> str:
 
     if not isinstance(result, dict):
         return ""
-    return str(result.get("status", "")).strip().lower()
+    return normalize_observation_status(result.get("status"))
 
 
 def normalize_observation_status(value: Any) -> str:

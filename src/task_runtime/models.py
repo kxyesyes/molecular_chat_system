@@ -13,6 +13,7 @@ from src.system.redaction import (
     redact_sensitive,
     sanitize_sensitive_text,
 )
+from src.system.scientific_status import normalize_observation_status
 
 from .errors import TaskErrorCode
 
@@ -1588,8 +1589,11 @@ class TaskRecord:
         public["result"] = sanitize_public_result(self.result)
         if isinstance(self.result, dict):
             scientific_status = self.result.get("status")
-            if scientific_status in _RESULT_STATUS_VALUES:
-                public["scientific_status"] = scientific_status
+            if isinstance(scientific_status, str):
+                if scientific_status not in _RESULT_STATUS_VALUES:
+                    scientific_status = normalize_observation_status(scientific_status)
+                if scientific_status in _RESULT_STATUS_VALUES:
+                    public["scientific_status"] = scientific_status
         if isinstance(self.error, str):
             public["error"] = sanitize_task_message(self.error)
         else:

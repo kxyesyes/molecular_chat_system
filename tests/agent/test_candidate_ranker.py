@@ -408,6 +408,43 @@ def test_candidate_ranker_ignores_demo_or_fallback_admet_scores():
     assert "admet" in ethanol["missing_evidence"]
 
 
+@pytest.mark.parametrize(("second_endpoint", "demo"), [
+    ("activity", False), ("other_activity", False), ("other_activity", True),
+])
+def test_partial_target_scope_requires_comparable_activity_endpoints(second_endpoint, demo):
+    payload = _payload()
+    payload["metadata"]["target"] = "PDE5A"
+    rows = []
+    for smiles, endpoint in [("CCO", "activity"), ("CCN", second_endpoint)]:
+        rows.append({
+            "smiles": smiles, "success": True, "target": "PDE5A",
+            "task_type": "classification", "endpoint": endpoint,
+            "units": "probability", "probability": 0.8,
+            "model_provenance": {
+                "model_id": "fixture", "weights_sha256": "a" * 64,
+                "task_type": "classification", "endpoint": endpoint, "units": "probability",
+                "demo_mode": False, "fallback_used": False,
+            },
+        })
+    payload["outputs"]["activity"] = rows
+    rows[1]["demo_mode"] = demo
+
+    result = CandidateRanker().execute(payload)
+
+    if demo:
+        assert result["success"]
+        scores = {row["canonical_smiles"]: row["ranking_evidence"]["activity_score"]
+                  for row in result["data"]["ranked_candidates"]}
+        assert scores["CCO"] == 0.8 and scores["CCN"] is None
+    elif second_endpoint == "activity":
+        assert result["success"]
+        assert [row["ranking_evidence"]["activity_score"]
+                for row in result["data"]["top_candidates"]] == [0.8, 0.8]
+    else:
+        assert result["success"] is False
+        assert result["error_code"] == "activity_scope_mismatch"
+
+
 def test_candidate_ranker_breaks_equal_scores_by_canonical_smiles():
     payload = _payload(top_n=3)
     payload["outputs"]["properties"] = [
