@@ -242,11 +242,13 @@ def calculate_properties(
         props["morgan_similarity"] = morgan_similarity
 
     goals = parse_optimization_goals(command)
+    is_template = any(atom.GetAtomicNum() == 0 for atom in mol.GetAtoms())
 
     return {
         "success": True,
         "properties": props,
         "raw_properties": raw_props,
-        "goals": evaluate_goals(raw_props, goals),
+        "structure_kind": "attachment_template" if is_template else "molecule",
+        "goals": evaluate_goals({} if is_template else raw_props, goals),
         "property_status": property_status,
     }

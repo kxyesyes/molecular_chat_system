@@ -41,6 +41,37 @@ const response = (data) => ({ ok: true, status: 200, json: async () => ({ succes
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
 
+test("a running single task replaces stale result content with its actual progress", () => {
+  const { context: c, get } = harness();
+  get("results-content").innerHTML = "请先上传文件";
+  c.setDockingTaskButtonState(true);
+  c.syncDockingStepState(record());
+  assert.equal(get("results-content").innerHTML, "");
+  assert.equal(get("docking-progress").style.width, "50%");
+  assert.doesNotMatch(get("progress-log").children[1].textContent, /vina_running/);
+});
+
+test("a replacement receptor cannot inherit a completed pose table or a confirmed center", async () => {
+  const {context: c, get} = harness();
+  c.loadMolecule = () => {};
+  c.setResultsMinHeightToLeft = () => {};
+  c.FileReader = class {
+    readAsText(file) { this.onload({target: {result: file.name}}); }
+  };
+  get("center_x").value = "17.32";
+  await c.loadProteinFile({name: "first.pdb"});
+  c.AppState.dockingBoxCenterTouched = true;
+  c.AppState.currentJobId = "previous-result";
+  get("results-content").innerHTML = "结构编号 Pose 1";
+  get("pose-select").children.push({value: "1"});
+  get("progress-log").style.display = "block";
+  await c.loadProteinFile({name: "second.pdb"});
+  assert.equal(c.AppState.dockingBoxCenterTouched, false);
+  assert.doesNotMatch(get("results-content").innerHTML, /Pose 1/);
+  assert.equal(get("pose-select").children.length, 0);
+  assert.equal(get("progress-log").style.display, "none");
+});
+
 test("missing energies and pose counts are never coerced or invented", () => {
   const { context: c } = harness();
   for (const value of [null, "", false, "-8.4", NaN, Infinity, undefined]) {

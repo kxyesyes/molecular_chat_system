@@ -399,6 +399,9 @@ function handleFileUpload(inputId, displayId, fileType) {
 // 加载蛋白质文件
 function loadProteinFile(file) {
   beginDockingView();
+  const replacingProtein = loadedDockingProteinFile !== null && loadedDockingProteinFile !== file;
+  if (replacingProtein) AppState.dockingBoxCenterTouched = false;
+  if (!document.getElementById("start-btn").disabled) resetDocking({ preserveInputs: true });
   if (typeof setCurrentJobId === "function") setCurrentJobId(null);
   AppState.currentComplexData = null;
   if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
@@ -436,10 +439,8 @@ function loadProteinFile(file) {
           Math.abs(sy - 20) < 1e-6 &&
           Math.abs(sz - 20) < 1e-6;
 
-        if (isDefaultCenter && isDefaultSize) {
-          setTimeout(() => {
-            autoSetBoxToLigand(true);
-          }, 80);
+        if (replacingProtein || (isDefaultCenter && isDefaultSize)) {
+          autoSetBoxToLigand(true);
         }
       } catch (e) {
         console.warn("自动定位默认对接盒失败:", e);
@@ -718,6 +719,7 @@ function unwrapApiData(payload) {
 function setDockingTaskButtonState(active) {
   const startBtn = document.getElementById("start-btn");
   const cancelBtn = document.getElementById("cancel-docking-btn");
+  if (active) document.getElementById("results-content").innerHTML = "";
   if (startBtn) {
     startBtn.disabled = active;
     if (!active) {
@@ -814,7 +816,7 @@ function syncDockingStepState(record) {
     }
     stepManager.startStep(phaseStep);
     stepManager.updateStepProgress(phaseStep, progressPercent);
-    renderDockingStepLog(phaseStep, `${record.phase || "执行中"} · ${Math.round(progressPercent)}%`);
+    renderDockingStepLog(phaseStep, `执行中 · ${Math.round(progressPercent)}%`);
   }
   renderDockingProgress(progressPercent);
 }
@@ -1192,7 +1194,7 @@ function startDocking() {
     return;
   }
   if (!AppState.dockingBoxCenterTouched) {
-    Utils.showToast("请先手动确认对接盒中心后再提交持久化任务", "warning");
+    Utils.showToast("请点击“自动定位”，或输入对接盒中心坐标后再开始。", "warning");
     return;
   }
 
@@ -1271,9 +1273,8 @@ function startDocking() {
 }
 
 function dockingResultNumber(value, digits) {
-  return typeof value === "number" && Number.isFinite(value)
-    ? value.toFixed(digits)
-    : "未计算";
+  if (!Number.isFinite(value)) return "未计算";
+  return digits === undefined ? String(value) : value.toFixed(digits);
 }
 
 function renderDockingResultsTable(data, options = {}) {
@@ -1296,7 +1297,7 @@ function renderDockingResultsTable(data, options = {}) {
   const canViewPose = !restored && !!safeJobId;
   const totalPoses = results.length;
   const rows = results.map((result) => {
-    const bindingEnergy = dockingResultNumber(result.binding_energy, 1);
+    const bindingEnergy = dockingResultNumber(result.binding_energy);
     const energyValue = typeof result.binding_energy === "number" && Number.isFinite(result.binding_energy)
       ? result.binding_energy
       : null;
@@ -1313,8 +1314,8 @@ function renderDockingResultsTable(data, options = {}) {
         <td>Pose ${result.pose}</td>
         <td><span class="${energyClass}">${bindingEnergy}</span></td>
         <td>${dockingResultNumber(result.ligand_efficiency, 3)}</td>
-        <td>${dockingResultNumber(result.rmsd_lb, 1)}</td>
-        <td>${dockingResultNumber(result.rmsd_ub, 1)}</td>
+        <td>${dockingResultNumber(result.rmsd_lb)}</td>
+        <td>${dockingResultNumber(result.rmsd_ub)}</td>
         <td>${viewButton}</td>
       </tr>`;
   }).join("");
@@ -1337,7 +1338,7 @@ function renderDockingResultsTable(data, options = {}) {
         <thead>
           <tr>
             <th>结构编号</th>
-            <th>结合能 (kcal/mol)</th>
+            <th>Vina 评分 (kcal/mol)</th>
             <th>配体效率</th>
             <th>RMSD下限 (Å)</th>
             <th>RMSD上限 (Å)</th>
@@ -1885,15 +1886,15 @@ function resetDocking(options = {}) {
   }
 
   const statusIndicators = document.querySelectorAll(".status-indicator");
-  statusIndicators.forEach((indicator) => {
+  statusIndicators.forEach((indicator, index) => {
     indicator.className = "status-indicator status-waiting";
-    indicator.textContent = "等待输入";
+    indicator.textContent = index === 0 ? "等待输入" : "未开始";
   });
 
   const resultsContent = document.getElementById("results-content");
   resultsContent.innerHTML = `
     <div style="text-align: center; color: #718096; padding: 40px;">
-      暂无结果，请先上传文件并开始对接分析
+      暂无对接结果
     </div>
   `;
 
@@ -1901,8 +1902,14 @@ function resetDocking(options = {}) {
   const bar = document.getElementById("docking-progress");
   if (bar) bar.style.width = "0%";
   if (container) container.style.display = "none";
+  const progressLog = document.getElementById("progress-log");
+  progressLog.textContent = "";
+  progressLog.style.display = "none";
+  document.getElementById("pose-select").replaceChildren();
+  boundDockingProtein = null;
 
   if (!preserveInputs) {
+    loadedDockingProteinFile = null;
     currentProteinData = null;
     AppState.currentProteinFormat = "pdb";
     currentLigandData = null;

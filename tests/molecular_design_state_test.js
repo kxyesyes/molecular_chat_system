@@ -215,6 +215,24 @@ test("candidate changes are neutral and missing values have no fabricated delta"
   assert.match(html, /\+20\.00/);
 });
 
+test("scaffold descriptors stay visible while screening waits for the product", async () => {
+  const {P, S, requests, elements} = setup();
+  S.smiles = "C[*]";
+  const parent = P.calcProps(S.smiles);
+  requests.shift()({success: true, structure_kind: "attachment_template", properties: {mw: 15},
+    goals: {items: [{label: "MW < 120", passed: null}]}});
+  await parent;
+  assert.equal(elements.get("pMW").textContent, "15.00");
+  assert.match(elements.get("resultCaption").textContent, /模板/);
+  assert.doesNotMatch(elements.get("ro5Grid").innerHTML, /通过/);
+  assert.match(elements.get("goalList").innerHTML, /待取代/);
+  S.smiles = "CO";
+  const product = P.calcProps(S.smiles);
+  requests.shift()({success: true, structure_kind: "molecule", properties: {mw: 32.04}});
+  await product;
+  assert.equal(elements.get("dMW").textContent, "");
+});
+
 test("repeated candidate keeps one entry in generation order", () => {
   const { E, S, elements } = setup();
   S.iter = 1;

@@ -15,6 +15,14 @@ from src.molecular_design.optimizer import evaluate_goals, parse_optimization_go
 from src.molecular_design.storage import DesignStorage
 
 
+def test_attachment_template_keeps_descriptors_but_defers_candidate_goals():
+    template = calculate_properties('c1cc([*:1])ccc1', 'MW < 120')
+    candidate = calculate_properties('COc1ccccc1', 'MW < 120')
+    assert template['structure_kind'] == 'attachment_template' and template['properties']['mw'] > 0
+    assert template['goals']['items'][0]['passed'] is None
+    assert candidate['structure_kind'] == 'molecule' and candidate['goals']['items'][0]['passed'] is True
+
+
 @pytest.mark.parametrize("invalid_qed", [-0.01, 1.01, float("nan"), float("inf")])
 def test_molecular_design_rejects_out_of_range_qed(monkeypatch, invalid_qed):
     monkeypatch.setattr(QED, "qed", lambda _mol: invalid_qed)

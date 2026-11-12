@@ -58,7 +58,7 @@ function harness() {
 
 const rows = [
   { pose: 1, binding_energy: -8.4, ligand_efficiency: null, rmsd_lb: 0, rmsd_ub: 0 },
-  { pose: 2, binding_energy: -6.2, ligand_efficiency: null, rmsd_lb: 0.9, rmsd_ub: 2.7 },
+  { pose: 2, binding_energy: -6.234, ligand_efficiency: null, rmsd_lb: 0.423, rmsd_ub: 1.863 },
 ];
 const { context, get } = harness();
 
@@ -69,7 +69,9 @@ context.renderDockingResultsTable(
 );
 assert.match(get("results-content").innerHTML, /结构编号/);
 assert.match(get("results-content").innerHTML, /-8\.4/);
-assert.match(get("results-content").innerHTML, /2\.7/);
+for (const value of ["-6.234", "0.423", "1.863", "Vina"]) {
+  assert(get("results-content").innerHTML.includes(value), "retain verified Vina result " + value);
+}
 assert.match(get("results-content").innerHTML, /viewPose\(2\)/);
 
 context.renderDockingResultsTable(
