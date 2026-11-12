@@ -9,7 +9,7 @@ const uiSource = fs.readFileSync("src/web/static/js/docking/ui_manager.js", "utf
 
 assert.match(template, /载入示例[：:]\s*曼氏血吸虫 PDE4A apo（6FG5）\+ 罗氟司特/);
 assert.match(source, /已载入曼氏血吸虫 PDE4A apo（6FG5）和罗氟司特/);
-assert.match(template, /docking\/ui_manager\.js\?v=20261112-docking-results-v1/);
+assert.match(template, /docking\/ui_manager\.js\?v=20261112-docking-resume-v3/);
 assert.match(template, /docking\/main\.js\?v=20261112-docking-demo-box-v1/);
 assert.match(source, /async function loadDockingDemo\(\)/);
 assert.match(source, /\/api\/docking\/demo\/pde4a-apo/);

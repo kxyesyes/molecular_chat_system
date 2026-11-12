@@ -722,7 +722,9 @@ function setDockingTaskButtonState(active) {
   if (active) document.getElementById("results-content").innerHTML = "";
   if (startBtn) {
     startBtn.disabled = active;
-    if (!active) {
+    if (active) {
+      startBtn.innerHTML = '<span class="spinner" aria-hidden="true"></span> 对接任务处理中…';
+    } else {
       startBtn.textContent = AppState.dockingMode === "batch"
         ? "开始批量分子对接"
         : "开始分子对接分析";
@@ -1041,10 +1043,29 @@ function renderDurableTaskFailure(record) {
   });
 }
 
+function renderStoppedDockingTask(record) {
+  renderDockingProgress(Math.min(dockingProgressPercent(record.progress), 99));
+  if (record.status === "canceled" || record.status === "cancelled") {
+    document.getElementById("progress-log").textContent = "已取消";
+    document.getElementById("results-content").textContent = "对接任务已取消";
+    document.querySelectorAll(".status-indicator").forEach((indicator) => {
+      indicator.className = "status-indicator status-waiting";
+      indicator.textContent = "已取消";
+    });
+    return;
+  }
+  if (stepManager) stepManager.errorStep(dockingStepForPhase(record.phase) || "run_docking", record.error || record.status);
+  renderDurableTaskFailure(record);
+}
+
 function applyDockingTaskRecord(record) {
   if (!record) throw new Error("任务状态为空");
   syncDockingStepState(record);
   const status = String(record.status || "").toLowerCase();
+  if (status === "cancel_requested") {
+    document.getElementById("cancel-docking-btn").disabled = true;
+    document.getElementById("progress-log").textContent = "正在取消…";
+  }
   if (!TERMINAL_DOCKING_TASK_STATUSES.has(status)) return false;
 
   clearDockingPoll();
@@ -1068,9 +1089,7 @@ function applyDockingTaskRecord(record) {
     rememberDockingTask(null);
     return true;
   }
-  renderDockingProgress(Math.min(dockingProgressPercent(record.progress), 99));
-  if (stepManager) stepManager.errorStep(dockingStepForPhase(record.phase) || "run_docking", record.error || status);
-  renderDurableTaskFailure(record);
+  renderStoppedDockingTask(record);
   historicalDockingTaskId = null;
   rememberDockingTask(null);
   return true;
@@ -1156,11 +1175,6 @@ function resumeDockingTaskIfPresent() {
   }
   const progressContainer = document.querySelector(".progress-container");
   if (progressContainer) progressContainer.style.display = "block";
-  const startBtn = document.getElementById("start-btn");
-  if (startBtn) {
-    startBtn.disabled = true;
-    startBtn.innerHTML = '<span class="spinner" aria-hidden="true"></span> 正在恢复…';
-  }
   setDockingTaskButtonState(true);
   pollDockingTask(taskId).catch(handleDockingTaskError);
 }
@@ -1196,17 +1210,6 @@ function startDocking() {
   if (!AppState.dockingBoxCenterTouched) {
     Utils.showToast("请点击“自动定位”，或输入对接盒中心坐标后再开始。", "warning");
     return;
-  }
-
-  const startBtn = document.getElementById("start-btn");
-  if (startBtn && !startBtn.disabled) {
-    startBtn.disabled = true;
-    startBtn.setAttribute(
-      "data-original-text",
-      startBtn.textContent || "开始分子对接分析",
-    );
-    startBtn.innerHTML =
-      '<span class="spinner" aria-hidden="true"></span> 正在分析…';
   }
 
   if (!stepManager) stepManager = new DockingStepManager();
@@ -2021,7 +2024,7 @@ function loadDockingHistory() {
       durableEl.innerHTML = items.length ? items.map((record) => {
         const taskId = Safe.escapeHtml(record.task_id);
         const taskIdJs = Safe.escapeInlineJsString(record.task_id);
-        const status = ({succeeded: "已完成", running: "进行中", pending: "等待中", failed: "失败", canceled: "已取消", timed_out: "已超时"})[record.status] || "状态未知";
+        const status = ({succeeded: "已完成", running: "进行中", pending: "等待中", failed: "失败", cancel_requested: "正在取消", canceled: "已取消", cancelled: "已取消", timed_out: "已超时"})[record.status] || "状态未知";
         return `<div class="history-card"><div class="history-card-top"><span class="history-job-id">${taskId}</span><span>${status}</span></div><div class="history-card-actions"><button class="history-action-btn history-load-btn" onclick="restoreDurableDockingTask('${taskIdJs}')">恢复结果</button></div></div>`;
       }).join("") : '<div class="history-empty">暂无持久化对接任务</div>';
     })
@@ -2127,7 +2130,7 @@ async function restoreDurableDockingTask(taskId) {
       renderDurableTaskSuccess(record, result, { restored: true });
       if (currentTask === taskId) rememberDockingTask(null);
     } else {
-      renderDurableTaskFailure(record);
+      renderStoppedDockingTask(record);
       if (currentTask === taskId) rememberDockingTask(null);
     }
     closeHistoryPanel();

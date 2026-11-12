@@ -51,6 +51,18 @@ test("a running single task replaces stale result content with its actual progre
   assert.doesNotMatch(get("progress-log").children[1].textContent, /vina_running/);
 });
 
+test("refreshing a running task shows an active task button after reconnection", async () => {
+  const { context: c, get } = harness();
+  c.rememberDockingTask("task-1");
+  c.fetch = async () => response(record());
+  c.resumeDockingTaskIfPresent();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(get("docking-progress").style.width, "50%");
+  assert.equal(get("start-btn").disabled, true);
+  assert.match(get("start-btn").innerHTML, /对接任务处理中/);
+  assert.equal(get("cancel-docking-btn").disabled, false);
+});
+
 test("a replacement receptor cannot inherit a completed pose table or a confirmed center", async () => {
   const {context: c, get} = harness();
   c.loadMolecule = () => {};
@@ -179,6 +191,25 @@ test("generic docking failure is actionable without claiming a scientific result
   assert.match(get("results-content").innerHTML, /受体结构准备工具/);
   assert.match(get("results-content").innerHTML, /配体.*准备/);
   assert.doesNotMatch(get("results-content").innerHTML, /-\d+\.\d+\s*kcal\/mol/);
+});
+test("cancel acknowledgement stays pending and confirmed cancellation never renders a failure", () => {
+  const { context: c, get } = harness();
+  c.stepManager.errorStep = () => assert.fail("cancellation rendered as a failed step");
+  c.setDockingTaskButtonState(true);
+  assert.equal(c.applyDockingTaskRecord(record("cancel_requested")), false);
+  assert.equal(get("cancel-docking-btn").disabled, true);
+  assert.match(get("progress-log").textContent, /正在取消/);
+  assert.equal(get("start-btn").disabled, true);
+  assert.equal(c.applyDockingTaskRecord(record("canceled")), true);
+  assert.match(get("results-content").textContent, /已取消/);
+  assert.equal(get("start-btn").disabled, false);
+});
+test("reopening a canceled task shows its own terminal state and progress", async () => {
+  const { context: c, get } = harness();
+  c.fetch = async () => response({ ...record("canceled"), task_type: "docking" });
+  await c.restoreDurableDockingTask("task-1");
+  assert.match(get("results-content").textContent, /已取消/);
+  assert.equal(get("docking-progress").style.width, "50%");
 });
 test("poll disconnect holds task lock and schedules reconnect", async () => {
   const { context: c, get, timers } = harness();
