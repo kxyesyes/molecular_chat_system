@@ -18,7 +18,7 @@ def _is_task_db_writable(task_db: Path) -> bool:
 
 def setup_system_routes(app: FastAPI) -> None:
     @app.get("/api/system/data-versions")
-    async def get_data_versions():
+    def get_data_versions():
         return api_success(collect_data_versions())
 
     @app.get("/api/system/runtime")

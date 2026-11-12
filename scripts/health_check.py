@@ -159,8 +159,8 @@ def check_target_cache() -> tuple[bool, str]:
     if not cache_dir.is_dir():
         return False, f"cache path is not a directory: {cache_dir}"
 
-    files = [p for p in cache_dir.rglob("*") if p.is_file()]
-    return True, f"{cache_dir} ({len(files)} files)"
+    count = sum(1 for p in cache_dir.rglob("*") if p.is_file())
+    return True, f"{cache_dir} ({count} files)"
 
 
 def check_ollama() -> tuple[bool, str]:
@@ -608,6 +608,8 @@ def check_rag_index() -> tuple[bool, str]:
         return False, f"RAG FAISS index not found: {index_path}"
     if not index_path.is_file():
         return False, f"RAG index path is not a file: {index_path}"
+    if index_path.stat().st_size == 0:
+        return False, f"RAG index file is empty: {index_path}"
     return True, f"{index_path}"
 
 
@@ -625,8 +627,8 @@ def check_data_registry() -> tuple[bool, str]:
 
 def check_sample_assets() -> tuple[bool, str]:
     sample_dir = PROJECT_ROOT / "data" / "samples"
-    expected = [sample_dir / "5.sdf", sample_dir / "MAGL_5zun.pdb"]
-    missing = [path.name for path in expected if not path.exists()]
+    expected = [sample_dir / name for name in ("5.sdf", "MAGL_5zun.pdb", "PDE4A_apo_6FG5.pdb")]
+    missing = [path.name for path in expected if not path.is_file()]
     if missing:
         return False, f"missing sample assets in {sample_dir}: {', '.join(missing)}"
     return True, f"{sample_dir} ({len(expected)} files)"
