@@ -7,7 +7,7 @@ const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "../src/web");
 const template = fs.readFileSync(path.join(root, "templates/index.html"), "utf8");
-const href = '/static/css/home_chat_layout.css?v=20261104-multiline-v1';
+const href = '/static/css/home_chat_layout.css?v=20261112-mobile-chat-v1';
 assert(template.includes(href), "home must load the scoped responsive layout stylesheet");
 assert(template.indexOf(href) > template.lastIndexOf("</style>"), "layout overrides must follow existing inline styles");
 const css = fs.readFileSync(path.join(root, "static/css/home_chat_layout.css"), "utf8");
@@ -24,6 +24,14 @@ for (const selector of [".index_con .right", ".chat-messages", ".chat-messages .
 assert(/max-width:\s*70%/.test(rule(".chat-messages .message-container")), "retain desktop shell width");
 assert(/max-width:\s*100%/.test(rule(".chat-messages .message-container > .message-box")), "bound the bubble");
 const mobile = css.slice(css.indexOf("@media (max-width: 768px)"));
+assert(/display:\s*flex/.test(rule("header .right", mobile)), "mobile users need the model settings entry");
+assert(/min-width:\s*44px/.test(rule("header .settings-btn", mobile)));
+assert(/position:\s*static/.test(rule("body.chat-active .index_con .right .chat-composer", mobile)),
+  "the active composer must reserve only its actual height in the chat column");
+assert(/overflow-wrap:\s*anywhere/.test(rule(".home-comparison-table-scroll td:first-child", mobile)),
+  "long endpoint names must wrap to leave room for their values");
+assert(/white-space:\s*nowrap/.test(rule(".home-comparison-table-scroll td", mobile)),
+  "a numerical result and its decimal places must stay on one line");
 assert(/max-width:\s*100%/.test(rule(".chat-messages .message-container", mobile)), "mobile shell may use the full row");
 assert(/padding-bottom:\s*calc\([^;]+env\(safe-area-inset-bottom\)/.test(rule(".index_con .right", mobile)),
   "reserve mobile space for the fixed multi-row composer and safe area");

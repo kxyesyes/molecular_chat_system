@@ -2138,7 +2138,7 @@
       }
     }
   </style>
-  <link rel="stylesheet" href="/static/css/home_chat_layout.css?v=20261104-multiline-v1" />
+  <link rel="stylesheet" href="/static/css/home_chat_layout.css?v=20261112-mobile-chat-v1" />
   <!-- SMILES分子可视化库 -->
   <script src="/static/js/lib/smiles-drawer.min.js"></script>
 </head>
@@ -2356,14 +2356,14 @@
 
       <div class="fill">
         <textarea rows="3" aria-label="消息" placeholder="请输入您的问题，例如：'分析CCO的分子性质'或'生成符合条件的分子'..."></textarea>
-        <div class="btn">
+        <button type="button" class="btn" aria-label="发送消息">
           <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
             stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
             style="margin-left: -2px; margin-top: 2px;">
             <line x1="22" y1="2" x2="11" y2="13"></line>
             <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
           </svg>
-        </div>
+        </button>
         <div class="pic">
           <img src="/static/images/r7.png" alt="" />
           <img src="/static/images/r8.png" alt="" />
@@ -2570,12 +2570,12 @@
   <script src="/static/js/home/molecule_candidates.js?v=20260902-candidate-correlation-v5"></script>
   <script src="/static/js/home/scientific_references.js?v=20260924-reference-v1"></script>
   <script src="/static/js/home/evidence_report.js?v=20261101-report-failure-warnings-v1"></script>
-   <script src="/static/js/home/formatters.js?v=20261104-literature-prose-v1"></script>
+   <script src="/static/js/home/formatters.js?v=20261112-scientific-summary-v1"></script>
   <script src="/static/js/home/chat_renderer.js"></script>
   <script src="/static/js/home/connection.js?v=20261008-home-connection-v1"></script>
   <script src="/static/js/home/protocol.js?v=20261008-home-protocol-v1"></script>
   <script src="/static/js/home/task_state.js?v=20261008-home-task-state-v1"></script>
-  <script src="/static/js/home/task_status.js?v=20261111-source-check-v1"></script>
+  <script src="/static/js/home/task_status.js?v=20261112-step-labels-v1"></script>
   <script src="/static/js/home/task_panel.js?v=20261026-turn-panels-v1"></script>
   <script src="/static/js/home/advanced_options.js?v=20261001-explicit-count-v1"></script>
   <script src="/static/js/home/docking_source_selection.js?v=20261101-missing-atoms-v1"></script>
@@ -2583,7 +2583,7 @@
   <!-- Cache lineage: /static/js/home/main.js?v=20260713-workflow-complete-v2 -->
   <!-- Cache lineage: /static/js/home/main.js?v=20260925-terminal-labels-v1 -->
   <!-- Cache lineage: /static/js/home/main.js?v=20261017-docking-v1 -->
-  <script src="/static/js/home/main.js?v=20261111-source-check-v1"></script>
+  <script src="/static/js/home/main.js?v=20261112-chat-send-v1"></script>
 </body>
 
 </html>

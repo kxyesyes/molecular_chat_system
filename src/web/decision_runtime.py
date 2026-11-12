@@ -43,10 +43,13 @@ from src.agent.scientific_session.decision_policy import DecisionBoundaryError, 
 from src.agent.persistence.redaction import REDACTED, contains_secret_material, redact_sensitive
 from src.agent.runtime.worker_ownership import WorkerOwner, WorkerCleanupError, retain_until_done
 from .decision_chat import (
+    _EventBuffer,
+    _create_owned_task,
     _deliver_result,
     _event_frame,
     _presentation_admission,
     _prepare_result_frames,
+    _settle,
     _durable_admission_facts,
     await_with_deadline,
     SEND_TIMEOUT_SECONDS,
@@ -119,6 +122,8 @@ def _resumable_scientific_clarification(plan):
 
 def terminal_message_for_reason(reason):
     """Return a user-facing terminal message without exposing internal codes."""
+    if reason == 'cancelled':
+        return '本次请求已取消。'
     if reason == 'consultation_requires_clarification':
         return ('未能确认整条请求仅为解释。请明确本轮只讨论原理或已有记录，'
                 '还是要执行新的计算或检索；本次未运行工具。')
@@ -530,6 +535,10 @@ class _TurnSender:
             frame['turn_id'] = self.turn.turn_id
         if frame['type'] == 'agent_result':
             self.turn.result_started = True
+            plan = getattr(self.turn, 'scientific_plan', None)
+            if (self.result_format == 'summary_details_v1' and frame.get('status') in {'failed', 'rejected'}
+                    and plan is not None and plan.status == 'clarification' and plan.missing_fields == ('smiles',)):
+                frame['metadata']['missing_fields'] = ['smiles']
             waiting = self.turn.waiting
             if (getattr(self.turn, 'intent_journal', None) is not None and self.sender._runtime.full_web
                     or waiting is not None and waiting.context.metadata.get('tool_free_consultation') is True):
@@ -1156,10 +1165,7 @@ class WebDecisionRuntime:
             **self._compiled_plan_metadata(plan),
         }
         if plan.status == "clarification":
-            message = plan.message or (
-                "请提供有效 SMILES，并将完整请求和 SMILES 一起重新提交。"
-                "当前未调用模型或科学工具。"
-            )
+            message = plan.message or terminal_message_for_reason('molecular_input_required')
             # Resumable requests go through Pi's authenticated continuation
             # path. A terminal admission result must not advertise a fake wait.
             metadata["stop_reason"] = "molecular_input_required"
@@ -1169,6 +1175,8 @@ class WebDecisionRuntime:
                 {"reason": "molecular_input_required"},
             )
         else:
+            if plan.missing_capabilities == ('invalid_smiles',):
+                metadata['stop_reason'] = 'invalid_molecular_input'
             if not plan.message and plan.missing_capabilities == ('docking',):
                 message = ('当前无法在同一请求中完成性质计算和对接，本次未执行计算或对接。'
                            '请单独提交性质计算；对接请在“分子对接”页面提供受体 PDB、配体和对接盒中心及大小。')
@@ -1187,7 +1195,7 @@ class WebDecisionRuntime:
             error = AgentExecutionError(
                 AgentErrorCode.INVALID_INPUT,
                 message,
-                {"reason": "scientific_capability_unsupported"},
+                {"reason": metadata['stop_reason']},
             )
         return AgentResult(
             trace_id=context.trace_id,
@@ -1221,16 +1229,9 @@ class WebDecisionRuntime:
         from src.agent.orchestrators.workflow import WorkflowOrchestrator
         from src.agent.scientific_session.decision_execution import settle_owned_call
 
-        events = []
         if plan.status != "ready":
             result = self._compiled_terminal_result(context, plan)
         else:
-            bus = AgentEventBus(on_event=events.append, state_store=self.store)
-            orchestrator = WorkflowOrchestrator(
-                event_bus=bus,
-                state_store=self.store,
-                workflow_version=plan.workflow_version,
-            )
             tools = {}
             unavailable = []
             for tool_name in plan.required_tools:
@@ -1259,22 +1260,23 @@ class WebDecisionRuntime:
                     metadata={},
                 )
             else:
+                buffer = _EventBuffer()
+                bus = AgentEventBus(on_event=lambda event: buffer.publish(
+                    lambda: _event_frame(handler, event, getattr(websocket, 'result_format', None))), state_store=self.store)
+                orchestrator = WorkflowOrchestrator(
+                    event_bus=bus, state_store=self.store, workflow_version=plan.workflow_version)
+                worker = _create_owned_task(settle_owned_call(
+                    lambda: orchestrator.run(context, list(plan.steps), tools,
+                        idempotency_key="web-property:" + context.trace_id, cancel_event=cancel_event),
+                    worker_owner=worker_owner))
+                worker.add_done_callback(lambda _: buffer.finish())
                 try:
-                    result = await settle_owned_call(
-                        lambda: orchestrator.run(
-                            context,
-                            list(plan.steps),
-                            tools,
-                            idempotency_key=(
-                                "web-property:" + context.trace_id
-                            ),
-                            cancel_event=cancel_event,
-                        ),
-                        worker_owner=worker_owner,
-                    )
-                except WorkerCleanupError:
+                    while (event := await buffer.get()) is not None:
+                        await await_with_deadline(websocket.send_text(event[0]), timeout=SEND_TIMEOUT_SECONDS)
+                    result = await worker
+                except (WorkerCleanupError, ConnectionError, WebSocketDisconnect, asyncio.TimeoutError, asyncio.CancelledError):
                     raise
-                except (Exception, asyncio.CancelledError):
+                except Exception:
                     result = AgentResult(
                         trace_id=context.trace_id,
                         success=False,
@@ -1288,6 +1290,10 @@ class WebDecisionRuntime:
                         ),
                         metadata={"stop_reason": "scientific_execution_failed"},
                     )
+                finally:
+                    buffer.close()
+                    if not worker.done():
+                        await _settle(worker)
 
             if (plan.workflow_version in {'web-property-batch-v1', 'web-admet-batch-v1', 'web-property-admet-batch-v1'}
                     and (result.success or result.partial) and result.tool_results
@@ -1319,15 +1325,6 @@ class WebDecisionRuntime:
             result.metadata.update(
                 binding_profile="medchat-web-v1",
                 backend="pi",
-            )
-
-        # Events are produced by the same durable AgentEventBus as ordinary Pi
-        # sessions. Serialize only after the session has settled so no event
-        # callback can outlive the worker owner or race terminal delivery.
-        for event in events:
-            frame, _ = _event_frame(handler, event)
-            await await_with_deadline(
-                websocket.send_text(frame), timeout=SEND_TIMEOUT_SECONDS
             )
 
         business_view = None

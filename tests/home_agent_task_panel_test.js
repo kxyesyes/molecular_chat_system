@@ -30,7 +30,7 @@ assert(!source.includes('["failed", "rejected", "cancelled", "timeout", "unavail
   "homepage must not duplicate the shared non-success status list");
 assert(template.includes("/static/js/home/task_status.js"),
   "homepage must load the Agent task status module before the entrypoint");
-assert(template.includes("/static/js/home/task_status.js?v=20261111-source-check-v1"),
+assert(template.includes("/static/js/home/task_status.js?v=20261112-step-labels-v1"),
   "optional-failure presentation changes require a refreshed task-status cache key");
 assert(template.includes("/static/js/home/task_panel.js"),
   "homepage must load the Agent task panel renderer before the entrypoint");
@@ -247,6 +247,11 @@ for (const event of ["task_partial", "task_rejected", "task_cancelled"]) {
 assert.strictEqual(getAgentEventLabel("task_completed"), "任务完成");
 assert.strictEqual(getAgentEventLabel("task_failed"), "任务失败");
 assert.strictEqual(getAgentEventLabel("future_event"), "Agent 事件");
+const cancelledTool = {event: "tool_failed", tool: "property_calculator", payload: {status: "cancelled",
+  quality: {invocation_may_still_be_running: true}}};
+assert.equal(HomeTaskStatus.resolve(cancelledTool).eventType, "tool_cancelled");
+assert.equal(HomeTaskStatus.label("tool_failed", cancelledTool.tool, cancelledTool.payload), "属性计算 已取消");
+assert.match(HomeTaskStatus.message(cancelledTool), /后台.*未确认/);
 for (const [event, label, toolLabel] of [
   ["tool_started", "工具调用", "调用 属性计算"],
   ["tool_completed", "工具完成", "属性计算 完成"],

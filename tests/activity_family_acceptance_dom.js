@@ -78,7 +78,8 @@ function assertDisplayedPrediction(row, expected) {
     "验证说明：" + expectedValidationNote(expected),
   ]);
   assert.ok(!source.children.some(node => node.tagName === "pre"));
-  const notes = [...expected.warnings];
+  const notes = expected.warnings.filter(warning => !needsReview(expected) ||
+    warning !== "分类与回归预测不一致，需复核；已保留两项原始结果。");
   if (expected.error) notes.push(expected.error);
   if (expected.note) notes.push(expected.note);
   for (const [stage, error] of Object.entries(expected.errors)) {
@@ -145,7 +146,9 @@ function assertSummary(summary) {
     assert.equal(h.ids.predictionStatus.textContent, [
       STATUS_LABELS[summary.results.some(needsReview) ? "partial" : summary.results.length ? summary.status : "failed"],
       ...(summary.results.some(needsReview) ? ["含分类与回归不一致的结果，需复核"] : []),
-      ...(!summary.results.length ? ["无预测结果"] : []), ...summary.warnings,
+      ...(!summary.results.length ? ["无预测结果"] : []),
+      ...summary.warnings.filter(warning => !summary.results.some(needsReview) ||
+        warning !== "分类与回归预测不一致，需复核；已保留两项原始结果。"),
     ].join("；"));
     assertNoExecutableNodes(h.ids.predictionStatus);
     assert.ok(h.ids.results.classes.has("show"));
@@ -230,6 +233,7 @@ function runSelfTests() {
   test("computed conflict stays partial and visibly needs review", () => {
     const summary = syntheticSummary();
     Object.assign(summary, {status: "partial", success: false});
+    summary.warnings = ["分类与回归预测不一致，需复核；已保留两项原始结果。", "独立的模型适用范围提示"];
     Object.assign(summary.results[0], {status: "partial", success: false,
       execution_status: "passed", classification_regression_consistent: false,
       activity_probability: 0.2, predicted_pIC50: 6.1,

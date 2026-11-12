@@ -35,6 +35,7 @@ def _pure_property_operation(query, smiles):
 def _adjacent_molecule_label(query, smiles):
     """Bind a single name directly preceding the structure in a positive clause."""
     prefix = query.split(smiles, 1)[0]
+    prefix = re.sub(r'\s*[（(]\s*SMILES\s*[:：=]\s*$', '', prefix, flags=re.I)
     clause = re.split(r"[,，;；。.!！?？\n]", prefix)[-1].strip()
     if positive_intent_text(clause) != clause:
         return None
@@ -50,6 +51,31 @@ def _adjacent_molecule_label(query, smiles):
     if re.search(r"和|与|及|或|并|不是|而非|排除|\b(?:and|or|not)\b", label, re.I):
         return None
     return label
+
+
+def recorded_descriptor(query, history, session_id):
+    """Read a requested value from the immediately preceding, session-bound record."""
+    match = re.fullmatch(
+        r'\s*(?:请问\s*|请\s*)?(?P<prior>(?:使用|根据|基于|查看)?\s*(?:刚才|上轮|上一轮|之前)的?'
+        r'(?:(?:计算)?(?:结果|记录)[，,：:]\s*)?)?(?:(?P<subject>[\w-]{1,80})的\s*)?'
+        r'(?P<metric>分子量|MW|log\s*P)\s*(?:分别)?(?:是多少|为多少)[？?。]?'
+        r'\s*(?:(?:请)?(?:不要|不用|无需)重新计算[。.!！]?)?\s*', query, re.I)
+    deictic = ('它', '该分子', '这个分子')
+    if not match or (not match['prior'] and match['subject'] not in deictic):
+        return None
+    evidence = history[-1].get('property_evidence') if history else None
+    key = 'logp' if match['metric'].lower().startswith('log') else 'molecular_weight'
+    if (not session_id or not isinstance(evidence, dict) or evidence.get('session_id') != session_id
+            or not evidence.get('trace_id') or not evidence.get('evidence_id')
+            or not evidence.get('canonical_smiles') or type(evidence.get(key)) not in (int, float)
+            or not math.isfinite(evidence[key]) or match['subject'] not in (
+                None, *deictic, evidence.get('canonical_smiles'), evidence.get('molecule_label'))):
+        return {'content': '上一轮没有可与该分子对应的性质记录，请核对分子名称或 SMILES。',
+                'status': 'not_calculated'}
+    value = (f"logP 为 {evidence[key]:.3f}" if key == 'logp'
+             else f"分子量为 {evidence[key]:.2f} Da")
+    return {'content': f"上一轮结构 `{evidence['canonical_smiles']}` 的计算{value}。",
+            'status': 'completed', 'reused_evidence': evidence}
 
 
 def corrected_property_query(query, history):

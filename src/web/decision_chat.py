@@ -799,7 +799,7 @@ def _durable_admission_facts(store, trace_id, carry):
         return {}  # Unavailable durable facts must not be reconstructed.
 
 
-def _event_frame(handler, event):
+def _event_frame(handler, event, result_format=None):
     raw = event.to_dict()
     compacted = False
     if (raw.get('event') == 'tool_completed' and raw.get('tool') == 'activity_predictor'
@@ -807,6 +807,22 @@ def _event_frame(handler, event):
         payload = raw['payload']
         raw['payload'] = {key: payload[key] for key in ('success', 'status', 'round', 'decision_id') if key in payload}
         raw['message'] = '活性预测已运行，结果正在校验。'
+        compacted = True
+    elif (result_format == 'summary_details_v1' and raw['event'] in {'tool_completed', 'tool_failed'}
+            and isinstance(raw['payload'], dict)):
+        # Full observations are delivered once in the authenticated result details.
+        payload = raw['payload']
+        status = {key: payload[key] for key in ('success', 'status', 'round', 'decision_id') if key in payload}
+        error = payload.get('error')
+        if isinstance(error, dict):
+            status['error'] = {key: error[key] for key in ('code', 'message') if key in error}
+            if isinstance(error.get('details'), dict):
+                status['error']['details'] = {key: error['details'][key] for key in ('reason', 'stage', 'executed')
+                                              if key in error['details']}
+        if isinstance(payload.get('quality'), dict):
+            status['quality'] = {key: payload['quality'][key] for key in ('reason', 'executed', 'invocation_may_still_be_running')
+                                 if key in payload['quality']}
+        raw['payload'] = status
         compacted = True
     if raw['event'] in _TERMINAL_EVENTS and type(raw['payload']) is dict:
         payload = raw['payload']
@@ -1156,7 +1172,7 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
             # Pi lifecycle records remain durable, but an ordinary exchange
             # must not show the scientific execution widget in the main UI.
             return
-        buffer.publish(lambda: _event_frame(handler, event))
+        buffer.publish(lambda: _event_frame(handler, event, getattr(websocket, 'result_format', None)))
 
     async def run():
         try:

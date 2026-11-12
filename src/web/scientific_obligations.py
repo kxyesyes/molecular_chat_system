@@ -644,7 +644,8 @@ def _unreviewed_metric_capabilities(query: str) -> tuple[str, ...]:
     query = without_comparison_presentation(positive_intent_text(query))
     # A separate, reviewed assessment action is not another descriptor name.
     # Keep surrounding words so unknown metrics remain subject to validation.
-    query = re.sub(r'(?:并且?|以及)\s*(?:评估|评价|分析)\s*(?:类药性|成药性|药物相似性)',
+    query = re.sub(r'(?:并且?|以及)\s*(?:评估|评价|分析)\s*(?:(?:它|该分子|这个分子)的|其)?\s*'
+                   r'(?:类药性|成药性|药物相似性)',
                    ' ', query, flags=re.I)
     # The original query still reaches whole-field SMILES validation.  Remove
     # labeled structure text only from this metric-name scan so atom and

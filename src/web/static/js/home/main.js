@@ -200,7 +200,9 @@
       (typeof dockingUI !== "undefined" && dockingUI?.blocked()) ||
       (decisionMode && Boolean(decisionActive() || decisionWaiting || decisionAbandonAwait));
     if (!decisionControls) return;
-    decisionControls.box.hidden = !decisionMode;
+    decisionControls.box.hidden = !decisionMode || !(decisionActive() || decisionWaiting);
+    decisionControls.stop.hidden = !decisionActive();
+    decisionControls.resume.hidden = decisionControls.fresh.hidden = !decisionWaiting || Boolean(decisionActive());
     decisionControls.stop.disabled = !decisionMode || !decisionActive() || !decisionTurn.turnId ||
       Boolean(decisionTurn.result) || decisionTurn.cancelSent || decisionTurn.docking;
     decisionControls.resume.disabled = !decisionMode || Boolean(decisionActive() || decisionAbandonAwait) || !decisionWaiting;
@@ -310,38 +312,29 @@
     if (typeof dockingUI !== "undefined" && dockingUI?.blocked()) return;
     const message = elements.input.value;
     if (!message.trim() || decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
-    const dispatch = () => {
-      const config = HomeAdvancedOptions.getConfig();
-      const payload = resume
-        ? {type: "resume", trace_id: decisionWaiting.traceId, continuation_id: decisionWaiting.nonce, message}
-        : {type: "chat", message, enable_rag: ragEnabled, enable_tools: toolsEnabled,
-          rag_count: config.ragCount, temperature: config.temperature, mol_count: config.molCount,
-          ...(scientificReferences?.outgoing() || {})};
-      if (decisionResultFormat) payload.result_format = decisionResultFormat;
-      if (!sendDecisionControl(payload)) return;
-      decisionTurn = {socket: ws, phase: "pending", turnId: null, traceId: null,
-        resume: resume ? decisionWaiting : null, cancelSent: false, result: null};
-      scientificReferences?.startRequest();
-      moleculeCandidateLifecycle.startRequest();
-      evidenceReportLifecycle?.startRequest();
-      if (!chatMode) enterChatMode();
-      addUserMessage(message);
-      decisionTurn.userMessage = elements.chatContainer.lastChild;
-      elements.input.value = "";
-      showTypingIndicator();
-      updateDecisionControls();
-    };
-    const readiness = ensureAgentReady();
-    if (readiness === true) {
-      dispatch();
+    if (agentConfigInputVersion !== (agentConfigSavedInputVersion ?? 0)) {
+      HomeChatRenderer.showNotification("模型配置有未保存的修改，请先保存。", "warning");
       return;
     }
-    if (readiness && typeof readiness.then === "function") {
-      return readiness.then(ready => {
-        if (ready) dispatch();
-        return ready;
-      });
-    }
+    const config = HomeAdvancedOptions.getConfig();
+    const payload = resume
+      ? {type: "resume", trace_id: decisionWaiting.traceId, continuation_id: decisionWaiting.nonce, message}
+      : {type: "chat", message, enable_rag: ragEnabled, enable_tools: toolsEnabled,
+        rag_count: config.ragCount, temperature: config.temperature, mol_count: config.molCount,
+        ...(scientificReferences?.outgoing() || {})};
+    if (decisionResultFormat) payload.result_format = decisionResultFormat;
+    if (!sendDecisionControl(payload)) return;
+    decisionTurn = {socket: ws, phase: "pending", turnId: null, traceId: null, requestText: message,
+      resume: resume ? decisionWaiting : null, cancelSent: false, result: null};
+    scientificReferences?.startRequest();
+    moleculeCandidateLifecycle.startRequest();
+    evidenceReportLifecycle?.startRequest();
+    if (!chatMode) enterChatMode();
+    addUserMessage(message);
+    decisionTurn.userMessage = elements.chatContainer.lastChild;
+    elements.input.value = "";
+    showTypingIndicator();
+    updateDecisionControls();
   }
 
   function handleDecisionMessage(message, socket) {
@@ -422,14 +415,15 @@
           ["partial", "cancelled", "waiting_for_input", "not_calculated"].includes(message.status)
             ? "is-warning" : "is-error";
         finishPendingSourceCheck(turn, message.status, decisionStatuses[message.status], itemClass);
-      } else if (turn.taskPanel?.getAttribute("data-trace-id") === turn.traceId &&
-          agentTaskState.lastEventType === "task_completed") {
+      } else if (turn.taskPanel?.getAttribute("data-trace-id") === turn.traceId) {
         // A finished calculation can be followed by cancelled or incomplete
         // interpretation; the final result owns the overall task status.
         const progress = turn.taskPanel.querySelector(".agent-task-progress");
         const heading = turn.taskPanel.querySelector(".agent-task-list")?.lastChild?.querySelector("strong");
         if (progress) progress.textContent = decisionStatuses[message.status];
-        if (heading && message.status !== "completed") heading.textContent = "计算步骤完成";
+        if (heading && agentTaskState.lastEventType === "task_completed" && message.status !== "completed") {
+          heading.textContent = "计算步骤完成";
+        }
       }
       if (message.status === "waiting_for_input" && message.metadata?.waiting_for_input === true
           && /^[a-f0-9]{32}$/.test(message.metadata.continuation_id || "")) {
@@ -473,7 +467,24 @@
         moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear();
       }
       completeLastMessage(finalText, {displayKind: metadata.display_kind}); clearToolStatus();
-      if (status === "completed") markAgentReadyFromSuccessfulTurn();
+      updateAgentReadinessFromTurn(metadata);
+      const missingSmiles = metadata.missing_fields?.length === 1 && metadata.missing_fields[0] === "smiles";
+      const invalidSmiles = metadata.stop_reason === "invalid_molecular_input";
+      if (!projectionFailed && !turn.resume && ["failed", "rejected"].includes(status) && (missingSmiles || invalidSmiles)) {
+        const supply = document.createElement("button");
+        supply.type = "button";
+        supply.className = "supply-molecule";
+        supply.textContent = missingSmiles ? "补充 SMILES" : "更正 SMILES";
+        supply.addEventListener("click", () => {
+          if (decisionActive() || decisionWaiting || decisionAbandonAwait) return;
+          if (!elements.input.value.trim()) {
+            elements.input.value = missingSmiles ? turn.requestText.trimEnd() + "\nSMILES: " : turn.requestText;
+          }
+          else HomeChatRenderer.showNotification("请先处理输入框中的草稿。", "warning");
+          elements.input.focus();
+        });
+        turn.box.appendChild(supply);
+      }
       if (turn.result.details && window.HomeResultDetails) {
         try {
           window.HomeResultDetails.mount(turn.box, {traceId: turn.traceId, reference: turn.result.details});
@@ -878,7 +889,7 @@
             moleculeCandidateLifecycle.clear();
           }
           completeLastMessage(message.content);
-          if (message.status === "completed") markAgentReadyFromSuccessfulTurn();
+          updateAgentReadinessFromTurn(message.metadata);
           clearToolStatus(); // 清除工具状态显示
           break;
 
@@ -950,8 +961,8 @@
 
     // 输入框回车发送
     if (elements.input) {
-      elements.input.addEventListener("keypress", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
+      elements.input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
           e.preventDefault();
           sendMessage();
         }
@@ -1219,15 +1230,19 @@
       return normalized;
     }
 
-    function markAgentReadyFromSuccessfulTurn() {
-      if (!authoritativeAgentModelName) return false;
+    function updateAgentReadinessFromTurn(metadata) {
+      if (!authoritativeAgentModelName) return;
       if ((agentConfigSavedInputVersion !== null
            && agentConfigInputVersion !== agentConfigSavedInputVersion)
           || (agentConfigSavedInputVersion === null && agentConfigInputVersion > 0)) {
-        return false;
+        return;
       }
-      setAgentReadiness("ready");
-      return true;
+      if (metadata?.stop_reason === "model_authentication_failed") {
+        setAgentReadiness("unavailable");
+      } else if (metadata?.model_call_succeeded === true ||
+          (Array.isArray(metadata?.model_calls) && metadata.model_calls.at(-1)?.success === true)) {
+        setAgentReadiness("ready");
+      }
     }
 
     function invalidateAgentReadinessRequests() {
@@ -1318,36 +1333,6 @@
         setAgentReadiness("unavailable");
         return { status: "unavailable", success: false, message: error.message };
       }
-    }
-
-    function ensureAgentReady() {
-      // Minimal protocol fixtures may exercise the decision transport without
-      // mounting the homepage readiness indicator. Keep that transport path
-      // synchronous; the real homepage always mounts this element in init().
-      if (!elements.agentModelReadiness) return true;
-      if (agentReadiness === "ready") return true;
-
-      const hasEditedDraft = agentConfigSavedInputVersion === null
-        ? agentConfigInputVersion > 0
-        : agentConfigInputVersion !== agentConfigSavedInputVersion;
-      return (async () => {
-        if (!hasEditedDraft && agentConfigSavedInputVersion === null) {
-          const inputVersionAtStart = agentConfigInputVersion;
-          const metadata = await refreshAgentModelStatus();
-          if (!metadata || agentConfigInputVersion !== inputVersionAtStart) {
-            HomeChatRenderer.showNotification("Agent 当前不可用，请先检查模型配置。", "warning");
-            return false;
-          }
-          fillLlmSettingsForm(metadata);
-        }
-
-        const result = await refreshAgentReadiness();
-        if (result?.status === "ready") return true;
-        if (!result?.stale) {
-          HomeChatRenderer.showNotification("Agent 尚未就绪，请先检查模型连接。", "warning");
-        }
-        return false;
-      })();
     }
 
     async function saveLlmConfig() {

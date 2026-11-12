@@ -70,7 +70,7 @@ def configuration_generation(value):
     return value
 
 
-def observation_value(result):
+def observation_value(result, *, max_bytes=64 * 1024, max_nodes=16384):
     """Bound fields before invoking any dataclass conversion/copy hooks."""
     from dataclasses import fields
     from src.agent.contracts import (
@@ -101,7 +101,7 @@ def observation_value(result):
     if type(result.artifacts) is not list or len(result.artifacts) > 128:
         raise DecisionBoundaryError('observation_too_large')
     value['artifacts'] = [shallow(a, WorkflowArtifact) for a in result.artifacts]
-    validate_json(value, max_bytes=64 * 1024, reason='observation_too_large')
+    validate_json(value, max_bytes=max_bytes, max_nodes=max_nodes, reason='observation_too_large')
     # Contract conversion is safe only after every nested field is bounded.
     return {'tool_name': result.tool_name, **result.to_legacy_dict()}
 

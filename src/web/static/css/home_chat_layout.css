@@ -89,7 +89,36 @@
   outline-offset: 3px;
 }
 
+.message-box .supply-molecule {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.8rem;
+  min-height: 44px;
+  border: 1px solid var(--theme-primary-border, #c6cfe2);
+  border-radius: 0.65rem;
+  background: var(--theme-primary-soft, #f1f5f9);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
 @media (max-width: 768px) {
+  header .right {
+    display: flex;
+    margin-left: auto;
+    gap: 4px;
+  }
+
+  header .right .theme-switcher,
+  header .right .model-control,
+  header .right .link {
+    display: none;
+  }
+
+  header .settings-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
   .chat-messages .message-container {
     max-width: 100%;
   }
@@ -97,5 +126,28 @@
   /* Fixed composer: three-row textarea, tools, decision row, gaps and safe-area clearance. */
   .index_con .right {
     padding-bottom: calc(244px + env(safe-area-inset-bottom));
+  }
+
+  body.chat-active .index_con .right {
+    height: 100%;
+    box-sizing: border-box;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  }
+
+  body.chat-active .index_con .right .chat-composer {
+    position: static;
+    width: 100%;
+  }
+
+  .home-comparison-table-scroll th,
+  .home-comparison-table-scroll td {
+    min-width: 4.5rem;
+    white-space: nowrap;
+  }
+
+  .home-comparison-table-scroll td:first-child {
+    max-width: 9rem;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 }

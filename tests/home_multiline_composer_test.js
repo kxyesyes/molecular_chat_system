@@ -9,7 +9,7 @@ const source = fs.readFileSync(path.join(root, "static/js/home/main.js"), "utf8"
 
 // Native textarea semantics preserve pasted line separators; input[type=text]
 // strips them before our send handler can read the value.
-const composer = template.match(/<div class="fill">([\s\S]*?)<div class="btn">/);
+const composer = template.match(/<div class="fill">([\s\S]*?)<button\b[^>]*class="btn"/);
 assert(composer, "home composer must exist");
 assert(/<textarea\b[^>]*rows="3"[^>]*><\/textarea>/.test(composer[1]),
   "composer must use a native three-row textarea to preserve multiline SMILES");
@@ -28,6 +28,8 @@ new Function("elements", "sendMessage", "console", source.slice(start, end))(
 const handler = listeners.keydown || listeners.keypress;
 assert.equal(typeof handler, "function", "composer must bind keyboard sending");
 let prevented = false;
+handler({key: "Enter", isComposing: true, preventDefault() {prevented = true;}});
+assert.equal(sent.length, 0, "accepting an IME candidate must not submit a partial question");
 handler({key: "Enter", shiftKey: true, preventDefault() {prevented = true;}});
 assert.equal(sent.length, 0, "Shift+Enter must not send");
 assert.equal(prevented, false, "Shift+Enter must allow the native textarea newline");

@@ -19,6 +19,10 @@ const input = [
   "来源：已验证工具结果。",
 ].join("\n");
 const html = render(input);
+const combined = render(input + "\n类药性评估结果\nLipinski 五规则：符合。", {displayKind:"scientific_summary"});
+assert(combined.includes("<table") && combined.includes("Lipinski"));
+assert(!combined.includes("药物相似性与成药性分析"), "a single tool card cannot label a multi-tool summary");
+assert(!render("计算步骤未完成。").includes("逆合成"), "ordinary progress text is not a synthesis route");
 assert(html.includes("<table"), "Browser comparison must render a semantic table");
 assert.strictEqual((html.match(/<th\b/g) || []).length, 3);
 assert.strictEqual((html.match(/<td\b/g) || []).length, 6);
@@ -37,7 +41,7 @@ for (const value of ["CCO", "46.07", "0", "6.123", "unavailable"]) {
   assert(wide.includes(">" + value + "</td>"), "all scientific values must remain intact: " + value);
 }
 const template = fs.readFileSync(path.join(__dirname, "../src/web/templates/index.html"), "utf8");
-assert(template.includes('/static/js/home/formatters.js?v=20261104-literature-prose-v1'), "refresh must load the accessible formatter");
+assert(template.includes('/static/js/home/formatters.js?v=20261112-scientific-summary-v1'), "refresh must load the accessible formatter");
 
 const unsafe = render("| 分子 | 来源 |\n| --- | --- |\n| <img src=x onerror=alert(1)> | [link](javascript:alert) |");
 assert(!unsafe.includes("<img"), "Table cells must retain HTML escaping");

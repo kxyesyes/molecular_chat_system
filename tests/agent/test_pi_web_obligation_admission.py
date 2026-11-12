@@ -141,6 +141,26 @@ def test_explicit_property_and_generated_property_obligations_are_preserved():
             assert req.dependencies['properties'] == ('molecular_design',)
 
 
+@pytest.mark.parametrize('query', [
+    '生成 3 个候选分子，并计算理化性质',
+    '请生成一个中性的类药候选分子，给出 SMILES 并计算分子量。',
+])
+def test_home_admits_generation_as_the_source_of_requested_descriptors(query):
+    from src.web.web_request import prepare_web_request
+    req = prepare_web_request({'message': query, 'enable_tools': True}, session_id='owner', trace_id='trace')
+    assert [s.tool_name for s in req.requirements.steps] == ['llm_molecular_generator', 'property_calculator']
+    assert req.requirements.steps[1].input_binding == '$.outputs.result'
+    assert req.requirements.dependencies['properties'] == ('molecular_design',)
+
+
+def test_generation_cannot_supply_a_different_explicit_descriptor_subject():
+    from src.web.decision_request import DecisionAdmissionError
+    from src.web.web_request import prepare_web_request
+    with pytest.raises(DecisionAdmissionError, match='molecular_input_required'):
+        prepare_web_request({'message': '生成一个候选分子，并计算乙醇的分子量。', 'enable_tools': True},
+                            session_id='owner', trace_id='trace')
+
+
 @pytest.mark.parametrize('query,expected', [
     ('请预测 CCO 的 ADMET，不需要说明模型局限。', {'admet_predictor'}),
     ('请预测 CCO 的 ADMET 性质，不需要说明模型局限。', {'admet_predictor'}),

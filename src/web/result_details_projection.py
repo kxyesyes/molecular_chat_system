@@ -1,9 +1,9 @@
 """Single-copy presentation DTOs, without changing scientific execution state."""
 import re
-from src.agent.contracts import AgentResult
+from src.agent.contracts import AgentResult, ToolResult
 from src.agent.scientific_session.decision_bounds import observation_value, validate_json
 from src.agent.scientific_session.decision_policy import DecisionBoundaryError
-from src.system.scientific_public_data import public_scientific_data
+from src.system.scientific_public_data import MAX_DETAIL_BYTES, MAX_DETAIL_NODES, public_scientific_data
 
 
 RESULT_FORMAT = 'summary_details_v1'
@@ -125,7 +125,18 @@ def project_result_details(result, *, summary, status, error, warnings):
     accepted = accepted_ranking_ids(result)
     species_rejected = species_mismatch_ids(result)
     for index, observation in enumerate(result.tool_results, 1):
-        value = observation_value(observation)
+        byte_limit, node_limit = 64 * 1024, 16384
+        if (result.metadata.get('scientific_plan_status') == 'ready'
+                and result.metadata.get('workflow_version') in {'web-admet-batch-v1', 'web-property-admet-batch-v1'}
+                and type(observation) is ToolResult and observation.tool_name == 'admet_predictor'
+                and type(observation.data) is list and 1 < len(observation.data) <= 16
+                and all(type(row) is dict and type(row.get('smiles')) is str for row in observation.data)):
+            # Each molecule remains bounded. Only the local display snapshot
+            # combines their endpoint tables under the existing detail-file limit.
+            for row in observation.data:
+                validate_json(row, max_bytes=byte_limit, reason='result_details_invalid')
+            byte_limit, node_limit = MAX_DETAIL_BYTES, MAX_DETAIL_NODES
+        value = observation_value(observation, max_bytes=byte_limit, max_nodes=node_limit)
         # The legacy formatted rendering duplicates data and is never authority.
         value.pop('formatted', None)
         value['step_id'] = str(observation.quality.get('step_id') or f'{observation.tool_name}:{index}')
@@ -139,7 +150,7 @@ def project_result_details(result, *, summary, status, error, warnings):
                 value.pop('formatted', None)
             else:
                 scrub_unaccepted_ranking_failure(value)
-        validate_json(value, max_bytes=64 * 1024, max_depth=32, reason='result_details_invalid')
+        validate_json(value, max_bytes=byte_limit, max_nodes=node_limit, max_depth=32, reason='result_details_invalid')
         sequence.append(value)
     payload = {'format': RESULT_FORMAT, 'trace_id': result.trace_id, 'status': status,
                'tool_result_sequence': sequence, 'error': scrub_run_error(result, error), 'warnings': warnings,

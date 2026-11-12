@@ -91,6 +91,19 @@ def looks_like_design(query: str) -> bool:
     return has_generation_intent(query) and not target_lookup_result_annotation(query)
 
 
+def requests_generated_properties(query: str) -> bool:
+    """Recognize an explicit descriptor step whose subject is the generated candidates."""
+    text = positive_intent_text(query)
+    field = (r'(?:理化性质|分子性质|性质|分子式|分子量|(?:molecular\s+)?properties|'
+             r'molecular\s+weight|MW|logP|TPSA|HBA|HBD|QED)')
+    action = re.search(
+        r'(?:并且?|再|然后|[，,；;。]|\band\b|\bthen\b)\s*(?:计算|评估|calculate|compute|assess)\s*'
+        r'(?:(?:它们|它|该分子|各候选|每个分子)的|其|their\s+|its\s+|the\s+)?\s*'
+        + field + r'(?:\s*(?:和|与|及|、|and\b)\s*' + field + r')*'
+        + r'\s*(?=[，,；;。.!！?？]|$)', text, re.I)
+    return bool(action and looks_like_design(text[:action.start()]))
+
+
 def target_lookup_result_annotation(query: str) -> bool:
     """Recognize target-search result wording, not a design request.
 
