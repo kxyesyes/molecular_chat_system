@@ -277,7 +277,7 @@ chmod 750 "$PROJECT_DIR"/logs "$PROJECT_DIR"/scratch "$PROJECT_DIR"/temp_docking
 | 靶点搜索 | target_database.sqlite、结构缓存 | TARGET_DB_PATH、TARGET_CACHE_DIR |
 | 反向寻靶 | ChEMBL TSV、Morgan/MACCS 指纹 | REVERSE_TARGET_DATA_DIR |
 | 活性预测 | 已验证模型和 registry | ACTIVITY_MODEL_DIR |
-| RAG | FAISS index | RAG_INDEX_PATH |
+| RAG | FAISS 索引及对应 manifest | 健康检查用 `RAG_INDEX_PATH` 指向索引文件；运行时在 YAML 中用 `rag.vector_store_path` 指向同一路径，省略 `.index` 后缀 |
 | 后台任务 | SQLite 任务库 | MEDCHAT_TASK_DB_PATH |
 
 这些资产的来源、版本、生成命令和 SHA256 应单独记录；清单见 data/REGISTRY.md。例如从受控备份复制到服务器：

@@ -1,6 +1,6 @@
 # MedChat Data Asset Registry
 
-本文件记录 MedChat 运行所需的本地数据资产。大型数据库、模型权重、结构缓存和向量索引不应直接提交到 Git；部署时请按本登记表单独放置，并通过 `scripts/health_check.py` 验证。
+本文件记录 MedChat 运行所需的数据资产。运行数据库、结构缓存和向量索引按登记表部署。模型权重、运行时 registry 和真实训练资产应按明确的来源、许可及提交范围管理。部署文件检查使用 `scripts/health_check.py`。
 
 健康检查标签：`Target DB`、`Target Cache`、`Reverse Target Data`、`Activity Models`、`RAG Index`、`Sample Assets`。
 
@@ -22,15 +22,19 @@
 | 靶点结构缓存 | `data/target_db/cache/` | 靶点搜索下载器 / 批量结构同步 | `Target Cache` | 不提交 |
 | 反向寻靶 ChEMBL 表 | `data/reverse_target/chembl_data_with_fps.tsv` 或 `chembl_training_data.tsv` | `src/reverse_target/*build*`、`download_chembl.py` 相关脚本 | `Reverse Target Data` | 不提交 |
 | 反向寻靶指纹矩阵 | `data/reverse_target/morgan_fingerprints.npy`、`maccs_fingerprints.npy` | `src/reverse_target/generate_fingerprints.py` | `Reverse Target Data` | 不提交 |
-| 活性预测模型（已批准 r2 部署包） | `data/activity/models/pde-buche-20261006-r2/` | 已验收 PDE/BuChE family bundle；模型卡、权重与 v3 registry 一并维护 | `Activity Models` + r2 registry 校验 | 按明确批准范围提交；其他训练产物不提交 |
-| 其他活性预测模型/训练产物 | `data/activity/models/` 下其他目录 | 本地训练或搜索输出 | `Activity Models` | 不提交 |
+| 活性预测模型（已批准 r2 部署包） | `data/activity/models/pde-buche-20261006-r2/` | 已验收 PDE/BuChE family bundle；模型卡、权重与 v3 registry 一并维护 | `Activity Models` + r2 registry 校验 | 按明确批准范围提交 |
+| 其他活性预测模型/训练资产 | `data/activity/models/` 下其他目录 | 本地训练或搜索产物 | `Activity Models` | 确认来源、许可和提交范围后按需登记 |
 | RAG FAISS 索引 | `data/molecular_faiss_index.index` | RAG 索引构建流程 | `RAG Index` | 不提交 |
 | 分子设计导出结果 | `data/design_results/` | 用户运行时保存/导出 | 手动检查 | 不提交 |
 | Agent 历史结果展示明细 | Agent 状态库同级的 `result_details/`（默认 `data/result_details/`） | 仅由已验证结果生成的私有不可变 JSON 快照；不是执行或引用授权 | 所属会话、文件摘要、结构和字节预算读取校验；相关 store/routes 测试 | 运行时数据，不提交 |
 
 ## 部署约定
 
-- 生产环境优先通过 `.env` 配置 `TARGET_DB_PATH`、`TARGET_CACHE_DIR`、`REVERSE_TARGET_DATA_DIR`、`ACTIVITY_MODEL_DIR`、`RAG_INDEX_PATH`。
+历史反向寻靶 TSV 中，部分非 nM 观测的数值已换算成 nM，单位列仍保留原始单位。仅凭旧 TSV 无法判断每行是否需要换算。对使用旧导出器构建的数据，先保留原版本，核对原始 ChEMBL 观测或质量审计表，再重新导出训练表，并从新表重建指纹和对应 manifest。新版导出器将 `standard_value` 与 `standard_units` 一起规范为 nM，审计表保留来源数值和单位。
+
+读取时遇到具有旧导出特征且数值与单位无法配对的记录，2D 和 3D 结果保留相似度排名，返回 `standard_value: null` 和 `measurement_status: unit_verification_required`。新旧严格回执消费者支持的字段不同，生产端与消费者需配套发布。缺少明确质量资格标记的来源记录返回 `quality_eligible: null`。
+
+- 生产环境优先通过 `.env` 配置 `TARGET_DB_PATH`、`TARGET_CACHE_DIR`、`REVERSE_TARGET_DATA_DIR`、`ACTIVITY_MODEL_DIR`。RAG 使用自定义位置时，同时设置健康检查的 `RAG_INDEX_PATH`（索引文件全名）与运行时 YAML 的 `rag.vector_store_path`（去掉 `.index` 后缀的前缀）。健康检查确认文件存在且非空，加载时再核对索引及 manifest。
 - 数据库、未批准模型、缓存和索引建议放在服务器持久化目录；本仓库明确批准的
   `pde-buche-20261006-r2` 部署包例外纳入 Git，并由 registry 摘要校验。
 - 更新任何数据资产时，应记录来源、版本、生成命令和日期；后续可扩展为带 SHA256 校验的 `scripts/fetch_data.py`。

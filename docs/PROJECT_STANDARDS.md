@@ -333,8 +333,8 @@ python scripts/run_agent_acceptance.py --mode all
 
 `real`/`all` 会调用真实服务，运行前确认凭据、模型和工具可用；测试密钥规则见 [AGENTS 第 9 节](../AGENTS.md#9-禁止提交的内容)。contract/replay 不能替代真实科学验收。
 
-Pi 替换已尝试云端与本地真实模型验收，但两组均未通过，成功的模型/科学工具端到端验收仍为 **未验证**。
-具体失败、离线验证与部署限制见 [Pi 验收记录](superpowers/validation/2026-10-23-pi-harness-replacement.md)。
+2026-10-23 的云端和本地真实模型尝试均未通过，详见[当次验收记录](superpowers/validation/2026-10-23-pi-harness-replacement.md)。
+后续 #217 记录了本地 Ollama JSON 模式在隔离聊天入口的 4 项通过结果。完整云端科学流程和生产部署仍待验收，覆盖范围见 [Pi 运行手册](PI_RUNTIME.md#实测状态与尚待验收)。
 上述命令是验证入口，不是已通过记录；离线契约和健康检查不代表替换已完整验证。
 
 靶点数据准备与检查（[详细说明](target_search_local_db.md)；seed 会写入数据，应确认目标目录）：
