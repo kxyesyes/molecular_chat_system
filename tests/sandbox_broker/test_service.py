@@ -1723,6 +1723,10 @@ def test_late_cancellation_resistant_create_is_owned_and_cleaned_before_stop(
             assert sdk.live_ids == set()
             late_create = service._create_tasks[job.job_id]
             assert not late_create.done()
+            payload = _job_file(config, job.job_id)
+            await service.expire(time.time() + config.audit_retention_seconds + 1)
+            assert payload.exists()
+            assert service.get_job(job.job_id).cleanup_status == "failed"
 
             with pytest.raises(StopIncomplete):
                 await service.stop(timeout=0.05)
@@ -2369,8 +2373,12 @@ def test_retention_expires_active_keeps_terminal_metadata_and_purges_old_audit(
         _set_updated_at(store, audit.job_id, now - 31 * 86_400)
         _set_updated_at(store, fresh.job_id, now - 60)
 
+        service._record_terminal_observation(audit.job_id)
+        service._record_terminal_observation(terminal.job_id)
         await service.expire(now)
         await service.expire(now)
+        assert audit.job_id not in service._terminal_observed
+        assert terminal.job_id in service._terminal_observed
         return store, config, (active.job_id, terminal.job_id, audit.job_id, fresh.job_id)
 
     store, config, ids = asyncio.run(scenario())
@@ -2385,6 +2393,140 @@ def test_retention_expires_active_keeps_terminal_metadata_and_purges_old_audit(
     assert not (config.state_root / "jobs" / terminal_id).exists()
     assert not (config.state_root / "jobs" / audit_id).exists()
     assert (config.state_root / "jobs" / fresh_id / "payload").read_bytes() == b"payload"
+
+
+@pytest.mark.parametrize("with_sandbox_id", [True, False])
+def test_retention_keeps_retry_evidence_until_recovery_confirms_cleanup(
+    tmp_path: Path, with_sandbox_id: bool,
+) -> None:
+    class ReconcileClient(RecoverySandboxClient):
+        async def destroy_by_job_id(self, job_id: str) -> int:
+            self.destroyed_ids.append(job_id)
+            return 0
+
+    async def scenario() -> None:
+        sdk = ReconcileClient()
+        service, store, config = _service(tmp_path, sdk)
+        job, _ = store.create_or_get("idem-unresolved", "a" * 64, "trace-unresolved")
+        store.transition(job.job_id, BrokerJobStatus.PROVISIONING)
+        if with_sandbox_id:
+            store.attach_sandbox(job.job_id, "sandbox-orphan")
+        store.fail(job.job_id, BrokerErrorCode.CLEANUP_FAILED, cleanup_status="failed")
+        old_enough = time.time() + config.audit_retention_seconds + 60
+        await service.expire(old_enough)
+        assert store.get(job.job_id) is not None
+        await service.recover()
+        assert sdk.destroyed_ids == ["sandbox-orphan" if with_sandbox_id else job.job_id]
+        assert store.get(job.job_id).cleanup_status == "succeeded"
+        await service.expire(old_enough)
+        assert store.get(job.job_id) is None
+
+    asyncio.run(scenario())
+
+
+def test_retention_requires_reconciliation_of_an_interrupted_create(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service, store, config = _service(tmp_path, FakeSandboxClient())
+        job, _ = store.create_or_get("idem-interrupted", "f" * 64, "trace-interrupted")
+        store.transition(job.job_id, BrokerJobStatus.PROVISIONING)
+        await service.expire(time.time() + config.artifact_retention_seconds + 60)
+        assert store.get(job.job_id).cleanup_status == "failed"
+
+    asyncio.run(scenario())
+
+
+def test_retention_yields_between_jobs_in_an_expired_backlog(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        service, store, config = _service(tmp_path, FakeSandboxClient())
+        payloads = []
+        job_ids = []
+        for index in range(65):
+            job, _ = store.create_or_get(f"idem-old-{index}", "b" * 64, f"trace-old-{index}")
+            store.fail(job.job_id, BrokerErrorCode.INVALID_INPUT, cleanup_status="succeeded")
+            payloads.append(_job_file(config, job.job_id))
+            job_ids.append(job.job_id)
+        now = time.time() + config.audit_retention_seconds + 1
+        sweep = asyncio.create_task(service.expire(now))
+        snapshots = []
+        with sqlite3.connect(store.db_path) as connection:
+            while not sweep.done():
+                audits = connection.execute("SELECT count(*) FROM jobs").fetchone()[0]
+                snapshots.append((sum(path.exists() for path in payloads), audits))
+                await asyncio.sleep(0)
+        await sweep
+        assert any(0 < files < len(job_ids) for files, _ in snapshots)
+        assert any(0 < audits < len(job_ids) for _, audits in snapshots)
+        assert all(not path.exists() for path in payloads)
+        assert all(store.get(job_id) is None for job_id in job_ids)
+
+    asyncio.run(scenario())
+
+
+def test_retention_leaves_a_replaced_state_root_alone(tmp_path: Path) -> None:
+    service, store, config = _service(tmp_path, FakeSandboxClient())
+    job, _ = store.create_or_get("idem-original", "a" * 64, "trace-original")
+    config.state_root.rename(tmp_path / "previous-state")
+    payload = _job_file(config, job.job_id)
+
+    assert not service._remove_job_tree(job.job_id)
+    assert payload.read_bytes() == b"payload"
+
+
+def test_retention_leaves_live_work_to_its_current_owner(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        sdk = FakeSandboxClient(block=True)
+        service, store, config = _service(tmp_path, sdk)
+        await service.start()
+        try:
+            record = await service.submit(_prepared(config), "idem-live")
+            await asyncio.wait_for(sdk.running.wait(), timeout=2)
+            payload = _job_file(config, record.job_id)
+            await service.expire(time.time() + config.audit_retention_seconds + 1)
+            assert payload.exists()
+            assert store.get(record.job_id).status is BrokerJobStatus.RUNNING
+            assert sdk.destroyed_ids == []
+        finally:
+            sdk.release.set()
+            await service.stop()
+
+    asyncio.run(scenario())
+
+
+def test_started_broker_retries_retention_and_stops_its_single_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        service, store, config = _service(tmp_path, FakeSandboxClient())
+        yesterday = time.time() - config.artifact_retention_seconds - 1
+        monkeypatch.setattr(store, "_now", lambda: yesterday)
+        record, _ = store.create_or_get("idem-overdue", "a" * 64, "trace-overdue")
+        store.fail(record.job_id, BrokerErrorCode.INVALID_INPUT, cleanup_status="succeeded")
+        payload = _job_file(config, record.job_id)
+        original = service.expire
+        swept = asyncio.Event()
+        owners = []
+
+        async def observe_sweep(now: float) -> None:
+            owners.append(asyncio.current_task())
+            if len(owners) == 1:
+                raise ValueError("retention failed")
+            await original(now)
+            swept.set()
+
+        monkeypatch.setattr(service_module, "_RETENTION_INTERVAL_SECONDS", 0.01)
+        monkeypatch.setattr(service, "expire", observe_sweep)
+        await asyncio.gather(service.start(), service.start())
+        try:
+            await asyncio.wait_for(swept.wait(), timeout=1)
+        finally:
+            await service.stop()
+        assert not payload.exists()
+        assert store.get(record.job_id) is not None
+        assert len(set(owners)) == 1
+        assert owners[0].done()
+
+    asyncio.run(scenario())
 
 
 def test_retention_rejects_symlink_hardlink_and_concurrent_sibling_escape(

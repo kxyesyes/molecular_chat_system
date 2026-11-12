@@ -12,6 +12,7 @@ import re
 import stat
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -68,6 +69,7 @@ _REMOTE_AUTO_EXPIRY_WARNING = (
 )
 _TOOL_FAILED_WARNING = "sandbox_tool_failed"
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
+_RETENTION_INTERVAL_SECONDS = 3600
 _UPLOAD_SUFFIXES = {
     "receptor": frozenset({".pdb"}),
     "ligand": frozenset({".sdf", ".mol"}),
@@ -433,6 +435,8 @@ class SandboxBrokerService:
             type(config) is not BrokerConfig
             or not isinstance(store, BrokerStore)
             or not isinstance(artifact_registry, ArtifactRegistry)
+            or store.db_path.parent != config.state_root
+            or artifact_registry.checked_root() != config.state_root
         ):
             raise ValueError("invalid sandbox broker service configuration")
         self.config = config
@@ -460,6 +464,7 @@ class SandboxBrokerService:
         self._recovery_lock = asyncio.Lock()
         self._recovery_generation = 0
         self._retention_lock = asyncio.Lock()
+        self._retention_task: asyncio.Task[None] | None = None
         self._cleanup_timeout_margin_seconds = 30.0
         self._create_hard_timeout_seconds = float(config.sandbox_timeout_seconds)
         self._create_retry_delay_seconds = 0.5
@@ -749,7 +754,19 @@ class SandboxBrokerService:
             self._consumer_task = asyncio.create_task(
                 self._consume(), name="sandbox-broker-consumer"
             )
+            if self._retention_task is None or self._retention_task.done():
+                self._retention_task = asyncio.create_task(
+                    self._run_retention(), name="sandbox-broker-retention"
+                )
             self._refresh_runtime_metrics()
+
+    async def _run_retention(self) -> None:
+        while True:
+            try:
+                await self.expire(time.time())
+            except Exception:
+                logging.getLogger(__name__).warning("sandbox broker retention sweep failed")
+            await asyncio.sleep(_RETENTION_INTERVAL_SECONDS)
 
     async def stop(self, *, timeout: float | None = None) -> None:
         """Request cancellation and await one shared, non-cancellable shutdown."""
@@ -784,6 +801,7 @@ class SandboxBrokerService:
                 if (
                     not self._started
                     and self._consumer_task is None
+                    and self._retention_task is None
                     and not self._job_tasks
                     and not self._create_tasks
                     and not self._cleanup_tasks
@@ -830,6 +848,10 @@ class SandboxBrokerService:
             except BaseException:
                 continue
 
+        if self._retention_task is not None:
+            self._retention_task.cancel()
+            await asyncio.gather(self._retention_task, return_exceptions=True)
+            self._retention_task = None
         consumer = self._consumer_task
         join_task = asyncio.create_task(
             self._queue.join(), name="sandbox-broker-queue-drain"
@@ -1067,7 +1089,7 @@ class SandboxBrokerService:
             source = upload.file
             temporary = tempfile.TemporaryFile(
                 mode="w+b",
-                dir=self.config.state_root,
+                dir=self.artifact_registry.checked_root(),
             )
             copy_task = asyncio.create_task(
                 asyncio.to_thread(
@@ -1192,8 +1214,9 @@ class SandboxBrokerService:
             self._release_pending_rejection_reservation()
             reservation_held = False
             receptor_temporary.seek(0)
+            root = self.artifact_registry.checked_root()
             receptor = stage_input(
-                self.config.state_root,
+                root,
                 record.job_id,
                 "receptor",
                 receptor_suffix,
@@ -1202,7 +1225,7 @@ class SandboxBrokerService:
             )
             ligand_temporary.seek(0)
             ligand = stage_input(
-                self.config.state_root,
+                root,
                 record.job_id,
                 "ligand",
                 ligand_suffix,
@@ -2305,8 +2328,6 @@ class SandboxBrokerService:
                     if current is None or current.cleanup_status == "succeeded":
                         continue
                     was_terminal = current.status in TERMINAL_STATUSES
-                    if current.sandbox_id is None:
-                        continue
                     if current.cleanup_status != "in_progress":
                         self.store.record_cleanup(current.job_id, "in_progress")
                     try:
@@ -2433,7 +2454,10 @@ class SandboxBrokerService:
                     continue
             self._recovery_generation += 1
 
-    async def _recover_destroy(self, job_id: str, sandbox_id: str) -> None:
+    async def _recover_destroy(self, job_id: str, sandbox_id: str | None) -> None:
+        if sandbox_id is None:
+            await self._recover_destroy_by_job_id(job_id)
+            return
         cleanup = self._start_phase(job_id, "cleanup", 1)
         try:
             await self._destroy_by_id_hard(sandbox_id)
@@ -2547,60 +2571,64 @@ class SandboxBrokerService:
         artifact_cutoff = epoch - self.config.artifact_retention_seconds
         audit_cutoff = epoch - self.config.audit_retention_seconds
         async with self._retention_lock:
-            try:
-                artifact_candidates = self.store.jobs_updated_before(artifact_cutoff)
-            except Exception:
-                raise ValueError("retention failed") from None
-            for candidate in artifact_candidates:
-                current = self.store.get(candidate.job_id)
-                if current is None:
-                    continue
-                if current.status not in TERMINAL_STATUSES:
-                    cleanup = await self._expire_active_cleanup(current)
-                    if cleanup != "succeeded":
-                        continue
-                if not self._remove_job_tree(current.job_id):
-                    continue
-                latest = self.store.get(current.job_id)
-                if latest is not None and latest.status not in TERMINAL_STATUSES:
-                    try:
-                        self.store.expire_active(
-                            latest.job_id,
-                            cleanup_status="succeeded",
-                        )
-                    except Exception:
-                        continue
-                    self._record_terminal_observation(latest.job_id)
-                    await self._notify_terminal()
-
-            try:
-                audit_candidates = self.store.jobs_updated_before(audit_cutoff)
-            except Exception:
-                raise ValueError("retention failed") from None
-            for candidate in audit_candidates:
-                if candidate.status not in TERMINAL_STATUSES:
-                    continue
-                if not self._remove_job_tree(candidate.job_id):
-                    continue
+            cursor = ""
+            while True:
                 try:
-                    self.store.delete_terminal_audit(
-                        candidate.job_id,
-                        cutoff=audit_cutoff,
-                    )
+                    page = self.store.retention_job_page(cursor)
                 except Exception:
-                    continue
+                    raise ValueError("retention failed") from None
+                if not page:
+                    return
+                for job_id, updated_at in page:
+                    if updated_at > artifact_cutoff:
+                        continue
+                    await asyncio.sleep(0)
+                    if not self._owns_job_work(job_id):
+                        await self._expire_job(job_id, artifact_cutoff, audit_cutoff)
+                cursor = page[-1][0]
+                await asyncio.sleep(0)
+
+    async def _expire_job(self, job_id: str, artifact_cutoff: float, audit_cutoff: float) -> None:
+        current = self.store.get(job_id)
+        if current is None or current.updated_at > artifact_cutoff:
+            return
+        if current.status not in TERMINAL_STATUSES:
+            if await self._expire_active_cleanup(current) != "succeeded":
+                return
+        if not self._remove_job_tree(job_id):
+            return
+        if current.status not in TERMINAL_STATUSES:
+            try:
+                self.store.expire_active(job_id, cleanup_status="succeeded")
+            except Exception:
+                return
+            self._record_terminal_observation(job_id)
+            await self._notify_terminal()
+        elif current.updated_at <= audit_cutoff:
+            try:
+                deleted = self.store.delete_terminal_audit(job_id, cutoff=audit_cutoff)
+            except Exception:
+                return
+            if deleted:
+                self._terminal_observed.discard(job_id)
+
+    def _owns_job_work(self, job_id: str) -> bool:
+        return (
+            job_id in self._prepared or job_id in self._rejection_ownership
+            or job_id in self._create_tasks or job_id in self._cleanup_tasks
+        )
 
     async def _expire_active_cleanup(self, record: BrokerJobRecord) -> str:
         try:
-            if record.sandbox_id is None:
+            if record.sandbox_id is None and record.status is not BrokerJobStatus.PROVISIONING:
                 self.store.record_cleanup(record.job_id, "succeeded")
                 return "succeeded"
             if record.cleanup_status == "succeeded":
                 return "succeeded"
             self.store.record_cleanup(record.job_id, "in_progress")
             try:
-                await self._destroy_by_id_hard(record.sandbox_id)
-            except BaseException:
+                await self._recover_destroy(record.job_id, record.sandbox_id)
+            except Exception:
                 self.store.record_cleanup(record.job_id, "failed")
                 self.store.fail(
                     record.job_id,
@@ -2616,7 +2644,7 @@ class SandboxBrokerService:
                 return "failed"
             self.store.record_cleanup(record.job_id, "succeeded")
             return "succeeded"
-        except BaseException:
+        except Exception:
             current = self.store.get(record.job_id)
             if current is not None and current.status not in TERMINAL_STATUSES:
                 try:
@@ -2640,7 +2668,7 @@ class SandboxBrokerService:
         try:
             if type(job_id) is not str or _UUID_HEX_PATTERN.fullmatch(job_id) is None:
                 raise ValueError
-            root = self.config.state_root.resolve(strict=True)
+            root = self.artifact_registry.checked_root()
             jobs = root / "jobs"
             try:
                 jobs_metadata = jobs.lstat()
@@ -2725,7 +2753,7 @@ class SandboxBrokerService:
 
     def _snapshot_input(self, staged: StagedInput, maximum_bytes: int) -> bytes:
         try:
-            root = self.config.state_root.resolve(strict=True)
+            root = self.artifact_registry.checked_root()
             relative = PurePosixPath(staged.relative_path)
             projected = root.joinpath(*relative.parts)
             resolved_parent = projected.parent.resolve(strict=True)
@@ -2790,7 +2818,7 @@ class SandboxBrokerService:
         try:
             if _UUID_HEX_PATTERN.fullmatch(job_id) is None:
                 raise ValueError
-            root = self.config.state_root.resolve(strict=True)
+            root = self.artifact_registry.checked_root()
             current = root
             for name in ("jobs", job_id, "output"):
                 candidate = current / name

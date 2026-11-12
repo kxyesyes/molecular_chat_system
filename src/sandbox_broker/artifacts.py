@@ -249,7 +249,8 @@ class ArtifactRegistry:
     def __repr__(self) -> str:
         return "ArtifactRegistry(<state>)"
 
-    def _checked_root(self) -> Path:
+    def checked_root(self) -> Path:
+        """Return the original state directory after checking its identity."""
         root = _real_absolute_directory(self._state_root)
         if root != self._state_root or _identity(root.lstat()) != self._root_identity:
             raise ValueError
@@ -292,7 +293,7 @@ class ArtifactRegistry:
             if self._store.get(validated_job_id) is None:
                 raise KeyError("job not found")
 
-            root = self._checked_root()
+            root = self.checked_root()
             jobs = _ensure_real_child_directory(root, "jobs")
             job_root = _ensure_real_child_directory(jobs, validated_job_id)
             published_root = _ensure_real_child_directory(job_root, "published")
@@ -499,7 +500,7 @@ class ArtifactRegistry:
             )
             if record.relative_path != expected_relative or record.size_bytes > limit:
                 raise ValueError
-            root = self._checked_root()
+            root = self.checked_root()
             relative = PurePosixPath(record.relative_path)
             projected = _project_without_links(root, relative)
             before = projected.lstat()
@@ -553,7 +554,7 @@ class ArtifactRegistry:
             )
             if record.relative_path != expected_relative or record.size_bytes > limit:
                 raise ValueError
-            root = self._checked_root()
+            root = self.checked_root()
             relative = PurePosixPath(record.relative_path)
             projected = _project_without_links(root, relative)
             before = projected.lstat()
