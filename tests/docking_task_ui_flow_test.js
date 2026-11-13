@@ -31,7 +31,7 @@ assert.doesNotMatch(source, /elapsed >= 6\.5/);
 assert.doesNotMatch(source, /elapsed >= 15\.0/);
 assert.match(template, /id="cancel-docking-btn"/);
 assert.match(template, /docking_box\.js\?v=20261012-box-confirmation-v1/);
-assert.match(template, /ui_manager\.js\?v=20261112-docking-regions-v4/);
+assert.match(template, /ui_manager\.js\?v=20261112-vina-regions-v5/);
 const startDockingSource = source.slice(source.indexOf("function startDocking()"));
 const centerGuard = startDockingSource.indexOf('if (!AppState.dockingBoxCenterTouched)');
 const startButtonSetup = startDockingSource.indexOf('const startBtn = document.getElementById("start-btn")');

@@ -2260,16 +2260,14 @@ select.viewer-btn option {
     min-width: 620px;
   }
 }
-.cavity-picker, .docking-comparison {
+.cavity-picker {
   display: grid;
   gap: 8px;
   margin: 12px 0 16px;
 }
-.cavity-picker select, .docking-comparison select {
+.cavity-picker select {
   padding: 8px;
   max-width: 100%;
   font: inherit;
 }
-.docking-comparison input { max-width: 100%; }
-.docking-comparison summary { cursor: pointer; font-weight: 600; }
-.docking-comparison p, #cavity-status { color: #475569; font-size: 0.9rem; }
+#cavity-status { color: #475569; font-size: 0.9rem; }

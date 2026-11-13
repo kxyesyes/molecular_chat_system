@@ -798,54 +798,6 @@ def setup_docking_routes(
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    @app.get("/api/docking/fitdock/status")
-    def fitdock_status(request: Request):
-        _session_id(request)
-        from src.docking.fitdock_analysis import fitdock_binary
-        return {"available": bool(fitdock_binary())}
-
-    @app.post("/api/docking/tasks/{job_id}/consensus")
-    async def get_consensus(job_id: str, request: Request, structure: UploadFile = File(...),
-                            mode: str = Form(...)):
-        from subprocess import TimeoutExpired
-        from src.docking.fitdock_analysis import compare_with_fitdock, fitdock_binary
-        from src.task_runtime.completion import CompletionError, DockingCompletionStore
-        from src.task_runtime.staging import DockingInputStager, ManifestError
-
-        _validate_job_id(job_id)
-        _session_id(request)
-        task = await resolve_owned_durable_docking_task(job_id, request)
-        if not task:
-            raise HTTPException(404, "未找到已完成的对接任务")
-        if mode not in {"template", "import"}:
-            raise HTTPException(422, "请选择模板运行或导入姿势")
-        if mode == "template" and not fitdock_binary():
-            raise HTTPException(503, "未配置本地 FitDock，请导入已有姿势")
-        content = await resolve(read_upload_limited, "_read_upload_limited")(structure, "ligand file")
-        runtime, root, manifest = task
-
-        def analyze():
-            poses = DockingCompletionStore(root).read_pose(job_id).decode("utf-8")
-            if mode == "import":
-                return compare_with_fitdock(poses, content, mode, None)
-            stager = DockingInputStager(root)
-            manifest_path = stager.resolve_manifest_locator(job_id, Path(manifest).name)
-            with stager.execution_snapshot(job_id, manifest_path) as inputs:
-                return compare_with_fitdock(poses, content, mode, inputs.receptor_path)
-
-        try:
-            result = await asyncio.to_thread(analyze)
-        except (CompletionError, ManifestError) as exc:
-            raise HTTPException(409, "原任务结构或结果不可读取") from exc
-        except (ImportError, OSError) as exc:
-            raise HTTPException(503, "FitDock 或其依赖不可用") from exc
-        except TimeoutExpired as exc:
-            raise HTTPException(504, "FitDock 运行超时") from exc
-        except (ValueError, RuntimeError) as exc:
-            raise HTTPException(422, str(exc)) from exc
-        consent_guard.require_unambiguous_durable(runtime, job_id)
-        return result
-
     @app.get("/api/docking/demo/pde4a-apo")
     def get_pde4a_apo_demo(request: Request):
         """Return the registered local PDE4A apo demo asset, never a fallback."""

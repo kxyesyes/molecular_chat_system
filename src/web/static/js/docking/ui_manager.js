@@ -102,13 +102,9 @@ async function fetchDockedPoseSdf(jobId, poseNumber = 1) {
   return await response.text();
 }
 
-// 恢复样式和相互作用状态
-function restoreViewState(state) {
+function restoreDockingInteractions(state) {
   if (!state) return;
   const viewSequence = dockingViewSequence;
-  if (state.style) {
-    StyleManager.apply(state.style, false);
-  }
   setTimeout(() => {
     if (viewSequence !== dockingViewSequence) return;
     if (state.interactions.hydrogenBonds) displayHydrogenBonds();
@@ -163,7 +159,8 @@ function overlayTopN() {
             AppState.currentProteinFormat || "pdb",
           );
           if (prot && prot.setStyle) {
-            prot.setStyle({}, { cartoon: { color: "spectrum" } });
+            const proteinColor = {gray: "#bfbfbf", dark: "#e6eef8"}[savedState.style] || "spectrum";
+            prot.setStyle({}, { cartoon: { color: proteinColor } });
             const waterAndOtherResns = [
               "HOH",
               "WAT",
@@ -218,7 +215,7 @@ function overlayTopN() {
 
         viewer.zoomTo();
         viewer.render();
-        restoreViewState(savedState);
+        restoreDockingInteractions(savedState);
       } catch (e) {
         console.error("叠加多个 Pose 失败:", e);
       }
@@ -457,6 +454,10 @@ function loadProteinFile(file) {
 
       updateButtonStates();
       setResultsMinHeightToLeft();
+      const detectButton = document.getElementById("detect-cavities-btn");
+      if (detectButton && typeof detectDockingCavities === "function") {
+        void detectDockingCavities(detectButton, AppState.dockingBoxCenterTouched);
+      }
       resolve(pdbData);
     };
     reader.onerror = () => reject(new Error("受体文件读取失败"));
@@ -995,9 +996,6 @@ async function loadDurableResultDetails(result, options = {}) {
         ? { pose: result.best_pose_index }
         : null,
     }, { restored });
-    if (typeof mountDockingConsensus === "function") {
-      mountDockingConsensus(result.task_id, jobId, !restored && !!result.result_job_id);
-    }
     if (!restored && result.result_job_id && typeof currentProteinData !== "undefined" && currentProteinData) {
       const bestPose = Number.isInteger(result.best_pose_index) && result.best_pose_index > 0
         ? result.best_pose_index
@@ -1756,16 +1754,7 @@ function viewPose(poseNumber) {
         }
         viewer.zoomTo();
         viewer.render();
-        // 只恢复交互显示，不调用 StyleManager.apply：
-        // restoreViewState 内部会 setStyle({},{}) 清除所有样式，
-        // 而 SDF 加载的配体原子没有 hetflag 属性，导致配体样式无法重新识别，配体隐形。
-        setTimeout(() => {
-          if (viewSequence !== dockingViewSequence) return;
-          if (interactionsState.hydrogenBonds) displayHydrogenBonds();
-          if (interactionsState.piPiInteractions) displayPiPiInteractions();
-          if (interactionsState.hydrophobicInteractions)
-            displayHydrophobicInteractions();
-        }, 100);
+        restoreDockingInteractions(savedState);
       } else {
         alert(`未能获取 Pose ${poseNumber} 的标准结构`);
       }
