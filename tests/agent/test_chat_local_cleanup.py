@@ -141,6 +141,33 @@ def test_compiled_progress_is_delivered_while_property_tool_runs(tmp_path):
     asyncio.run(run())
 
 
+def test_cancel_during_compiled_progress_delivers_one_terminal(tmp_path):
+    handler, sender = local_case(tmp_path, tools=[Properties()])
+
+    async def run():
+        sending, release = asyncio.Event(), asyncio.Event()
+        send = sender.websocket.send_text
+
+        async def delayed(frame):
+            if json.loads(frame).get('event', {}).get('event') == 'tool_started':
+                sending.set()
+                await release.wait()
+            await send(frame)
+
+        sender.websocket.send_text = delayed
+        turn = asyncio.create_task(invoke(handler, sender, '只计算 CCO 的分子量和 logP'))
+        try:
+            await asyncio.wait_for(sending.wait(), timeout=5)
+            turn.cancel()
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        complete, _ = await turn
+        assert complete['status'] == 'cancelled' and sender.writable
+
+    asyncio.run(run())
+
+
 def test_read_back_a_named_molecules_descriptor_without_recalculation(tmp_path):
     properties = Properties()
     handler, sender = local_case(tmp_path, tools=[properties])

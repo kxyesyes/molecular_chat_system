@@ -1272,7 +1272,10 @@ class WebDecisionRuntime:
                 worker.add_done_callback(lambda _: buffer.finish())
                 try:
                     while (event := await buffer.get()) is not None:
-                        await await_with_deadline(websocket.send_text(event[0]), timeout=SEND_TIMEOUT_SECONDS)
+                        # Drain an in-flight progress frame before cancellation uses the same socket.
+                        delivery = _create_owned_task(
+                            await_with_deadline(websocket.send_text(event[0]), timeout=SEND_TIMEOUT_SECONDS))
+                        await retain_until_done(delivery, on_cancel=cancel_event.set)
                     result = await worker
                 except (WorkerCleanupError, ConnectionError, WebSocketDisconnect, asyncio.TimeoutError, asyncio.CancelledError):
                     raise
