@@ -160,6 +160,20 @@ def test_durable_artifact_is_available_through_legacy_viewer_result_route(tmp_pa
     assert b"MODEL 2" in response.content
 
 
+def test_history_receptor_requires_owned_verified_input(tmp_path):
+    client = _build_client(tmp_path)
+    url = f"/api/docking/tasks/{TASK_ID}/receptor"
+    response = client.get(url)
+    assert response.status_code == 200
+    model = tmp_path / TASK_ID / "inputs/receptor.pdb"
+    assert response.content == model.read_bytes()
+    assert response.headers["x-receptor-format"] == "pdb"
+    assert "no-store" in response.headers["cache-control"]
+    assert client.get(url.replace(TASK_ID, "other")).status_code == 404
+    model.write_bytes(b"replacement")
+    assert client.get(url).status_code == 409
+
+
 def test_pdbqt_file_download_retains_original_line_endings(tmp_path, monkeypatch):
     from src.task_runtime.completion import DockingCompletionStore
     raw = _pdbqt_with_two_poses().replace(b"\n", b"\r\n")

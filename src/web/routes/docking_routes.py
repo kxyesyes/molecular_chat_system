@@ -1031,6 +1031,28 @@ def setup_docking_routes(
             resolve(logger, "logger").exception("获取对接结果失败")
             return api_error("DOCKING_RESULT_READ_FAILED", "获取结果失败", status_code=500)
 
+    @app.get("/api/docking/tasks/{job_id}/receptor")
+    async def get_history_receptor(job_id: str, request: Request):
+        from src.task_runtime.staging import DockingInputStager, ManifestError
+
+        _validate_job_id(job_id)
+        _session_id(request)
+        task = await resolve_owned_durable_docking_task(job_id, request)
+        if task is None:
+            raise HTTPException(404, "对接任务不存在")
+        runtime, root, locator = task
+        try:
+            inputs = await asyncio.to_thread(DockingInputStager(root).read_verified_input_bytes,
+                                             job_id, Path(locator).name)
+        except (ManifestError, OSError) as exc:
+            raise HTTPException(409, "历史受体缺失或未通过校验") from exc
+        fmt = Path(inputs["manifest"]["receptor"]["path"]).suffix.lower().lstrip(".")
+        if fmt not in {"pdb", "pdbqt"}:
+            raise HTTPException(422, "历史受体格式不支持三维显示")
+        consent_guard.require_unambiguous_durable(runtime, job_id)
+        return Response(inputs["receptor_bytes"], media_type="text/plain",
+                        headers={"Cache-Control": "private, no-store", "X-Receptor-Format": fmt})
+
     @app.get("/api/docking/result/{job_id}/summary")
     async def get_docking_result_summary(job_id: str, request: Request):
         """Return owned, parser-derived Pose rows without exposing raw paths."""

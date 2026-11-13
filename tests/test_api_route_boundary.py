@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 
 DOMAINS = [
-    ("docking", 15),
+    ("docking", 16),
     ("molecule_utility", 3),
     ("docking_report", 1),
     ("reverse_target", 7),
@@ -48,6 +48,7 @@ NEW_ACTIVITY_TRAINING_PATHS = {
     "/api/activity/train/cancel/{job_id}",
 }
 NEW_DOCKING_PATHS = {
+    "/api/docking/tasks/{job_id}/receptor",
     "/api/docking/demo/pde4a-apo",
     "/api/docking/demo/roflumilast.pdbqt",
     "/api/docking/cavities",
@@ -186,8 +187,8 @@ def test_registration_contract():
         "POST": 14, "GET": 14, "DELETE": 3,
     }
     assert len(historic["openapi"]["paths"]) == 30
-    assert len(actual["operations"]) == 39
-    assert len(actual["openapi"]["paths"]) == 38
+    assert len(actual["operations"]) == 40
+    assert len(actual["openapi"]["paths"]) == 39
 
 
 def test_docking_demo_and_summary_routes_are_registered_explicitly():
@@ -197,6 +198,7 @@ def test_docking_demo_and_summary_routes_are_registered_explicitly():
         ('/api/docking/demo/pde4a-apo', ('GET',), 'get_pde4a_apo_demo', ''),
         ('/api/docking/demo/roflumilast.pdbqt', ('GET',), 'get_roflumilast_demo', ''),
         ('/api/docking/cavities', ('POST',), 'get_cavities', 'protein_file: UploadFile=File(...)'),
+        ('/api/docking/tasks/{job_id}/receptor', ('GET',), 'get_history_receptor', 'job_id: str'),
         ('/api/docking/result/{job_id}/summary', ('GET',), 'get_docking_result_summary', 'job_id: str'),
     }
 

@@ -373,6 +373,34 @@ test("history restoration cannot overwrite a running task", async () => {
   assert.equal(get("results-content").innerHTML, "active task");
   assert.equal(c.readRememberedDockingTask(), "task-2");
 });
+test("late verified history receptor cannot replace the newly opened task", async () => {
+  const {context: c, get} = harness();
+  const waiting = new Map();
+  c.setCurrentJobId = id => { c.AppState.currentJobId = id; };
+  c.loadComplexStructure = () => {};
+  c.fetch = async url => {
+    if (url.endsWith("/summary")) return response({results: [{pose: 1, binding_energy: -6.1}]});
+    return new Promise(resolve => waiting.set(url, resolve));
+  };
+  function reopen(id) {
+    const r = success();
+    r.task_id = id; r.result.data.result_job_id = id;
+    return c.renderDurableTaskSuccess(r, c.durableDockingResult(r), {restored: true});
+  }
+  const old = reopen("old");
+  await new Promise(resolve => setImmediate(resolve));
+  const fresh = reopen("fresh");
+  await new Promise(resolve => setImmediate(resolve));
+  const receptor = data => ({ok: true, headers: {get: () => "pdb"}, text: async () => data});
+  waiting.get("/api/docking/tasks/fresh/receptor")(receptor("receptor B"));
+  await fresh;
+  waiting.get("/api/docking/tasks/old/receptor")(receptor("receptor A"));
+  await old;
+  assert.equal(c.AppState.currentJobId, "fresh");
+  assert.equal(c.receptorForView("fresh").data, "receptor B");
+  assert.match(get("results-content").innerHTML, /downloadResults\('fresh'/);
+  assert.doesNotMatch(get("results-content").innerHTML, /downloadResults\('old'/);
+});
 test("a history read cannot overwrite a task started and completed meanwhile", async () => {
   const { context: c, get } = harness();
   let finish;

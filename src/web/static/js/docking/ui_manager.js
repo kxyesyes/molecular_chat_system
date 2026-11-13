@@ -7,6 +7,12 @@ function isRenderedInteractionPose(jobId, pose) {
 }
 let submittedDockingProtein;
 let boundDockingProtein = null;
+let historyReceptor = null;
+function receptorForView(jobId) {
+  if (historyReceptor && historyReceptor.jobId === jobId) return historyReceptor;
+  return {data: AppState.currentProteinData || (typeof currentProteinData !== "undefined" && currentProteinData),
+    format: AppState.currentProteinFormat || "pdb"};
+}
 let loadedDockingProteinFile = null;
 const batchDockingProteins = new Map();
 function beginDockingView() {
@@ -26,7 +32,7 @@ const UIManager = {
     const complexBtn = document.getElementById("show-complex-btn");
 
     // 更新蛋白质按钮状态
-    const proteinEnabled = !!AppState.currentProteinData;
+    const proteinEnabled = !!(AppState.currentProteinData || historyReceptor);
     proteinBtn.disabled = !proteinEnabled;
     proteinBtn.style.opacity = proteinEnabled ? "1" : "0.5";
 
@@ -144,10 +150,11 @@ function overlayTopN() {
       try {
         viewer.clear();
 
-        if (currentProteinData) {
+        const receptor = receptorForView(jobId);
+        if (receptor.data) {
           const prot = viewer.addModel(
-            currentProteinData,
-            AppState.currentProteinFormat || "pdb",
+            receptor.data,
+            receptor.format,
           );
           if (prot && prot.setStyle) {
             const proteinColor = {gray: "#bfbfbf", dark: "#e6eef8"}[AppState.currentStyle] || "spectrum";
@@ -218,8 +225,11 @@ function overlayTopN() {
 
 function showProtein() {
   beginDockingView();
-  if (AppState.currentProteinData) {
-    loadMolecule(AppState.currentProteinData, "protein");
+  const receptor = receptorForView(AppState.currentJobId);
+  if (receptor.data) {
+    const inputFormat = AppState.currentProteinFormat;
+    loadMolecule(receptor.data, "protein", "receptor." + receptor.format);
+    if (receptor === historyReceptor) AppState.currentProteinFormat = inputFormat;
     setActiveButton("show-protein-btn");
   } else {
     alert("请先上传蛋白质文件");
@@ -228,12 +238,14 @@ function showProtein() {
 
 function showLigand() {
   beginDockingView();
-  const ligandToShow =
-    AppState.originalLigandData || AppState.currentLigandData;
+  const historical = historyReceptor && historyReceptor.jobId === AppState.currentJobId;
+  const ligandToShow = historical ? AppState.dockedLigandData : (AppState.originalLigandData || AppState.currentLigandData);
 
   if (ligandToShow) {
     loadMolecule(ligandToShow, "ligand");
     setActiveButton("show-ligand-btn");
+  } else if (historical) {
+    Utils.showToast("请先查看此任务的一个构象。", "warning");
   } else {
     const ligandFile = document.getElementById("ligand-file").files[0];
     const smilesInput = document.getElementById("smiles-input").value.trim();
@@ -396,6 +408,7 @@ function loadProteinFile(file) {
   AppState.currentComplexData = null;
   if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
   return new Promise((resolve, reject) => {
+    historyReceptor = null;
     if (typeof clearDockingCavities === "function") clearDockingCavities();
     const reader = new FileReader();
     reader.onload = function (e) {
@@ -952,7 +965,7 @@ function renderDurableTaskSuccess(record, result, options = {}) {
       indicator.textContent = index === 0 ? "结构未恢复" : "已完成";
     });
   }
-  const detailJobId = result.result_job_id || result.task_id;
+  const detailJobId = restored ? result.task_id : (result.result_job_id || result.task_id);
   if (detailJobId) {
     return loadDurableResultDetails(result, { restored, jobId: detailJobId });
   }
@@ -981,15 +994,39 @@ async function loadDurableResultDetails(result, options = {}) {
       throw new Error("结果明细暂不可用");
     }
     if (sequence !== dockingViewSequence) return;
+    let recovered = false;
+    if (restored) {
+      // Resolve only the receptor staged with this task. An unavailable input
+      // leaves the read-only summary usable even if another receptor is loaded.
+      try {
+        const res = await fetch(`/api/docking/tasks/${encodeURIComponent(result.task_id)}/receptor`);
+        if (res.ok) {
+          const format = res.headers.get("X-Receptor-Format");
+          const data = await res.text();
+          if (sequence !== dockingViewSequence) return;
+          if (data && ["pdb", "pdbqt"].includes(format)) {
+            historyReceptor = {jobId, data, format};
+            recovered = true;
+          }
+        }
+      } catch { /* The summary can still be displayed. */ }
+      if (sequence !== dockingViewSequence) return;
+    }
     renderDockingResultsTable({
-      job_id: jobId,
-      total_poses: detail.total_poses,
-      results: detail.results,
-      best_pose: Number.isInteger(result.best_pose_index)
-        ? { pose: result.best_pose_index }
-        : null,
-    }, { restored });
-    if (!restored && result.result_job_id && typeof currentProteinData !== "undefined" && currentProteinData) {
+      job_id: jobId, total_poses: detail.total_poses, results: detail.results,
+      best_pose: Number.isInteger(result.best_pose_index) ? {pose: result.best_pose_index} : null,
+    }, {restored, recovered});
+    if (recovered) {
+      setCurrentJobId(jobId);
+      for (const id of ["pose-select", "show-protein-btn", "show-ligand-btn", "show-complex-btn", "show-hbonds-btn", "show-pi-btn", "show-hydrophobic-btn"]) {
+        document.getElementById(id).disabled = false;
+      }
+      document.querySelectorAll(".status-indicator").forEach(indicator => {
+        indicator.className = "status-indicator status-completed";
+        indicator.textContent = "已完成";
+      });
+    }
+    if (recovered || (!restored && result.result_job_id && typeof currentProteinData !== "undefined" && currentProteinData)) {
       const bestPose = Number.isInteger(result.best_pose_index) && result.best_pose_index > 0
         ? result.best_pose_index
         : 1;
@@ -1177,6 +1214,7 @@ function resumeDockingTaskIfPresent() {
 
 // 开始对接分析
 function startDocking() {
+  historyReceptor = null;
   durableHistoryRestoreSequence++;
   beginDockingView();
   historicalDockingTaskId = null;
@@ -1293,7 +1331,7 @@ function renderDockingResultsTable(data, options = {}) {
   }
 
   const safeJobId = Safe.escapeInlineJsString(data && data.job_id ? data.job_id : "");
-  const canViewPose = !restored && !!safeJobId;
+  const canViewPose = (!restored || options.recovered === true) && !!safeJobId;
   const totalPoses = results.length;
   const rows = results.map((result) => {
     const bindingEnergy = dockingResultNumber(result.binding_energy);
@@ -1332,7 +1370,7 @@ function renderDockingResultsTable(data, options = {}) {
     <div class="docking-result-summary-strip">
       <div class="docking-result-summary-title">对接计算完成</div>
       <div class="docking-result-summary-meta">已验证构象数：${totalPoses}</div>
-      ${restored ? '<div class="docking-result-summary-note">历史任务的蛋白结构未恢复，当前仅展示结果数据。</div>' : ""}
+      ${restored && !canViewPose ? '<div class="docking-result-summary-note">历史任务的蛋白结构未恢复，当前仅展示结果数据。</div>' : ""}
     </div>
     <div class="results-table-wrapper">
       <table class="results-table docking-pose-results-table">
@@ -1575,10 +1613,11 @@ function loadComplexStructure(jobId, poseNumber = 1) {
       try {
         viewer.clear();
 
-        if (currentProteinData) {
+        const receptor = receptorForView(jobId);
+        if (receptor.data) {
           const protModel = viewer.addModel(
-            currentProteinData,
-            AppState.currentProteinFormat || "pdb",
+            receptor.data,
+            receptor.format,
           );
           if (protModel && protModel.setStyle) {
             protModel.setStyle({}, { cartoon: { color: "spectrum" } });
@@ -1693,10 +1732,11 @@ function viewPose(poseNumber) {
   const renderPose = (poseSdf) => {
     try {
       viewer.clear();
-      if (currentProteinData) {
+      const receptor = receptorForView(jobId);
+      if (receptor.data) {
         const prot = viewer.addModel(
-          currentProteinData,
-          AppState.currentProteinFormat || "pdb",
+          receptor.data,
+          receptor.format,
         );
         if (prot && prot.setStyle) {
           prot.setStyle({}, { cartoon: { color: "spectrum" } });
@@ -1840,6 +1880,7 @@ async function generateReport(jobId, withPose = true) {
 
 // 重置对接
 function resetDocking(options = {}) {
+  historyReceptor = null;
   beginDockingView();
   const preserveInputs = options.preserveInputs === true;
   if (!preserveInputs) {
@@ -2068,12 +2109,18 @@ async function restoreDurableDockingTask(taskId) {
     return;
   }
   const sequence = ++durableHistoryRestoreSequence;
-  beginDockingView();
+  const view = beginDockingView();
+  historyReceptor = null;
+  boundDockingProtein = null;
+  if (typeof setCurrentJobId === "function") setCurrentJobId(null);
+  AppState.currentComplexData = AppState.dockedLigandData = null;
+  if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
+  document.getElementById("results-content").textContent = "正在恢复历史任务…";
   try {
     const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
     const payload = await response.json();
     const currentTask = readRememberedDockingTask();
-    if (sequence !== durableHistoryRestoreSequence || (currentTask && currentTask !== taskId) || (start && start.disabled)) return;
+    if (sequence !== durableHistoryRestoreSequence || view !== dockingViewSequence || (currentTask && currentTask !== taskId) || (start && start.disabled)) return;
     if (!response.ok || payload.success === false) throw new Error("无法读取该任务");
     const record = unwrapApiData(payload);
     if (!record || record.task_id !== taskId || record.task_type !== "docking") throw new Error("任务记录不匹配");
@@ -2100,7 +2147,8 @@ async function restoreDurableDockingTask(taskId) {
   } catch (error) {
     if (sequence === durableHistoryRestoreSequence && readRememberedDockingTask() === taskId) {
       handleDockingTaskError(error);
-    } else if (sequence === durableHistoryRestoreSequence && !readRememberedDockingTask() && !(start && start.disabled)) {
+    } else if (sequence === durableHistoryRestoreSequence && view === dockingViewSequence && !readRememberedDockingTask() && !(start && start.disabled)) {
+      document.getElementById("results-content").textContent = "无法恢复此历史任务。";
       Utils.showToast(error.message || "恢复任务失败", "error");
     }
   }
