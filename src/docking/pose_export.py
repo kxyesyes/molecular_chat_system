@@ -147,9 +147,18 @@ def pose_sdf_from_pdbqt(
         # Vina merges nonpolar H into their parents. Place only those absent
         # from the artifact, retaining its heavy-atom and donor-H coordinates.
         partial = Chem.RWMol(mol)
+        missing_h_counts = {}
         for idx in reversed(range(mol.GetNumAtoms())):
             if idx not in assigned_atoms:
+                parent = mol.GetAtomWithIdx(idx).GetNeighbors()[0].GetIdx()
+                missing_h_counts[parent] = missing_h_counts.get(parent, 0) + 1
                 partial.RemoveAtom(idx)
+        # AddHs must not depend on whether this RDKit version recomputes
+        # implicit hydrogens after removing explicit H from a conformer.
+        for parent, count in missing_h_counts.items():
+            atom = partial.GetAtomWithIdx(parent)
+            atom.SetNumExplicitHs(count)
+            atom.SetNoImplicit(True)
         partial.UpdatePropertyCache(strict=False)
         export_mol = Chem.AddHs(partial, addCoords=True)
     else:
