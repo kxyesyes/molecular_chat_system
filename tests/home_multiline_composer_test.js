@@ -25,8 +25,8 @@ assert(start >= 0 && end > start);
 const listeners = {};
 const input = {value: "比较以下两个分子的性质：\nCCO\nCCN", addEventListener(type, fn) {listeners[type] = fn;}};
 const sent = [];
-new Function("elements", "sendMessage", "console", source.slice(start, end))(
-  {input}, () => sent.push(input.value), {log() {}, warn() {}});
+new Function("elements", "sendMessage", "decisionMode", "console", source.slice(start, end))(
+  {input}, () => sent.push(input.value), false, {log() {}, warn() {}});
 const handler = listeners.keydown || listeners.keypress;
 assert.equal(typeof handler, "function", "composer must bind keyboard sending");
 let prevented = false;

@@ -1014,7 +1014,11 @@
       elements.input.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
           e.preventDefault();
-          sendMessage();
+          if (decisionMode && decisionWaiting) {
+            decisionControls.resume.click();
+          } else {
+            sendMessage();
+          }
         }
       });
       console.log("✅ 绑定输入框事件");

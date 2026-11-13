@@ -125,9 +125,9 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
   let source = fs.readFileSync(path.join(home, "main.js"), "utf8");
   // Expose lexical entry points only in this VM; run the complete real script.
   source = source.replace(/\}\)\(\);\s*$/, `window.testHome = {connectWebSocket, sendMessage, elements, scientificReferences,
-    addUserMessage, addAssistantMessage, appendToLastMessage, displayRAGInfo,
+    addUserMessage, addAssistantMessage, appendToLastMessage, displayRAGInfo, handleQuickAction,
     prepare() {chatMode = true; elements.input = window.testInput; elements.sendBtn = window.testSend;
-      elements.chatContainer = window.testChat;}};})();`);
+      elements.chatContainer = window.testChat; bindEvents();}};})();`);
   Object.assign(window, {testInput: input, testSend: send, testChat: chat});
   vm.runInContext(source, context, {filename: "main.js"});
   window.testHome.prepare(); window.testHome.connectWebSocket(); sockets[0].open();
@@ -330,6 +330,28 @@ async function run() {
     assert.equal(h.chat.querySelectorAll(".agent-task-panel").length, 2);
     assert.equal(first.textContent, before);
     assert.equal(first.querySelector(".agent-task-progress").textContent, "等待补充输入");
+  });
+  await test("textarea Enter continues a delivered clarification once with the original pointer", () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    h.socket.emit(result("waiting_for_input"));
+    const sent = h.socket.sent.length;
+    const enter = (extra = {}) => {
+      let prevented = false;
+      h.input.listeners.keydown[0]({key: "Enter", preventDefault() {prevented = true;}, ...extra});
+      return prevented;
+    };
+    h.input.value = "CCO"; enter();
+    assert.equal(h.socket.sent.length, sent, "delivery has not finished");
+    h.socket.emit(complete("waiting_for_input"));
+    h.render.handleQuickAction({currentTarget: {dataset: {action: "analyze-ethanol"}}});
+    h.input.value = "CCO"; h.send();
+    for (const key of [{shiftKey: true}, {isComposing: true}, {keyCode: 229}]) assert(!enter(key));
+    assert.equal(h.socket.sent.length, sent);
+    assert(enter());
+    assert.deepEqual(h.socket.sent.at(-1), {type: "resume", trace_id: trace, continuation_id: nonce, message: "CCO"});
+    assert.equal(h.input.value, "");
+    h.input.value = "CCN"; enter(); h.button("继续").click();
+    assert.equal(h.socket.sent.length, sent + 1, "a pending resume cannot be repeated");
   });
   await test("a reconnected request cannot mutate the disconnected turn panel", () => {
     const h = loadHome(); h.ready("pi"); start(h); lifecycle(h, "task_started");
@@ -864,6 +886,7 @@ async function run() {
     assert(h.button("继续").disabled && h.button("开始新请求").disabled);
     assert(h.fill.querySelector("button").disabled);
     h.button("继续").click(); h.button("开始新请求").click();
+    h.input.listeners.keydown[0]({key: "Enter", preventDefault() {}});
     assert.equal(h.socket.sent.length, sent, "no repeat abandon or queued resume");
     h.socket.emit({type: "continuation_abandoned", trace_id: "9".repeat(32)});
     h.send(); assert.equal(h.socket.sent.length, sent, "wrong trace cannot resolve abandon");
@@ -1045,7 +1068,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261113-agent-delivery-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261113-agent-delivery-v2"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
