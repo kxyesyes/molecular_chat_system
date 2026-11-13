@@ -19,6 +19,7 @@ var DesignState = {
   optimizationCommand: "",
   prevProps: null,
   curProps: null,
+  propsAreTemplate: false,
   curGoals: null,
   propsTimer: null,
   propsRequestSeq: 0,

@@ -346,7 +346,8 @@ class TaskPlanner:
                 },
             )
         bounds, unknown = requested_property_bounds(query)
-        include_properties = bool(bounds or unknown) and not request_parsing.property_calculation_forbidden(query)
+        include_properties = (not request_parsing.property_calculation_forbidden(query)
+                              and bool(bounds or unknown or request_parsing.requests_generated_properties(query)))
         return WorkflowPlan(
             workflow_name="molecular_design",
             steps=step_templates.molecular_design_steps(

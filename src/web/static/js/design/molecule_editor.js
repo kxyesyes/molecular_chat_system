@@ -317,7 +317,7 @@ var MoleculeEditor = (function () {
       UI.setFeedback("请先识别连接点，并确保母体恰好包含一个可用的 [*] 单键连接点。", "warn");
       return;
     }
-    var beforeProps = S.propsSmiles === smi && S.curProps ? Object.assign({}, S.curProps) : null;
+    var beforeProps = !S.propsAreTemplate && S.propsSmiles === smi && S.curProps ? Object.assign({}, S.curProps) : null;
     var fragment = Object.assign({}, S.selectedFrag);
     // Capture the editor's current value before the request. The polling loop
     // may not have observed a just-drawn molecule yet.

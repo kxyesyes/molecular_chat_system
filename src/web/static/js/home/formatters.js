@@ -458,11 +458,12 @@ window.HomeFormatters = (function () {
         }).join("");
     }
 
-    if (options?.displayKind === 'reverse_target_rank_v1') return renderMarkdownLike(content, options);
+    if (['reverse_target_rank_v1', 'scientific_summary'].includes(options?.displayKind)) {
+      return renderMarkdownLike(content, options);
+    }
     if (
       content.includes("逆合成分析结果") ||
-      content.includes("合成路线") ||
-      content.includes("步骤")
+      content.includes("合成路线")
     ) {
       return formatSynthesisRoute(content);
     }

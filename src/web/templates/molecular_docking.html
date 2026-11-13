@@ -12,7 +12,7 @@
   <script src="/static/vendor/3dmol/3Dmol-min.js?v=2.5.4"></script>
 
   <!-- 页面样式 -->
-  <link rel="stylesheet" href="/static/css/molecular_docking.css?v=20261027-result-table-v2" />
+  <link rel="stylesheet" href="/static/css/molecular_docking.css?v=20261112-vina-regions" />
   <link rel="stylesheet" href="/static/css/mobile_baseline.css?v=20260511a" />
   <link rel="stylesheet" href="/static/css/subpage_header.css?v=20260525a" />
 </head>
@@ -105,7 +105,15 @@
 
       <!-- 对接参数 -->
       <div class="input-section">
-        <div class="section-title">对接参数</div>
+        <div class="section-title">对接区域</div>
+        <div class="cavity-picker">
+          <button id="detect-cavities-btn" type="button" class="action-btn btn-secondary" onclick="detectDockingCavities(this)">重新识别空腔</button>
+          <label for="cavity-choice">搜索区域</label>
+          <select id="cavity-choice" onchange="applyDockingCavity(this)">
+            <option value="">自定义区域</option>
+          </select>
+          <div id="cavity-status" role="status"></div>
+        </div>
 
         <!-- 盒子中心坐标 -->
         <div style="margin-bottom: 15px">
@@ -119,15 +127,15 @@
           </div>
           <div class="parameter-grid">
             <div class="parameter-item">
-              <label>中心X</label>
+              <label for="center_x">中心X</label>
               <input id="center_x" type="number" value="0" step="0.5" oninput="updateDockingBox()" />
             </div>
             <div class="parameter-item">
-              <label>中心Y</label>
+              <label for="center_y">中心Y</label>
               <input id="center_y" type="number" value="0" step="0.5" oninput="updateDockingBox()" />
             </div>
             <div class="parameter-item">
-              <label>中心Z</label>
+              <label for="center_z">中心Z</label>
               <input id="center_z" type="number" value="0" step="0.5" oninput="updateDockingBox()" />
             </div>
           </div>
@@ -145,15 +153,15 @@
           </div>
           <div class="parameter-grid">
             <div class="parameter-item">
-              <label>大小X</label>
+              <label for="size_x">大小X</label>
               <input id="size_x" type="number" value="20" min="10" max="50" oninput="updateDockingBox()" />
             </div>
             <div class="parameter-item">
-              <label>大小Y</label>
+              <label for="size_y">大小Y</label>
               <input id="size_y" type="number" value="20" min="10" max="50" oninput="updateDockingBox()" />
             </div>
             <div class="parameter-item">
-              <label>大小Z</label>
+              <label for="size_z">大小Z</label>
               <input id="size_z" type="number" value="20" min="10" max="50" oninput="updateDockingBox()" />
             </div>
           </div>
@@ -166,7 +174,7 @@
             显示对接盒子
           </button>
           <button class="action-btn btn-secondary" onclick="autoSetBoxToLigand()" id="auto-box-btn"
-            style="flex: 1; padding: 8px 12px; font-size: 13px" title="自动将盒子中心设置为配体中心">
+            style="flex: 1; padding: 8px 12px; font-size: 13px" title="按结构内配体定位；无配体时使用蛋白中心">
             自动定位
           </button>
         </div>
@@ -183,15 +191,15 @@
           </div>
           <div class="parameter-grid">
             <div class="parameter-item">
-              <label>穷尽性搜索</label>
+              <label for="exhaustiveness">穷尽性搜索</label>
               <input id="exhaustiveness" type="number" value="8" min="1" max="32" />
             </div>
             <div class="parameter-item">
-              <label>最大结果数</label>
+              <label for="num_modes">最多输出姿势数</label>
               <input id="num_modes" type="number" value="10" min="1" max="50" />
             </div>
             <div class="parameter-item">
-              <label>能量范围 (kcal/mol)</label>
+              <label for="energy_range">能量范围 (kcal/mol)</label>
               <input id="energy_range" type="number" value="3" min="1" max="10" step="0.1" />
             </div>
           </div>
@@ -386,10 +394,11 @@
   <script src="/static/js/docking/ligand_recognizer.js"></script>
   <script src="/static/js/docking/step_manager.js"></script>
   <script src="/static/js/docking/viewer_manager.js?v=20261007-safe-dom-v1"></script>
-  <script src="/static/js/docking/interactions.js?v=20261031-interaction-status-v2"></script>
+  <script src="/static/js/docking/interactions.js?v=20261112-pose-contacts-v3"></script>
   <script src="/static/js/docking/docking_box.js?v=20261012-box-confirmation-v1"></script>
-    <script src="/static/js/docking/ui_manager.js?v=20261105-view-status-v1"></script>
-  <script src="/static/js/docking/main.js?v=20261101-docking-demo-species-v1"></script>
+  <script src="/static/js/docking/workspace.js?v=20261112-2"></script>
+    <script src="/static/js/docking/ui_manager.js?v=20261113-history-receptor-v8"></script>
+    <script src="/static/js/docking/main.js?v=20261112-demo-regions-v4"></script>
 </body>
 
 </html>

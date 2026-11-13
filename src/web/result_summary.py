@@ -292,8 +292,14 @@ def prepare_summary(handler, result, *, business_view=None):
         full_content = unavailable_full
     content = _bounded_summary(full_content, details_available=details_may_publish)
     metadata = {'binding_profile': 'medchat-web-v1'}
+    model_calls = result.metadata.get('model_calls')
+    if (isinstance(model_calls, list) and model_calls and isinstance(model_calls[-1], dict)
+            and model_calls[-1].get('success') is True):
+        metadata['model_call_succeeded'] = True
     if business_view is not None and business_view.get('summary_kind') == 'reverse_target_rank_v1':
         metadata['display_kind'] = 'reverse_target_rank_v1'
+    elif has_observations:
+        metadata['display_kind'] = 'scientific_summary'
     for key in ('waiting_for_input', 'continuation_id', 'stop_reason'):
         if key in result.metadata:
             metadata[key] = result.metadata[key]

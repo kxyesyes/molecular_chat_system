@@ -1,10 +1,12 @@
 """Real local demo asset route contract."""
 
 import asyncio
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, HTTPException
 from starlette.requests import Request
 
 from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
@@ -63,6 +65,32 @@ def test_pde4a_apo_demo_returns_the_registered_local_6fg5_asset(tmp_path):
     assert response.media_type == "chemical/x-pdb"
     assert b"6FG5" in response.body[:1200]
     assert b"ATOM  " in response.body
+
+
+def test_roflumilast_demo_serves_the_registered_input_ligand(tmp_path):
+    app = _app(tmp_path)
+    endpoint = next(route.endpoint for route in app.routes
+                    if route.path == "/api/docking/demo/roflumilast.pdbqt")
+    content = endpoint(_request(app)).body
+    data = Path(__file__).resolve().parents[1] / "data"
+    assert content == (data / "samples/roflumilast.pdbqt").read_bytes()
+    assert hashlib.sha256(content).hexdigest() in (data / "REGISTRY.md").read_text(encoding="utf-8")
+    assert b"ROOT\n" in content and b"TORSDOF " in content
+    assert b"VINA RESULT" not in content
+
+
+@pytest.mark.parametrize("content,status", [(None, 404), (b"ROOT\nTORSDOF 0\n", 503)])
+def test_roflumilast_demo_rejects_missing_or_changed_ligand(tmp_path, monkeypatch, content, status):
+    path = tmp_path / "roflumilast.pdbqt"
+    if content is not None:
+        path.write_bytes(content)
+    monkeypatch.setattr(docking_routes, "DEMO_ROFLUMILAST_PATH", path)
+    app = _app(tmp_path)
+    endpoint = next(route.endpoint for route in app.routes
+                    if route.path == "/api/docking/demo/roflumilast.pdbqt")
+    with pytest.raises(HTTPException) as error:
+        endpoint(_request(app))
+    assert error.value.status_code == status
 
 
 def test_pde4a_apo_demo_does_not_fallback_when_registered_asset_is_missing(tmp_path, monkeypatch):

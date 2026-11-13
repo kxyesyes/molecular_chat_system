@@ -249,7 +249,7 @@ def analyzer_inputs(tmp_path, monkeypatch):
     ligand.write_text("sdf\n", encoding="utf-8")
     fake_prolif = SimpleNamespace(
         __version__="test",
-        Molecule=SimpleNamespace(from_mda=lambda _: object()),
+        Molecule=SimpleNamespace(from_mda=lambda _: SimpleNamespace(GetAtoms=lambda: ())),
         sdf_supplier=lambda _: [object()],
     )
     monkeypatch.setitem(sys.modules, "MDAnalysis", SimpleNamespace(
@@ -293,7 +293,7 @@ def test_runtime_closes_mdanalysis_universe_after_analysis(tmp_path, monkeypatch
     fake_mda = SimpleNamespace(Universe=lambda _: universe)
     fake_prolif = SimpleNamespace(
         __version__="test",
-        Molecule=SimpleNamespace(from_mda=lambda _: object()),
+        Molecule=SimpleNamespace(from_mda=lambda _: SimpleNamespace(GetAtoms=lambda: ())),
         sdf_supplier=lambda _: [object()],
         Fingerprint=lambda **_: SimpleNamespace(generate=lambda *args, **kwargs: {}),
     )
@@ -377,7 +377,7 @@ def test_metadata_api_absence_returns_explicit_unavailable_result(tmp_path, monk
     )
     fake_prolif = SimpleNamespace(
         __version__="test",
-        Molecule=SimpleNamespace(from_mda=lambda _universe: object()),
+        Molecule=SimpleNamespace(from_mda=lambda _universe: SimpleNamespace(GetAtoms=lambda: ())),
         sdf_supplier=lambda _path: [object()],
         Fingerprint=FakeFingerprint,
     )
@@ -408,6 +408,11 @@ def test_pose_export_keeps_hydrogens_for_backend_analysis(tmp_path: Path):
 
     assert "V2000" in sdf
     assert int(sdf.splitlines()[3].split()[0]) == 5
+    from rdkit import Chem
+    mol = Chem.MolFromMolBlock(sdf, removeHs=False)
+    conf = mol.GetConformer()
+    for h in list(mol.GetAtoms())[1:]:
+        assert 0.9 < conf.GetAtomPosition(0).Distance(conf.GetAtomPosition(h.GetIdx())) < 1.2
 
 
 def test_prolif_success_is_structured_and_tool_derived(tmp_path: Path, monkeypatch):
@@ -462,7 +467,7 @@ def test_prolif_success_is_structured_and_tool_derived(tmp_path: Path, monkeypat
     fake_mda = SimpleNamespace(Universe=FakeUniverse)
     fake_prolif = SimpleNamespace(
         __version__="test",
-        Molecule=SimpleNamespace(from_mda=lambda _universe: object()),
+        Molecule=SimpleNamespace(from_mda=lambda _universe: SimpleNamespace(GetAtoms=lambda: ())),
         sdf_supplier=lambda _path: [object()],
         Fingerprint=FakeFingerprint,
     )
@@ -561,3 +566,40 @@ def test_real_prolif_returns_renderable_evidence_from_bundled_example():
     hbonds = [item for item in result["interactions"] if item["type"] == "hydrogen_bond"]
     assert hbonds
     assert all("display_geometry" in item for item in hbonds)
+
+
+def test_partial_pdb_connectivity_recovers_directional_hbond(tmp_path):
+    pytest.importorskip("prolif")
+    pytest.importorskip("MDAnalysis")
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    from rdkit.Geometry import Point3D
+
+    # Methylamine is the donor, with only its C-N bond explicitly listed.
+    donor = Chem.AddHs(Chem.MolFromSmiles("CN"))
+    assert AllChem.EmbedMolecule(donor, randomSeed=42) == 0
+    for atom in donor.GetAtoms():
+        info = Chem.AtomPDBResidueInfo()
+        info.SetName(f"{atom.GetSymbol() + str(atom.GetIdx()):>4}")
+        info.SetResidueName("DON")
+        info.SetResidueNumber(1)
+        atom.SetMonomerInfo(info)
+    receptor = tmp_path / "donor.pdb"
+    receptor.write_text(Chem.MolToPDBBlock(donor).split("CONECT")[0] + "CONECT    1    2\nEND\n")
+    conf = donor.GetConformer()
+    n = conf.GetAtomPosition(1)
+    h = conf.GetAtomPosition(donor.GetAtomWithIdx(1).GetNeighbors()[-1].GetIdx())
+    direction = h - n
+    direction.Normalize()
+    acceptor = Chem.MolFromSmiles("C=O")
+    pose = Chem.Conformer(2)
+    pose.SetAtomPosition(1, n + direction * 2.9)
+    pose.SetAtomPosition(0, n + direction * 2.9 + Point3D(0, 0, 1.2))
+    acceptor.AddConformer(pose)
+    ligand = tmp_path / "acceptor.sdf"
+    Chem.MolToMolFile(acceptor, str(ligand))
+    result = analyze_docking_interactions(receptor, ligand)
+    assert result["provenance"]["receptor_topology"] == "rdkit_pdb_proximity_bonding"
+    hit, = [i for i in result["interactions"] if i["type"] == "hydrogen_bond"]
+    assert hit["distance_angstrom"] == pytest.approx(2.9, abs=0.01)
+    assert hit["display_geometry"]["source"] == "analyzed_conformer"

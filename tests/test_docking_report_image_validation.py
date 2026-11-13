@@ -74,3 +74,25 @@ def test_html_report_escapes_configuration_text():
     body = response.body.decode("utf-8")
     assert "<script>alert('x')</script>" not in body
     assert "&lt;script&gt;alert(&#x27;x&#x27;)&lt;/script&gt;" in body
+
+
+@pytest.mark.parametrize("fmt", ["md", "html", "zip"])
+def test_report_keeps_model_identity_and_selected_pose_analysis(tmp_path, fmt):
+    import io
+    import zipfile
+    from types import SimpleNamespace
+
+    rows = [SimpleNamespace(pose_index=i, binding_energy=score, rmsd_lb=0., rmsd_ub=0.)
+            for i, score in [(2, -7.25), (1, -5.125)]]
+    analysis = {"status": "success", "interactions": [{"type": "hydrophobic",
+                "protein_residue": "PHE597.A", "count": 2}]}
+    response = generate_report("example", rows, [], fmt, None, [], str(tmp_path),
+                               pose=1, analysis=analysis)
+    data = response.body
+    if fmt == "zip":
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            data = archive.read("report/docking_report_example.md")
+    text = data.decode()
+    assert "Pose 1" in text and "-5.125" in text and "PHE597.A" in text
+    if fmt != "html":
+        assert "| 2 | -7.250 |" in text and "| 1 | -5.125 |" in text

@@ -524,6 +524,12 @@ class WebTurnProjection:
             if isinstance(prior, dict) and self.session_id and prior.get('session_id') == self.session_id:
                 self.entry['ic50_ki_consultation'] = deepcopy(prior)
                 return {'content': _IC50_KI_CONDITIONS, 'status': 'completed'}
+        descriptor = property_comparison.recorded_descriptor(self.query, self.history, self.session_id)
+        if descriptor is not None:
+            evidence = descriptor.pop('reused_evidence', None)
+            if evidence is not None:
+                self.entry['property_evidence'] = deepcopy(evidence)
+            return descriptor
         salt_question = re.fullmatch(
             r'\s*(?:刚才|上一轮)的分子量包含氯离子吗[？?]\s*'
             r'这个\s*log\s*p\s*能否直接作为游离碱的实验分配系数[？?。]?\s*', self.query, re.I)

@@ -8,6 +8,7 @@ var PropertiesPanel = (function () {
 
   function clearPropsUI(resetResultState) {
     S.curProps = null;
+    S.propsAreTemplate = false;
     S.prevProps = null;
     S.curGoals = null;
     S.propsSmiles = "";
@@ -46,7 +47,9 @@ var PropertiesPanel = (function () {
       // A late response is data for an old molecule, never for the current UI.
       if (token !== S.propsRequestSeq || smi !== S.smiles) return { stale: true };
       if (d.success) {
-        S.prevProps = S.curProps;
+        var isTemplate = d.structure_kind === "attachment_template";
+        S.prevProps = S.propsAreTemplate || isTemplate ? null : S.curProps;
+        S.propsAreTemplate = isTemplate;
         S.curProps = Object.assign({}, d.properties || {});
         var propertyStatus = d.property_status || {};
         Object.keys(propertyStatus).forEach(function (key) {
@@ -54,13 +57,15 @@ var PropertiesPanel = (function () {
         });
         S.propsSmiles = smi;
         S.curGoals = d.goals || null;
-        renderProps(S.curProps, S.prevProps);
-        renderRo5(S.curProps);
-        renderGoals(d.goals || {});
+        renderProps(S.curProps, S.prevProps, isTemplate);
+        renderRo5(isTemplate ? {} : (d.raw_properties || S.curProps));
+        renderGoals(d.goals || {}, isTemplate);
         var status = document.getElementById("designStatus");
         if (status) status.textContent = "已计算";
         var caption = document.getElementById("resultCaption");
-        if (caption) caption.textContent = "性质来自 RDKit；不可用项不会被填充为数值。";
+        if (caption) caption.textContent = isTemplate
+          ? "当前数值来自带连接点的模板，完成取代后评估候选分子。"
+          : "性质来自 RDKit；不可用项不会被填充为数值。";
       } else {
         S.curProps = null;
         S.propsSmiles = "";
@@ -92,7 +97,7 @@ var PropertiesPanel = (function () {
     return Number.isFinite(n) ? n : null;
   }
 
-  function renderProps(p, prev) {
+  function renderProps(p, prev, isTemplate) {
     p = p || {};
     function setP(vid, value, prevValue, deltaId, warnValue, lowerBetter) {
       var el = document.getElementById(vid);
@@ -107,7 +112,7 @@ var PropertiesPanel = (function () {
         return;
       }
       el.textContent = n.toFixed(2);
-      if (warnValue != null) {
+      if (!isTemplate && warnValue != null) {
         if (lowerBetter && n > warnValue * 1.2) el.className = "danger";
         else if (lowerBetter && n > warnValue) el.className = "warn";
         else if (!lowerBetter && n < warnValue * .6) el.className = "danger";
@@ -133,14 +138,14 @@ var PropertiesPanel = (function () {
     el.innerHTML = rules.map(function (r) { var n = numeric(r.v); return '<div class="ro5-item"><span class="ro5-dot ' + (n === null ? "" : r.ok(n) ? "pass" : "fail") + '"></span>' + r.l + ' · ' + (n === null ? MISSING : (r.ok(n) ? "通过" : "超限")) + '</div>'; }).join("");
   }
 
-  function renderGoals(result) {
+  function renderGoals(result, isTemplate) {
     var el = document.getElementById("goalList");
     if (!el) return;
     var items = result && Array.isArray(result.items) ? result.items : [];
     if (!items.length) { el.innerHTML = '<div class="empty-inline">未指定优化目标</div>'; return; }
     el.innerHTML = items.map(function (item) {
       var status = item.passed === true ? "pass" : item.passed === false ? "fail" : "pend";
-      var text = item.passed === true ? "达成" : item.passed === false ? "未达成" : "待比较";
+      var text = isTemplate ? "待取代" : item.passed === true ? "达成" : item.passed === false ? "未达成" : "待比较";
       return '<div class="goal-item"><span>' + UI.escText(item.label || "") + '</span><span class="goal-status ' + status + '">' + text + '</span></div>';
     }).join("");
   }

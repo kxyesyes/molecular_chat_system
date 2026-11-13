@@ -31,8 +31,9 @@ window.ActivityResults = (function () {
       && (item.classification_regression_consistent === false || (probability >= 0.5) !== (value >= 5));
   }
 
-  function warningStrings(warnings) {
-    return Array.isArray(warnings) ? warnings.filter(value => typeof value === "string") : [];
+  function warningStrings(warnings, reviewShown = false) {
+    return Array.isArray(warnings) ? warnings.filter(value => typeof value === "string" &&
+      !(reviewShown && value === "分类与回归预测不一致，需复核；已保留两项原始结果。")) : [];
   }
 
   function createCell(text, styleText) {
@@ -208,7 +209,7 @@ window.ActivityResults = (function () {
     ActivityUtils.setText("predictionStatus", [statusLabel(status),
       review ? "含分类与回归不一致的结果，需复核" : "",
       !data.results.length ? "无预测结果" : "",
-      ...warningStrings(data.warnings)].filter(Boolean).join("；"));
+      ...warningStrings(data.warnings, review)].filter(Boolean).join("；"));
 
     // Identify the returned contract, never the form selection or global model.
     if (data.results.some(item => item && ["predicted_pIC50", "activity_probability",
@@ -305,7 +306,8 @@ window.ActivityResults = (function () {
   }
 
   function resultDetails(item) {
-    const notes = warningStrings(item.warnings);
+    const review = needsReview(item);
+    const notes = warningStrings(item.warnings, review);
     if (item.error) notes.push(item.error);
     if (item.note) notes.push(item.note);
     if (item.errors && typeof item.errors === "object") {
@@ -313,7 +315,7 @@ window.ActivityResults = (function () {
         notes.push(`${stage}: ${typeof error === "string" ? error : JSON.stringify(error)}`);
       });
     }
-    if (needsReview(item)) {
+    if (review) {
       const source = item.provenance;
       const complete = item.execution_status === "passed" && source && item.bundle_id
         && source.bundle_id === item.bundle_id && source.models

@@ -1,6 +1,7 @@
 """T06-C Pi/full-Web terminals and isolated histories; scientific fixtures are offline."""
 import asyncio
 import json
+from threading import Event
 from copy import deepcopy
 from unittest.mock import Mock
 
@@ -111,6 +112,99 @@ async def invoke(handler, sender, query, **options):
     assert len(complete) == 1 and turn.terminal_sent, frames
     assert not any(frame['type'] == 'stream' for frame in frames)
     return complete[0], frames
+
+
+def test_compiled_progress_is_delivered_while_property_tool_runs(tmp_path):
+    release = Event()
+    class DelayedProperty(Properties):
+        def execute(self, query):
+            release.wait(10)
+            return super().execute(query)
+
+    handler, sender = local_case(tmp_path, tools=[DelayedProperty()])
+    async def run():
+        started = asyncio.Event()
+        send = sender.websocket.send_text
+        async def observe(frame):
+            await send(frame)
+            if json.loads(frame).get('event', {}).get('event') == 'tool_started':
+                started.set()
+        sender.websocket.send_text = observe
+        turn = asyncio.create_task(invoke(handler, sender, '只计算 CCO 的分子量和 logP'))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            assert not turn.done()
+        finally:
+            release.set()
+            complete, _ = await turn
+        assert complete['status'] == 'completed'
+    asyncio.run(run())
+
+
+def test_cancel_during_compiled_progress_delivers_one_terminal(tmp_path):
+    handler, sender = local_case(tmp_path, tools=[Properties()])
+
+    async def run():
+        sending, release = asyncio.Event(), asyncio.Event()
+        send = sender.websocket.send_text
+
+        async def delayed(frame):
+            if json.loads(frame).get('event', {}).get('event') == 'tool_started':
+                sending.set()
+                await release.wait()
+            await send(frame)
+
+        sender.websocket.send_text = delayed
+        turn = asyncio.create_task(invoke(handler, sender, '只计算 CCO 的分子量和 logP'))
+        try:
+            await asyncio.wait_for(sending.wait(), timeout=5)
+            turn.cancel()
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        complete, _ = await turn
+        assert complete['status'] == 'cancelled' and sender.writable
+
+    asyncio.run(run())
+
+
+def test_read_back_a_named_molecules_descriptor_without_recalculation(tmp_path):
+    properties = Properties()
+    handler, sender = local_case(tmp_path, tools=[properties])
+    async def run():
+        first, _ = await invoke(handler, sender, '请计算乙醇（SMILES: CCO）的分子量和 LogP。')
+        assert first['status'] == 'completed'
+        question = '使用刚才的结果，乙醇的分子量是多少？不要重新计算。'
+        for query, expected in [(question, '46.07'), ('它的 logP 是多少？', '-0.001'),
+                                ('刚才的分子量是多少？', '46.07')]:
+            complete, _ = await invoke(handler, sender, query)
+            assert complete['status'] == 'completed' and expected in complete['content']
+        other, _ = await invoke(handler, sender, question.replace('乙醇', '乙酸'))
+        assert other['status'] != 'completed' and '46.07' not in other['content']
+    asyncio.run(run())
+    assert properties.calls == ['CCO'] and handler.model.messages == []
+
+
+def test_descriptor_readback_does_not_cross_sessions_or_consume_a_new_operation():
+    from src.web.property_comparison import recorded_descriptor
+    history = [{'property_evidence': {'session_id': 'owner', 'trace_id': 'trace', 'evidence_id': 'record',
+                'canonical_smiles': 'CCO', 'logp': 0.0}}]
+    question = '它的 logP 是多少？'
+    assert recorded_descriptor(question, history, 'other')['status'] == 'not_calculated'
+    assert recorded_descriptor(question + '再预测 ADMET。', history, 'owner') is None
+    assert '0.000' in recorded_descriptor(question, history, 'owner')['content']
+
+
+@pytest.mark.parametrize('query', ['帮我分析一下分子性质', '帮我算一下这个分子的性质'])
+def test_missing_structure_has_a_new_request_hint_when_no_continuation_is_available(tmp_path, query):
+    from tests.agent.pi_web_support import run_web_turn
+    properties = Properties()
+    handler, _ = local_case(tmp_path, tools=[properties], model=Model(fail=True))
+    complete, frames = run_web_turn(handler, query, result_format='summary_details_v1')
+    frame = result_of(frames)
+    assert frame['status'] in {'rejected', 'failed'}
+    assert frame['metadata'].get('missing_fields') == ['smiles']
+    assert 'continuation_id' not in frame['metadata'] and not properties.calls
 
 
 @pytest.mark.parametrize('mode', [

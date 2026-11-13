@@ -394,6 +394,7 @@ def test_real_durable_non_c_result_and_pose_remain_available(api, monkeypatch, s
     assert response.status_code == 200
     assert response.json()['reason_code'] == 'dependency_missing'
     assert api.foreign.get('/api/docking/result/' + task_id).status_code == 404
+    assert api.foreign.get(f'/api/docking/tasks/{task_id}/receptor').status_code == 404
 
 
 @pytest.mark.parametrize('action', ['result', 'pose_sdf', 'interactions'])

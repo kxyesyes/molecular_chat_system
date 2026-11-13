@@ -353,6 +353,14 @@ def _dependency_available(module_name: str) -> bool:
         return False
 
 
+def _has_unbonded_protein_h(mol) -> bool:
+    return any(
+        atom.GetAtomicNum() == 1 and atom.GetDegree() == 0
+        and atom.GetPDBResidueInfo() and not atom.GetPDBResidueInfo().GetIsHeteroAtom()
+        for atom in mol.GetAtoms()
+    )
+
+
 def _attach_display_geometry(interactions, protein, ligand) -> None:
     """Resolve analyzer-global indices against the exact analyzed conformers.
 
@@ -455,6 +463,17 @@ def analyze_docking_interactions(
             )
 
         protein = plf.Molecule.from_mda(universe)
+        receptor_topology = "mdanalysis"
+        # PDB CONECT often lists only metals or heterogens. MDAnalysis then
+        # treats the partial bond list as complete, even for the protein.
+        if receptor.suffix.lower() == ".pdb" and _has_unbonded_protein_h(protein):
+            from rdkit import Chem
+            reconstructed = Chem.MolFromPDBFile(str(receptor), removeHs=False)
+            if reconstructed is None or _has_unbonded_protein_h(reconstructed):
+                return _result("unavailable", "incomplete_receptor_topology",
+                               warnings=["protein_hydrogens_missing_covalent_bonds"])
+            protein = plf.Molecule(reconstructed)
+            receptor_topology = "rdkit_pdb_proximity_bonding"
         supplier_name = "mol2_supplier" if ligand.suffix.lower() == ".mol2" else "sdf_supplier"
         supplier = getattr(plf, supplier_name, None)
         if not callable(supplier):
@@ -525,6 +544,7 @@ def analyze_docking_interactions(
             "tool_derived": True,
             "metadata_mode": "metadata",
             "prolif_version": getattr(plf, "__version__", "unknown"),
+            "receptor_topology": receptor_topology,
             "inputs": {
                 "receptor": _input_summary(receptor),
                 "ligand": _input_summary(ligand),

@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 
 DOMAINS = [
-    ("docking", 13),
+    ("docking", 16),
     ("molecule_utility", 3),
     ("docking_report", 1),
     ("reverse_target", 7),
@@ -48,7 +48,10 @@ NEW_ACTIVITY_TRAINING_PATHS = {
     "/api/activity/train/cancel/{job_id}",
 }
 NEW_DOCKING_PATHS = {
+    "/api/docking/tasks/{job_id}/receptor",
     "/api/docking/demo/pde4a-apo",
+    "/api/docking/demo/roflumilast.pdbqt",
+    "/api/docking/cavities",
     "/api/docking/result/{job_id}/summary",
 }
 
@@ -176,7 +179,7 @@ def test_registration_contract():
     historic["openapi"]["components"]["schemas"] = {
         name: value
         for name, value in actual["openapi"]["components"]["schemas"].items()
-        if name != "AdmetPredictRequest"
+        if name not in {"AdmetPredictRequest", "Body_get_cavities_api_docking_cavities_post"}
     }
     assert _canonical_contract_json(historic) == _canonical_contract_json(expected)
     assert len(historic["operations"]) == 31
@@ -184,8 +187,8 @@ def test_registration_contract():
         "POST": 14, "GET": 14, "DELETE": 3,
     }
     assert len(historic["openapi"]["paths"]) == 30
-    assert len(actual["operations"]) == 37
-    assert len(actual["openapi"]["paths"]) == 36
+    assert len(actual["operations"]) == 40
+    assert len(actual["openapi"]["paths"]) == 39
 
 
 def test_docking_demo_and_summary_routes_are_registered_explicitly():
@@ -193,6 +196,9 @@ def test_docking_demo_and_summary_routes_are_registered_explicitly():
     assert {(row['path'], tuple(row['methods']), row['name'], row['parameters'])
             for row in actual['operations'] if row['path'] in NEW_DOCKING_PATHS} == {
         ('/api/docking/demo/pde4a-apo', ('GET',), 'get_pde4a_apo_demo', ''),
+        ('/api/docking/demo/roflumilast.pdbqt', ('GET',), 'get_roflumilast_demo', ''),
+        ('/api/docking/cavities', ('POST',), 'get_cavities', 'protein_file: UploadFile=File(...)'),
+        ('/api/docking/tasks/{job_id}/receptor', ('GET',), 'get_history_receptor', 'job_id: str'),
         ('/api/docking/result/{job_id}/summary', ('GET',), 'get_docking_result_summary', 'job_id: str'),
     }
 

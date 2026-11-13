@@ -11,8 +11,15 @@
 | 示例小分子 | `data/samples/5.sdf` | 分子处理/上传测试样例 | 是 |
 | 示例蛋白结构 | `data/samples/MAGL_5zun.pdb` | 分子对接页面上传测试样例 | 是 |
 | PDE4A apo 示例结构（PDB 6FG5） | `data/samples/PDE4A_apo_6FG5.pdb` | 分子对接一键示例；Schistosoma mansoni PDE4A apo | 是 |
+| 罗氟司特示例配体 | `data/samples/roflumilast.pdbqt` | 与 6FG5 配套的对接输入构象 | 是 |
+
+罗氟司特沿用对接页原始 SMILES `C1CC1COC2=C(C=CC(=C2)C(=O)NC3=C(C=NC=C3Cl)Cl)OC(F)F`。2026-11-12 使用 RDKit 2025.03.6 读取该中性结构并显式加氢，用 ETKDGv3（`randomSeed=42`）生成单一构象，再用 MMFF94（`maxIters=1000`）优化至返回码 0。用 Meeko 0.6.1 的 `MoleculePreparation().prepare` 默认参数制备配体，用 `PDBQTWriterLegacy.write_string` 导出 ASCII 文件，移除行尾空白并统一为 LF 换行。经 Meeko 回读并移除显式氢后，规范 SMILES 与输入一致。PDBQT 的 SHA-256 为 `c19a0d8de0934fa2a11ddee86a19be4421d2970b793c8e3664992471da398b5c`。
 
 `PDE4A_apo_6FG5.pdb` 来源：RCSB PDB entry 6FG5（下载日期 2026-10-27）；2026-10-28 按 PDB chain ID 提取 A 链，保留原始坐标、ANISOU、A 链 Zn/Mg、水及对应 LINK/CONECT，移除 B 链及原多链汇总记录。原文件 SHA256：`B998745414E398D63F7A7C7036F4C76D4CE3D258272BF50A790B29478A09C50D`；当前单链文件 SHA256：`32AC86832BED79F72418788F5EBD749CDF8EF3BD917557976C53B7FD6EA9FE93`。
+
+使用 AutoDock Vina 1.1.2 验证上述配体可直接参与对接。受体为已制备的 6FG5 A 链，对接盒中心为 (17.32, 15.62, −22.83) Å，边长均为 20 Å，`exhaustiveness=8`、`num_modes=10`、`energy_range=3`、搜索种子为 42，使用 1 个 CPU 线程。此次运行输出 6 个构象，Meeko 可回读全部构象，配体分子图与原始 SMILES 一致。
+
+页面的“载入示例”预设使用 `exhaustiveness=24`、`num_modes=20`，保留 3 kcal/mol 能量窗口。使用与上次相同的受体 PDBQT（SHA-256：`d2b267b8e78c2dba1835d1b3b6c912f62cb124dbfe765628a7872adb64e92988`）、配体、搜索盒、种子和线程数复测，Vina 输出 9 个结合姿势，评分从 −6.9 到 −3.9 kcal/mol；Meeko 回读得到 9 个构象，配体分子图与输入一致。20 是输出上限，页面实际运行的姿势数取决于搜索结果。
 
 ## 运行期数据资产
 

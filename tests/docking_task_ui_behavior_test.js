@@ -41,6 +41,49 @@ const response = (data) => ({ ok: true, status: 200, json: async () => ({ succes
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
 
+test("a running single task replaces stale result content with its actual progress", () => {
+  const { context: c, get } = harness();
+  get("results-content").innerHTML = "请先上传文件";
+  c.setDockingTaskButtonState(true);
+  c.syncDockingStepState(record());
+  assert.equal(get("results-content").innerHTML, "");
+  assert.equal(get("docking-progress").style.width, "50%");
+  assert.doesNotMatch(get("progress-log").children[1].textContent, /vina_running/);
+});
+
+test("refreshing a running task shows an active task button after reconnection", async () => {
+  const { context: c, get } = harness();
+  c.rememberDockingTask("task-1");
+  c.fetch = async () => response(record());
+  c.resumeDockingTaskIfPresent();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(get("docking-progress").style.width, "50%");
+  assert.equal(get("start-btn").disabled, true);
+  assert.match(get("start-btn").innerHTML, /对接任务处理中/);
+  assert.equal(get("cancel-docking-btn").disabled, false);
+});
+
+test("a replacement receptor cannot inherit a completed pose table or a confirmed center", async () => {
+  const {context: c, get} = harness();
+  c.loadMolecule = () => {};
+  c.setResultsMinHeightToLeft = () => {};
+  c.FileReader = class {
+    readAsText(file) { this.onload({target: {result: file.name}}); }
+  };
+  get("center_x").value = "17.32";
+  await c.loadProteinFile({name: "first.pdb"});
+  c.AppState.dockingBoxCenterTouched = true;
+  c.AppState.currentJobId = "previous-result";
+  get("results-content").innerHTML = "结构编号 Pose 1";
+  get("pose-select").children.push({value: "1"});
+  get("progress-log").style.display = "block";
+  await c.loadProteinFile({name: "second.pdb"});
+  assert.equal(c.AppState.dockingBoxCenterTouched, false);
+  assert.doesNotMatch(get("results-content").innerHTML, /Pose 1/);
+  assert.equal(get("pose-select").children.length, 0);
+  assert.equal(get("progress-log").style.display, "none");
+});
+
 test("missing energies and pose counts are never coerced or invented", () => {
   const { context: c } = harness();
   for (const value of [null, "", false, "-8.4", NaN, Infinity, undefined]) {
@@ -148,6 +191,25 @@ test("generic docking failure is actionable without claiming a scientific result
   assert.match(get("results-content").innerHTML, /受体结构准备工具/);
   assert.match(get("results-content").innerHTML, /配体.*准备/);
   assert.doesNotMatch(get("results-content").innerHTML, /-\d+\.\d+\s*kcal\/mol/);
+});
+test("cancel acknowledgement stays pending and confirmed cancellation never renders a failure", () => {
+  const { context: c, get } = harness();
+  c.stepManager.errorStep = () => assert.fail("cancellation rendered as a failed step");
+  c.setDockingTaskButtonState(true);
+  assert.equal(c.applyDockingTaskRecord(record("cancel_requested")), false);
+  assert.equal(get("cancel-docking-btn").disabled, true);
+  assert.match(get("progress-log").textContent, /正在取消/);
+  assert.equal(get("start-btn").disabled, true);
+  assert.equal(c.applyDockingTaskRecord(record("canceled")), true);
+  assert.match(get("results-content").textContent, /已取消/);
+  assert.equal(get("start-btn").disabled, false);
+});
+test("reopening a canceled task shows its own terminal state and progress", async () => {
+  const { context: c, get } = harness();
+  c.fetch = async () => response({ ...record("canceled"), task_type: "docking" });
+  await c.restoreDurableDockingTask("task-1");
+  assert.match(get("results-content").textContent, /已取消/);
+  assert.equal(get("docking-progress").style.width, "50%");
 });
 test("poll disconnect holds task lock and schedules reconnect", async () => {
   const { context: c, get, timers } = harness();
@@ -310,6 +372,34 @@ test("history restoration cannot overwrite a running task", async () => {
   await c.restoreDurableDockingTask("task-1");
   assert.equal(get("results-content").innerHTML, "active task");
   assert.equal(c.readRememberedDockingTask(), "task-2");
+});
+test("late verified history receptor cannot replace the newly opened task", async () => {
+  const {context: c, get} = harness();
+  const waiting = new Map();
+  c.setCurrentJobId = id => { c.AppState.currentJobId = id; };
+  c.loadComplexStructure = () => {};
+  c.fetch = async url => {
+    if (url.endsWith("/summary")) return response({results: [{pose: 1, binding_energy: -6.1}]});
+    return new Promise(resolve => waiting.set(url, resolve));
+  };
+  function reopen(id) {
+    const r = success();
+    r.task_id = id; r.result.data.result_job_id = id;
+    return c.renderDurableTaskSuccess(r, c.durableDockingResult(r), {restored: true});
+  }
+  const old = reopen("old");
+  await new Promise(resolve => setImmediate(resolve));
+  const fresh = reopen("fresh");
+  await new Promise(resolve => setImmediate(resolve));
+  const receptor = data => ({ok: true, headers: {get: () => "pdb"}, text: async () => data});
+  waiting.get("/api/docking/tasks/fresh/receptor")(receptor("receptor B"));
+  await fresh;
+  waiting.get("/api/docking/tasks/old/receptor")(receptor("receptor A"));
+  await old;
+  assert.equal(c.AppState.currentJobId, "fresh");
+  assert.equal(c.receptorForView("fresh").data, "receptor B");
+  assert.match(get("results-content").innerHTML, /downloadResults\('fresh'/);
+  assert.doesNotMatch(get("results-content").innerHTML, /downloadResults\('old'/);
 });
 test("a history read cannot overwrite a task started and completed meanwhile", async () => {
   const { context: c, get } = harness();

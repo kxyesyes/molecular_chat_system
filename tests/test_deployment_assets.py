@@ -180,6 +180,7 @@ docking:
                 "data/samples/5.sdf",
                 "data/samples/MAGL_5zun.pdb",
                 "data/samples/PDE4A_apo_6FG5.pdb",
+                "data/samples/roflumilast.pdbqt",
                 "deployment/medchat.service",
                 "deployment/nginx-medchat.conf",
             ]:

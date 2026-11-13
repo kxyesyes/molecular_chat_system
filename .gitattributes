@@ -26,6 +26,7 @@ deployment/temporal-worker.env.example text eol=lf
 *.pdf binary
 *.xlsx binary
 *.pdb binary
+data/samples/roflumilast.pdbqt text eol=lf
 *.sdf binary
 *.mol binary
 *.cif binary

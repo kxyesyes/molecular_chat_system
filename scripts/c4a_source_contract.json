@@ -5,7 +5,7 @@
     "scripts/run_c4a_acceptance.py": "15e604baeefbd3a90174b38aa2de69e18d5098643bc480f4700350c663c3dc76",
     "src/agent/tools/molecular_docking.py": "ede89b0ae3413e748044e114b09662841adbe66f12ba95549a4dbf35f980be2a",
     "src/docking/adapters/base.py": "587b8c85889e57d833a435ba9a5bbd11ed55529d1361f6d5dbbf7a9884c7fbc0",
-    "src/docking/molecular_docking_service.py": "197d3af13c36c3c76592cae760997d7555194c6e8bcb67993d0426f77cf442c3",
+    "src/docking/molecular_docking_service.py": "edc8a636bc72974ce5c692f6cfcd6c3f8f9f98910d3c14e9558de2346183a293",
     "src/task_runtime/backends/local.py": "c0826225dbd8b639af4ed27bf1891335fab3398e82bc621b86913d4abe114720",
     "src/task_runtime/docking_consent.py": "8d678cde3a2e37ec43f33d0ab87957c5a72566f09f41e075d3cf972a5d2be466",
     "src/task_runtime/docking_execution.py": "b07407bc1fc9ae28c6f48486201a8d9bdfccc07054a052408f0d48e171912d72",
@@ -15,7 +15,7 @@
     "tests/conftest.py": "7ad6ea397452666e2a99f9485d2a2e0506bbb1d55744349cd9ae4130311dbde3",
     "tests/task_runtime/_c4a_native.py": "90c9bacfd392fe9dfd4e42143ceccd1cfd6a82668f5f1a52d1fe9502b085a749",
     "tests/task_runtime/_c4a_sticky_retention_child.py": "889699b30ec20139a6cc78e3b7ab779164ce8828564f4cfa3e39fe3fd9316a3e",
-    "tests/task_runtime/test_docking_consent.py": "283156e594a921bad6fe7378727803421e65089433f78589e09f1eb6b7db7cf6",
-    "tests/test_docking_command_cancellation.py": "a5c76d16d6c661262a0a76c6d2f1ac413f70d01dd9b4e90d9f52f5a89e873491"
+    "tests/task_runtime/test_docking_consent.py": "242db3c31febb22505fbea498630a884c6cb8f4d86a7960cccc0ca3a83a0bb2a",
+    "tests/test_docking_command_cancellation.py": "e76c974810ef2bf27ef066836580a5edfe67c26c849970103b34baff87b20fcd"
   }
 }

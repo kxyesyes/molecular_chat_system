@@ -112,7 +112,7 @@ assert(
 );
 assert(
   indexHtml.includes("/static/js/shared/safe_render.js?v=20261104-herg-source-v1") &&
-    indexHtml.includes("/static/js/home/formatters.js?v=20261104-literature-prose-v1"),
+    indexHtml.includes("/static/js/home/formatters.js?v=20261112-scientific-summary-v1"),
   "Homepage must invalidate cached chat URL policy scripts",
 );
 assert(

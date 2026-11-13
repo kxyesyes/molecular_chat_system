@@ -97,6 +97,16 @@ def test_calculated_logp_alias_is_a_supported_property():
     assert plan.metrics == ('logp',)
 
 
+def test_property_and_assessment_can_refer_to_the_same_molecule():
+    compiler = ScientificObligationCompiler()
+    query = '计算 CCO 的分子性质，并评估它的成药性'
+    plan = compiler.compile(query + '。')
+    assert plan.status == 'ready'
+    assert plan.required_tools == ('property_calculator', 'drug_likeness_assessment')
+    assert {step.input_data for step in plan.steps} == {'CCO'}
+    assert compiler.compile(query + '，并计算 LogD。').status == 'rejected'
+
+
 def test_brief_result_explanation_is_not_an_unknown_metric():
     plan = ScientificObligationCompiler().compile(
         '请计算乙醇（SMILES：CCO）的分子量和 logP，并简要解释结果。'

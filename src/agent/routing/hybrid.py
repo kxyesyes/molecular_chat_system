@@ -12,7 +12,7 @@ from src.agent.persistence.base import AgentStateStore
 from src.agent.contracts.generation_request import has_generation_intent
 from src.agent.contracts.target_request import analyze_target_request, TARGET_CLARIFICATION
 from src.agent.planning.request_parsing import (
-    positive_intent_text, property_calculation_forbidden, target_lookup_text,
+    positive_intent_text, property_calculation_forbidden, requests_generated_properties, target_lookup_text,
 )
 from src.agent.property_constraints import requested_property_bounds
 from src.target_identifiers import TARGET_PATTERN
@@ -226,9 +226,10 @@ class HybridSkillRouter:
         if activity_intent_requested(lower):
             add("activity_prediction", 0.9, "activity endpoint requested")
         bounds, unknown_bounds = requested_property_bounds(lower)
-        bounded_generation = generation and bool(bounds or unknown_bounds)
+        generated_properties = generation and (bounds or unknown_bounds or
+            (not has_smiles and requests_generated_properties(text)))
         molecular_subject = has_smiles or bool(re.search(r"分子|化合物|候选|\bmolecules?\b|\bcompounds?\b|\bcandidates?\b", lower))
-        if (not bounded_generation or "admet" in lower) and (self._contains(
+        if (not generated_properties or "admet" in lower) and (self._contains(
             lower,
             "admet",
             "分子量",

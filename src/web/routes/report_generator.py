@@ -42,8 +42,8 @@ PDBQT_TO_ELEMENT = {
 }
 
 
-def generate_report(job_id: str, results: list, config_lines: list, fmt: str, 
-                   viewer_png_b64: str, smiles_images_b64: list, job_dir: str):
+def generate_report(job_id: str, results: list, config_lines: list, fmt: str,
+                   viewer_png_b64: str, smiles_images_b64: list, job_dir: str, *, pose=None, analysis=None):
     """生成对接报告"""
     
     # 构造 Markdown 内容
@@ -52,6 +52,26 @@ def generate_report(job_id: str, results: list, config_lines: list, fmt: str,
     md.append(f"# 分子对接报告\n")
     md.append(f"- 任务ID: `{job_id}`\n")
     md.append(f"- 生成时间: {now}\n")
+    pose_lines = []
+    if pose is not None:
+        selected = next(r for r in results if r.pose_index == pose)
+        pose_lines.append(f"Vina 评分 {selected.binding_energy:.3f} kcal/mol；相对最佳构象的 RMSD 下限 "
+                          f"{selected.rmsd_lb:.3f} Å，上限 {selected.rmsd_ub:.3f} Å。")
+        if analysis["status"] == "success":
+            labels = {"hydrogen_bond": "氢键", "hydrophobic": "疏水接触", "pi_pi": "π–π 堆积",
+                      "ionic": "离子相互作用", "cation_pi": "阳离子–π", "van_der_waals": "范德华接触",
+                      "water_bridge": "水桥"}
+            for item in analysis["interactions"]:
+                occurrences = item.get("geometry_occurrences", [item])
+                distances = [f"{g['distance_angstrom']:.2f}" for g in occurrences if "distance_angstrom" in g]
+                detail = f"（距离 {', '.join(distances)} Å）" if distances else ""
+                pose_lines.append(f"{labels.get(item['type'], item['type'])} · {item['protein_residue']} · "
+                                  f"{item['count']} 个接触{detail}")
+            if not analysis["interactions"]:
+                pose_lines.append("ProLIF 未检出相互作用。")
+        else:
+            pose_lines.append(f"此构象的相互作用分析不可用（{analysis.get('reason_code', 'unavailable')}）。")
+        md.extend([f"\n## 所选构象 Pose {pose}\n", *[f"- {line}" for line in pose_lines]])
     md.append(f"\n## 对接参数\n")
     
     if config_lines:
@@ -62,10 +82,10 @@ def generate_report(job_id: str, results: list, config_lines: list, fmt: str,
 
     md.append("\n## 结果概览\n")
     if results:
-        md.append("| Pose | 结合能 (kcal/mol) | RMSD 下限 | RMSD 上限 |\n")
-        md.append("| ---- | -----------------:| --------:| --------:|\n")
-        for i, r in enumerate(results, 1):
-            md.append(f"| {i} | {r.binding_energy:.2f} | {r.rmsd_lb:.2f} | {r.rmsd_ub:.2f} |")
+        md.append("| Pose | Vina 评分 (kcal/mol) | RMSD 下限 (Å) | RMSD 上限 (Å) |")
+        md.append("| ---- | -----------------:| --------:| --------:|")
+        for r in results:
+            md.append(f"| {r.pose_index} | {r.binding_energy:.3f} | {r.rmsd_lb:.3f} | {r.rmsd_ub:.3f} |")
     else:
         md.append("未解析到有效结果。")
 
@@ -83,9 +103,9 @@ def generate_report(job_id: str, results: list, config_lines: list, fmt: str,
 
     # 根据格式返回
     if fmt == "html":
-        return _generate_html_report(job_id, now, config_lines, results, viewer_png_b64, smiles_images_b64)
+        return _generate_html_report(job_id, now, config_lines, results, viewer_png_b64, smiles_images_b64, pose, pose_lines)
     elif fmt == "zip":
-        return _generate_zip_report(job_id, md, viewer_png_b64, smiles_images_b64, job_dir)
+        return _generate_zip_report(job_id, md, config_lines, job_dir, results, pose)
     else:
         # 默认返回 Markdown
         content = "\n".join(md)
@@ -187,7 +207,7 @@ def _read_best_pose_pdb_from_pdbqt_file(file_path: str) -> str:
 
 
 def _generate_html_report(job_id: str, now: str, config_lines: list, results: list,
-                         viewer_png_b64: str, smiles_images_b64: list):
+                         viewer_png_b64: str, smiles_images_b64: list, pose, pose_lines):
     """生成 HTML 格式报告"""
 
     safe_job_id = html.escape(str(job_id), quote=True)
@@ -199,12 +219,12 @@ def _generate_html_report(job_id: str, now: str, config_lines: list, results: li
         if not results:
             return "<tr><td colspan='4'>未解析到有效结果</td></tr>"
         rows = []
-        for i, r in enumerate(results, 1):
+        for r in results:
             rows.append(
-                f"<tr><td>Pose {i}</td>"
-                f"<td style='text-align:right'>{r.binding_energy:.2f}</td>"
-                f"<td style='text-align:right'>{r.rmsd_lb:.2f}</td>"
-                f"<td style='text-align:right'>{r.rmsd_ub:.2f}</td></tr>"
+                f"<tr><td>Pose {r.pose_index}</td>"
+                f"<td style='text-align:right'>{r.binding_energy:.3f}</td>"
+                f"<td style='text-align:right'>{r.rmsd_lb:.3f}</td>"
+                f"<td style='text-align:right'>{r.rmsd_ub:.3f}</td></tr>"
             )
         return "\n".join(rows)
 
@@ -218,6 +238,10 @@ def _generate_html_report(job_id: str, now: str, config_lines: list, results: li
                       "</style></head><body>")
     html_parts.append(f"<h1>分子对接报告 <span class='tag'>ID: {safe_job_id}</span></h1>")
     html_parts.append(f"<p>生成时间：{now}</p>")
+    if pose is not None:
+        html_parts.append(f"<h2>所选构象 Pose {pose}</h2><ul>")
+        html_parts.extend(f"<li>{_safe_text(line)}</li>" for line in pose_lines)
+        html_parts.append("</ul>")
     html_parts.append("<h2>对接参数</h2>")
     
     if config_lines:
@@ -228,8 +252,8 @@ def _generate_html_report(job_id: str, now: str, config_lines: list, results: li
         html_parts.append("<p>无可用配置</p>")
     
     html_parts.append("<h2>结果概览</h2>")
-    html_parts.append("<table><thead><tr><th>Pose</th><th>结合能 (kcal/mol)</th>"
-                     "<th>RMSD 下限</th><th>RMSD 上限</th></tr></thead><tbody>")
+    html_parts.append("<table><thead><tr><th>Pose</th><th>Vina 评分 (kcal/mol)</th>"
+                     "<th>RMSD 下限 (Å)</th><th>RMSD 上限 (Å)</th></tr></thead><tbody>")
     html_parts.append(_result_rows_html())
     html_parts.append("</tbody></table>")
     
@@ -256,8 +280,7 @@ def _generate_html_report(job_id: str, now: str, config_lines: list, results: li
     )
 
 
-def _generate_zip_report(job_id: str, md: list, viewer_png_b64: str, 
-                        smiles_images_b64: list, job_dir: str):
+def _generate_zip_report(job_id: str, md: list, config_lines, job_dir: str, results, pose):
     """生成 ZIP 格式报告"""
     import io
     import zipfile
@@ -273,7 +296,6 @@ def _generate_zip_report(job_id: str, md: list, viewer_png_b64: str,
             "result.pdbqt": f"poses/docked_pose_all_{job_id}.pdbqt",
             "receptor.pdbqt": "protein/receptor.pdbqt",
             "ligand.pdbqt": "ligand/ligand.pdbqt",
-            "config.txt": "meta/config.txt",
         }
         for name, arcname in file_mapping.items():
             fp = os.path.join(job_dir, name)
@@ -292,23 +314,16 @@ def _generate_zip_report(job_id: str, md: list, viewer_png_b64: str,
         if ligand_pdb:
             zf.writestr("ligand/ligand.pdb", ligand_pdb)
 
-        best_pose_pdb = _read_best_pose_pdb_from_pdbqt_file(
-            os.path.join(job_dir, "result.pdbqt")
-        )
-        if best_pose_pdb:
-            zf.writestr("poses/docked_pose_1.pdb", best_pose_pdb)
+        if config_lines:
+            zf.writestr("meta/config.txt", "\n".join(config_lines) + "\n")
+        exported_pose = pose if pose is not None else (results[0].pose_index if results else None)
+        if exported_pose is not None:
+            pdb = _read_pose_pdb_from_pdbqt_file(os.path.join(job_dir, "result.pdbqt"), exported_pose)
+            if pdb:
+                zf.writestr(f"poses/docked_pose_{exported_pose}.pdb", pdb)
 
-        manifest_lines = [
-            f"job_id={job_id}",
-            "report=docking markdown summary",
-            "protein/receptor.pdbqt=prepared receptor for docking",
-            "protein/receptor.pdb=standard PDB converted from receptor.pdbqt",
-            "ligand/ligand.pdbqt=prepared ligand for docking",
-            "ligand/ligand.pdb=standard PDB converted from ligand.pdbqt",
-            "poses/docked_pose_all_<job_id>.pdbqt=all docked poses from Vina",
-            "poses/docked_pose_1.pdb=best pose converted to standard PDB",
-            "meta/config.txt=Vina configuration used for this job",
-        ]
+        manifest_lines = [f"job_id={job_id}", f"exported_pose={exported_pose}",
+                          *[f"file={name}" for name in zf.namelist()]]
         zf.writestr("meta/manifest.txt", "\n".join(manifest_lines) + "\n")
 
     buf.seek(0)

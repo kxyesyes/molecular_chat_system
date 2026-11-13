@@ -1,6 +1,7 @@
 """Docking route registration."""
 import asyncio
 import copy
+import hashlib
 import logging
 import math
 import os
@@ -22,6 +23,8 @@ _SAFE_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
 _HISTORY_PAGE_SIZE = 200
 _HISTORY_SCAN_LIMIT = 10_000
 DEMO_PDE4A_APO_PATH = Path(__file__).resolve().parents[3] / "data" / "samples" / "PDE4A_apo_6FG5.pdb"
+DEMO_ROFLUMILAST_PATH = DEMO_PDE4A_APO_PATH.with_name("roflumilast.pdbqt")
+DEMO_ROFLUMILAST_SHA256 = "c19a0d8de0934fa2a11ddee86a19be4421d2970b793c8e3664992471da398b5c"
 
 
 def _positive_float_env(name: str, default: float) -> float:
@@ -784,6 +787,17 @@ def setup_docking_routes(
             resolve(logger, "logger").exception("环境自检失败")
             return api_error("DOCKING_ENVIRONMENT_CHECK_FAILED", "环境自检失败", status_code=500)
 
+    @app.post("/api/docking/cavities")
+    async def get_cavities(request: Request, protein_file: UploadFile = File(...)):
+        _session_id(request)
+        from src.docking.cavity_search import detect_cavities
+
+        content = await resolve(read_upload_limited, "_read_upload_limited")(protein_file, "protein file")
+        try:
+            return await asyncio.to_thread(detect_cavities, content)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.get("/api/docking/demo/pde4a-apo")
     def get_pde4a_apo_demo(request: Request):
         """Return the registered local PDE4A apo demo asset, never a fallback."""
@@ -802,6 +816,19 @@ def setup_docking_routes(
             media_type="chemical/x-pdb",
             headers={"Cache-Control": "private, no-store"},
         )
+
+    @app.get("/api/docking/demo/roflumilast.pdbqt")
+    def get_roflumilast_demo(request: Request):
+        _session_id(request)
+        try:
+            content = DEMO_ROFLUMILAST_PATH.read_bytes()
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="罗氟司特示例配体文件缺失。") from exc
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail="无法读取罗氟司特示例配体。") from exc
+        if hashlib.sha256(content).hexdigest() != DEMO_ROFLUMILAST_SHA256:
+            raise HTTPException(status_code=503, detail="罗氟司特示例配体校验失败。")
+        return Response(content, media_type="application/octet-stream")
 
     @app.post("/api/docking/batch_submit")
     async def submit_batch_docking_job(
@@ -989,14 +1016,13 @@ def setup_docking_routes(
             # Preserve the legacy text response's universal-newline behavior
             # while durable artifacts continue to be read through the same
             # ownership-checked byte path.
-            content = (await read_owned_docking_pose(job_id, request)).replace(
-                b"\r\n", b"\n"
-            )
+            content = await read_owned_docking_pose(job_id, request)
+            raw_download = request.headers.get("accept") == "application/octet-stream"
 
             return Response(
-                content=content,
-                media_type="text/plain",
-                headers={"Content-Disposition": f"attachment; filename=docking_result_{job_id}.pdbqt"}
+                content=content if raw_download else content.replace(b"\r\n", b"\n"),
+                media_type="application/octet-stream" if raw_download else "text/plain",
+                headers={"Content-Disposition": f"attachment; filename=docking_result_{job_id}.pdbqt", "Vary": "Accept"}
             )
 
         except HTTPException:
@@ -1004,6 +1030,28 @@ def setup_docking_routes(
         except Exception:
             resolve(logger, "logger").exception("获取对接结果失败")
             return api_error("DOCKING_RESULT_READ_FAILED", "获取结果失败", status_code=500)
+
+    @app.get("/api/docking/tasks/{job_id}/receptor")
+    async def get_history_receptor(job_id: str, request: Request):
+        from src.task_runtime.staging import DockingInputStager, ManifestError
+
+        _validate_job_id(job_id)
+        _session_id(request)
+        task = await resolve_owned_durable_docking_task(job_id, request)
+        if task is None:
+            raise HTTPException(404, "对接任务不存在")
+        runtime, root, locator = task
+        try:
+            inputs = await asyncio.to_thread(DockingInputStager(root).read_verified_input_bytes,
+                                             job_id, Path(locator).name)
+        except (ManifestError, OSError) as exc:
+            raise HTTPException(409, "历史受体缺失或未通过校验") from exc
+        fmt = Path(inputs["manifest"]["receptor"]["path"]).suffix.lower().lstrip(".")
+        if fmt not in {"pdb", "pdbqt"}:
+            raise HTTPException(422, "历史受体格式不支持三维显示")
+        consent_guard.require_unambiguous_durable(runtime, job_id)
+        return Response(inputs["receptor_bytes"], media_type="text/plain",
+                        headers={"Cache-Control": "private, no-store", "X-Receptor-Format": fmt})
 
     @app.get("/api/docking/result/{job_id}/summary")
     async def get_docking_result_summary(job_id: str, request: Request):
@@ -1225,6 +1273,11 @@ def setup_docking_routes(
         if analysis_receptor_trace:
             result.setdefault("provenance", {})["analysis_receptor"] = analysis_receptor_trace
         return result
+
+    # Reports use the same owner-scoped artifact and interaction readers as the viewer.
+    app.state.docking_report_pose = read_owned_docking_pose
+    app.state.docking_report_task = resolve_owned_durable_docking_task
+    app.state.docking_report_interactions = get_docking_interactions
 
     @app.get("/api/docking/pose_sdf/{job_id}")
     async def get_docking_pose_sdf(job_id: str, request: Request, pose: int = 1):

@@ -1,6 +1,8 @@
 """Docking report route registration."""
+import asyncio
 import logging
-import os
+from pathlib import Path
+import tempfile
 from typing import Dict, Any
 from fastapi import Body, HTTPException, Request
 from src.web.api_response import api_error
@@ -22,7 +24,7 @@ def _register_docking_report_routes(
     @app.post("/api/docking/report/{job_id}")
     async def get_docking_report(job_id: str, request: Request, payload: Dict[str, Any] = Body(None)):
         """生成并返回对接报告"""
-        if not docking_service:
+        if not docking_service and not hasattr(app.state, "docking_report_task"):
             raise HTTPException(status_code=503, detail="分子对接服务不可用")
 
         from .docking_routes import _owned_history, _validate_job_id, _session_id
@@ -30,41 +32,75 @@ def _register_docking_report_routes(
         _session_id(request)
         guard = report_consent_guard(app)
         guard.require_legacy(job_id)
-        _owned_history(request, docking_service.work_dir, job_id)
+        durable = None
+        try:
+            if docking_service is None:
+                raise HTTPException(404, "对接任务不存在")
+            _owned_history(request, docking_service.work_dir, job_id)
+        except HTTPException as exc:
+            resolver = getattr(app.state, "docking_report_task", None)
+            if exc.status_code != 404 or resolver is None:
+                raise
+            durable = await resolver(job_id, request)
+            if durable is None:
+                raise
         guard.require_legacy(job_id)
 
         try:
-            job_dir = os.path.join(docking_service.work_dir, f"docking_{job_id}")
-            result_file = os.path.join(job_dir, "result.pdbqt")
-            
-            if not os.path.exists(result_file):
-                raise HTTPException(status_code=404, detail="对接结果文件不存在")
-
-            results = docking_service.parse_vina_results(result_file)
-            
-            # 读取配置
-            config_file = os.path.join(job_dir, "config.txt")
-            config_lines = []
-            if os.path.exists(config_file):
-                with open(config_file, 'r', encoding='utf-8', errors='ignore') as cf:
-                    config_lines = [line.strip() for line in cf.readlines() if line.strip()]
-
-            # 解析参数
-            fmt = "md"
-            viewer_png_b64 = None
-            smiles_images_b64 = []
-            if payload and isinstance(payload, dict):
-                fmt = str(payload.get("format", "md")).lower()
-                viewer_png_b64 = payload.get("viewer_png_base64")
-                smiles_images_b64 = payload.get("smiles_images", [])
-            viewer_png_b64, smiles_images_b64 = get_validator()(
-                viewer_png_b64,
-                smiles_images_b64,
-            )
-
-            # 生成报告内容
             from .report_generator import generate_report
-            return generate_report(job_id, results, config_lines, fmt, viewer_png_b64, smiles_images_b64, job_dir)
+            payload = payload or {}
+            fmt = str(payload.get("format", "md")).lower()
+            pose = payload.get("pose")
+            if pose is not None and (type(pose) is not int or pose < 1):
+                raise HTTPException(422, "无效构象编号")
+            image, ligand_images = get_validator()(payload.get("viewer_png_base64"), payload.get("smiles_images", []))
+
+            def read_pose_rows(directory):
+                from src.docking.molecular_docking_service import MolecularDockingService
+                result_file = directory / "result.pdbqt"
+                if not result_file.is_file():
+                    raise HTTPException(404, "对接结果文件不存在")
+                parser = docking_service.parse_vina_results if docking_service else MolecularDockingService.parse_vina_results
+                rows = parser(str(result_file))
+                if pose is not None and not any(r.pose_index == pose for r in rows):
+                    raise HTTPException(422, "所选构象不在已验证结果中")
+                return rows
+
+            with tempfile.TemporaryDirectory(prefix="docking_report_") as tmp:
+                if durable:
+                    from src.task_runtime.staging import DockingInputStager
+                    runtime, root, manifest_path = durable
+                    directory = Path(tmp)
+                    raw = await app.state.docking_report_pose(job_id, request)
+                    (directory / "result.pdbqt").write_bytes(raw)
+                    manifest = await asyncio.to_thread(DockingInputStager(root).load_verified_locator,
+                                                       job_id, Path(manifest_path).name)
+                    config = manifest["config"]
+                    lines = [f"{key}_{axis} = {v}" for key in ("center", "size")
+                             for axis, v in zip("xyz", config[key])]
+                    lines.extend(f"{key} = {config[key]}" for key in ("exhaustiveness", "num_modes"))
+                    lines.append("energy_range = 3.0")
+                    (directory / "config.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+                else:
+                    directory = Path(docking_service.work_dir) / f"docking_{job_id}"
+                    config_file = directory / "config.txt"
+                    lines = []
+                    if config_file.is_file():
+                        lines = [s.strip() for s in config_file.read_text(encoding="utf-8").splitlines()
+                                 if s.strip() and s.partition("=")[0].strip() not in {"receptor", "ligand", "out", "log"}]
+                rows = await asyncio.to_thread(read_pose_rows, directory)
+                options = {}
+                if pose is not None:
+                    reader = getattr(app.state, "docking_report_interactions", None)
+                    analysis = await reader(job_id, request, pose) if reader else {"status": "unavailable"}
+                    options = {"pose": pose, "analysis": analysis}
+                response = await asyncio.to_thread(generate_report, job_id, rows, lines, fmt,
+                                                   image, ligand_images, str(directory), **options)
+                if durable:
+                    guard.require_unambiguous_durable(runtime, job_id)
+                else:
+                    guard.require_legacy(job_id)
+                return response
 
         except HTTPException:
             raise

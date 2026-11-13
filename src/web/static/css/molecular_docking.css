@@ -2260,3 +2260,14 @@ select.viewer-btn option {
     min-width: 620px;
   }
 }
+.cavity-picker {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 16px;
+}
+.cavity-picker select {
+  padding: 8px;
+  max-width: 100%;
+  font: inherit;
+}
+#cavity-status { color: #475569; font-size: 0.9rem; }

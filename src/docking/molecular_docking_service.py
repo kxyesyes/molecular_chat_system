@@ -12,6 +12,7 @@ import re
 import hashlib
 import json
 import tempfile
+from collections import Counter
 from typing import Dict, List, Any, Tuple, Optional
 import shutil
 from dataclasses import dataclass
@@ -377,8 +378,10 @@ class MolecularDockingService:
                 ):
                     adapter = CommandAdapter(self.reduce_cmd, **self._adapter_ownership())
                     self.reduce_adapter = adapter
+                dictionary = Path(self.reduce_cmd).with_name("reduce_wwPDB_het_dict.txt")
+                db_args = ["-DB", str(dictionary.resolve())] if dictionary.is_file() else []
                 result = adapter.run(
-                    adapter.wrap_command("-NOFLIP", "-Quiet", "-DB", "dict", source_path),
+                    adapter.wrap_command("-NOFLIP", "-Quiet", *db_args, source_path),
                     cwd=os.path.dirname(source_path) or self.work_dir,
                     timeout=60,
                     cancel_event=cancel_event,
@@ -386,7 +389,21 @@ class MolecularDockingService:
                 stdout = result.stdout or ""
                 if isinstance(stdout, bytes):
                     stdout = stdout.decode("utf-8", errors="replace")
-                if result.returncode == 0 and stdout:
+                trace["reduce_returncode"] = result.returncode
+                stderr = result.stderr or ""
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                # ADFRsuite's Reduce 3.16 can exit 1 after emitting a complete PDB.
+                # Only recover that case for an identified run with intact heavy atoms.
+                complete = result.returncode == 0
+                if result.returncode == 1 and stdout.startswith("USER  MOD reduce.3.16.") and stdout.rstrip().endswith("END"):
+                    def heavy_atoms(text):
+                        return Counter((line[:6], line[12:27], line[30:54], line[76:78])
+                                       for line in text.splitlines() if line.startswith(("ATOM  ", "HETATM"))
+                                       and (line[76:78].strip() or line[12:16].strip()[:1]) not in {"H", "D"})
+                    original = heavy_atoms(Path(source_path).read_text(encoding="utf-8", errors="replace"))
+                    complete = bool(original) and original == heavy_atoms(stdout)
+                if complete and stdout and not re.search(r"^\s*(?:ERROR|FATAL)\b", stderr, re.I | re.M):
                     temporary = f"{output_path}.tmp"
                     with open(temporary, "w", encoding="utf-8", newline="\n") as stream:
                         stream.write(stdout)

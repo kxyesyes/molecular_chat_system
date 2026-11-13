@@ -30,6 +30,9 @@ window.HomeTaskStatus = (() => {
   });
   const toolNames = Object.freeze({
     property_calculator: "属性计算",
+    drug_likeness_assessment: "类药性评估",
+    rag_search: "知识库检索",
+    lead_optimization_verifier: "结构优化验证",
     admet_predictor: "ADMET预测",
     activity_predictor: "活性预测",
     reverse_target_predictor: "反向寻靶",
@@ -40,6 +43,7 @@ window.HomeTaskStatus = (() => {
   });
 
   function displayEventType(type, payload) {
+    if (type === "tool_failed" && payload?.status === "cancelled") return "tool_cancelled";
     if (terminalEvents.has(type) && payload?.publication_stage === "pending_source_check" &&
         payload.answer_released === false) return "pending_source_check";
     // Presentation-only variants: the transport still emits tool_completed.
@@ -82,6 +86,7 @@ window.HomeTaskStatus = (() => {
     return {
       eventType,
       progressText: eventType === "pending_source_check" ? labels.pending_source_check
+        : eventType === "tool_cancelled" ? "已取消"
         : eventType === "tool_partial" ? "部分完成"
         : eventType === "tool_not_calculated" ? notCalculatedLabel(event && event.payload)
         : outcome && eventType === "task_failed"
@@ -112,6 +117,9 @@ window.HomeTaskStatus = (() => {
 
   function message(event) {
     const type = displayEventType(event?.event || event?.type, event?.payload);
+    if (type === "tool_cancelled") return event.payload.quality?.invocation_may_still_be_running
+      ? "后台执行状态仍未确认。" : "该步骤未交付计算结果。";
+    if (type === "task_cancelled" && event.message === "Workflow cancelled") return "";
     // Lifecycle labels already communicate progress; keep concrete problems,
     // not the executor's internal "Running <step-id>" chatter.
     if (!["tool_partial", "tool_not_calculated", "tool_failed", "task_partial", "task_failed",
@@ -172,6 +180,7 @@ window.HomeTaskStatus = (() => {
     if (type === "tool_not_calculated") return `${toolText || "工具"} ${notCalculatedLabel(payload)}`;
     if (type === "tool_completed") return toolText ? `${toolText} 完成` : "工具完成";
     if (type === "tool_failed") return toolText ? `${toolText} 失败` : "工具失败";
+    if (type === "tool_cancelled") return `${toolText || "工具"} 已取消`;
     return labels[type] || "Agent 事件";
   }
 
@@ -179,7 +188,7 @@ window.HomeTaskStatus = (() => {
     if (type && type.includes("failed")) return "is-error";
     if (type === "task_rejected") return "is-error";
     if (type === "validation_warning" || type === "task_partial") return "is-warning";
-    if (type === "task_cancelled") return "is-warning";
+    if (type === "task_cancelled" || type === "tool_cancelled") return "is-warning";
     if (type === "tool_partial" || type === "tool_not_calculated") return "is-warning";
     if (type && type.includes("completed")) return "is-complete";
     return "is-running";

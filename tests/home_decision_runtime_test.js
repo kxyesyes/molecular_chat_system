@@ -170,8 +170,39 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
+  await test("missing structure restores the original task for editing without sending it", () => {
+    const h = loadHome(); h.ready("pi");
+    h.input.value = "帮我分析一下分子性质"; h.send(); h.socket.emit(accepted(turn, trace));
+    const frame = result("rejected");
+    frame.metadata.missing_fields = ["smiles"];
+    h.socket.emit(frame); h.socket.emit(complete("rejected"));
+    const supply = h.button("补充 SMILES");
+    assert(supply);
+    const sent = h.socket.sent.length;
+    supply.click();
+    assert.equal(h.input.value, "帮我分析一下分子性质\nSMILES: ");
+    assert.equal(h.socket.sent.length, sent);
+    h.input.value = "另一条未发送的消息"; supply.click();
+    assert.equal(h.input.value, "另一条未发送的消息");
+  });
+  await test("invalid structure can be corrected in the original request", () => {
+    const h = loadHome(); h.ready("pi");
+    h.input.value = "计算 SMILES: C1CC 的分子量"; h.send(); h.socket.emit(accepted(turn, trace));
+    const frame = result("rejected");
+    frame.metadata.stop_reason = "invalid_molecular_input";
+    h.socket.emit(frame); h.socket.emit(complete("rejected"));
+    h.button("更正 SMILES").click();
+    assert.equal(h.input.value, "计算 SMILES: C1CC 的分子量");
+    assert.equal(h.socket.sent.filter(message => message.type === "chat").length, 1);
+  });
   const lifecycle = (h, event, t = turn, tr = trace, message = event) => h.sockets.at(-1).emit({
     type: "agent_event", turn_id: t, event: {trace_id: tr, event, message},
+  });
+  await test("a terminal result settles the panel if the last event was still running", () => {
+    const h = loadHome(); h.ready("pi"); start(h); lifecycle(h, "tool_started");
+    h.socket.emit(result("cancelled")); h.socket.emit(complete("cancelled"));
+    assert.equal(h.chat.querySelector(".agent-task-progress").textContent, "已取消");
+    assert(!h.chat.querySelector(".agent-task-list").lastChild.textContent.includes("完成"));
   });
   for (const [event, status, label] of [
     ["task_completed", "failed", "失败"], ["task_failed", "completed", "已完成"],
@@ -302,9 +333,10 @@ async function run() {
     assert(controls.parentNode === h.composer, "controls must be a direct composer row, not inside .fill");
     assert(!h.fill.contains(controls));
     assert.strictEqual(h.input.parentNode, h.fill);
-    assert(!controls.hidden);
+    assert(controls.hidden);
     assert(h.button("停止").disabled && h.button("继续").disabled && h.button("开始新请求").disabled);
-    start(h); h.button("停止").click();
+    start(h); assert(!controls.hidden && !h.button("停止").hidden);
+    assert(h.button("继续").hidden); h.button("停止").click();
     assert.deepEqual(h.socket.sent.at(-1), {type: "cancel", turn_id: turn});
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
     assert(!h.button("继续").disabled && !h.button("开始新请求").disabled);
@@ -887,7 +919,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261111-source-check-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261112-chat-send-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");

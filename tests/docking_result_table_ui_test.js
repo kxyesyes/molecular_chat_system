@@ -58,18 +58,28 @@ function harness() {
 
 const rows = [
   { pose: 1, binding_energy: -8.4, ligand_efficiency: null, rmsd_lb: 0, rmsd_ub: 0 },
-  { pose: 2, binding_energy: -6.2, ligand_efficiency: null, rmsd_lb: 0.9, rmsd_ub: 2.7 },
+  { pose: 2, binding_energy: -6.234, ligand_efficiency: null, rmsd_lb: 0.423, rmsd_ub: 1.863 },
 ];
 const { context, get } = harness();
 
 assert.equal(typeof context.renderDockingResultsTable, "function");
+get("pose-select").value = "2";
+vm.runInContext('renderedInteractionPose = {jobId: "job-1", pose: 1}', context);
+assert.throws(() => context.selectedExportPose("job-1"), /三维结构/);
+vm.runInContext('renderedInteractionPose = {jobId: "job-1", pose: 2, overlay: true}', context);
+assert.throws(() => context.selectedExportPose("job-1"), /一个构象/);
+vm.runInContext('renderedInteractionPose = {jobId: "job-1", pose: 2}', context);
+assert.equal(context.selectedExportPose("job-1"), 2);
+assert.throws(() => context.selectedExportPose("other-job"), /三维结构/);
 context.renderDockingResultsTable(
   { job_id: "job-1", total_poses: 2, best_pose: { pose: 1 }, results: rows },
   { restored: false },
 );
 assert.match(get("results-content").innerHTML, /结构编号/);
 assert.match(get("results-content").innerHTML, /-8\.4/);
-assert.match(get("results-content").innerHTML, /2\.7/);
+for (const value of ["-6.234", "0.423", "1.863", "Vina"]) {
+  assert(get("results-content").innerHTML.includes(value), "retain verified Vina result " + value);
+}
 assert.match(get("results-content").innerHTML, /viewPose\(2\)/);
 
 context.renderDockingResultsTable(

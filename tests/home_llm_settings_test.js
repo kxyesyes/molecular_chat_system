@@ -136,7 +136,7 @@ function harness(responses = []) {
     },
   });
   vm.runInContext("let agentModelStatusRequestVersion = 0; let agentReadinessRequestVersion = 0; let agentReadiness = \"unknown\"; let agentConfigInputVersion = 0; let agentConfigSavedInputVersion = null; let agentConfigDraftKeyPresent = false; let agentConfigFingerprint = \"\"; let agentWireMode = \"native\"; let authoritativeAgentConfigFingerprint = \"\"; let llmConfigSaveGeneration = 0; let modelSwitchRequestVersion = 0; let authoritativeAgentModelName = \"\"; let ws = null; let decisionMode = true; let decisionWaiting = null; let decisionTurn = null; let decisionAbandonAwait = null; let protocolDesyncedSocket = null; const WebSocket = { OPEN: 1 };", context);
-  for (const name of ["openLlmSettings", "closeLlmSettings", "fillLlmSettingsForm", "collectLlmSettingsForm", "markLlmConfigInputChanged", "getAgentConfigFingerprint", "setLlmSettingsStatus", "testLlmConfig", "saveLlmConfig", "applyAgentModelLabel", "setAgentReadiness", "markAgentReadyFromSuccessfulTurn", "refreshAgentModelStatus", "refreshAgentReadiness", "ensureAgentReady", "sendDecisionMessage", "renderTransportStatus", "updateConnectionStatus", "bindEvents", "handleModelChange", "getModelDisplayName"]) {
+  for (const name of ["openLlmSettings", "closeLlmSettings", "fillLlmSettingsForm", "collectLlmSettingsForm", "markLlmConfigInputChanged", "getAgentConfigFingerprint", "setLlmSettingsStatus", "testLlmConfig", "saveLlmConfig", "applyAgentModelLabel", "setAgentReadiness", "updateAgentReadinessFromTurn", "refreshAgentModelStatus", "refreshAgentReadiness", "sendDecisionMessage", "renderTransportStatus", "updateConnectionStatus", "bindEvents", "handleModelChange", "getModelDisplayName"]) {
     vm.runInContext(extractFunction(name), context, { filename: `main.js:${name}` });
   }
   return { context, elements, requests, toasts, storageAccess };
@@ -806,15 +806,19 @@ test("connected transport status does not claim Agent readiness", () => {
   assert.equal(elements.agentModelReadiness.textContent, "待测试");
 });
 
-test("a successful Agent turn proves readiness for the unchanged saved model", () => {
+test("only a verified model call can prove the saved model ready", () => {
   const { context, elements } = harness();
   context.applyAgentModelLabel("deepseek-v4-pro");
-  context.markAgentReadyFromSuccessfulTurn();
+  context.updateAgentReadinessFromTurn();
+  assert.notEqual(elements.agentModelReadiness.textContent, "已就绪");
+  context.updateAgentReadinessFromTurn({model_call_succeeded: true});
   assert.equal(elements.agentModelReadiness.textContent, "已就绪");
+  context.updateAgentReadinessFromTurn({stop_reason: "model_authentication_failed"});
+  assert.equal(elements.agentModelReadiness.textContent, "不可用");
 
   context.setAgentReadiness("unknown");
   context.markLlmConfigInputChanged();
-  context.markAgentReadyFromSuccessfulTurn();
+  context.updateAgentReadinessFromTurn({model_call_succeeded: true});
   assert.equal(elements.agentModelReadiness.textContent, "待测试");
 });
 
@@ -921,19 +925,24 @@ test("settings markup omits verbose persistence and API-key instructions", () =>
   assert.doesNotMatch(source, /已保存，无需重复填写|清除本机用户配置目录|配置保存在仓库之外|配置已读取。API Key 不会回传明文/);
 });
 
-test("unready Agent probe blocks a decision chat send", async () => {
-  const { context, elements, requests } = harness([
-    { success: true, config: defaults, agent: { ...defaults, role: "agent", wire_mode: "native" } },
-    { success: false, model: defaults.model_name, message: "Agent 连接测试失败" },
-  ]);
-  let sent = 0;
-  context.ws = { readyState: 1, send: () => { sent += 1; } };
-  elements.input.value = "你好";
+test("saved configuration dispatches a property request without a model probe", async () => {
+  const { context, elements, requests } = harness();
+  const sent = [];
+  Object.assign(context, {
+    HomeAdvancedOptions: {getConfig: () => ({})}, ragEnabled: false, toolsEnabled: true,
+    scientificReferences: null, decisionResultFormat: null, evidenceReportLifecycle: null,
+    moleculeCandidateLifecycle: {startRequest() {}}, enterChatMode() {}, addUserMessage() {},
+    showTypingIndicator() {}, updateDecisionControls() {},
+    sendDecisionControl(payload) { sent.push(payload); return true; },
+  });
+  elements.chatContainer = {};
+  elements.input.value = "计算 CCO 的分子量和 LogP";
+  context.setAgentReadiness("unavailable");
 
   await context.sendDecisionMessage();
 
-  assert.deepEqual(requests.map(request => request.url), ["/api/llm/config", "/api/llm/test"]);
-  assert.equal(sent, 0);
+  assert.equal(requests.length, 0);
+  assert.deepEqual(sent.map(item => item.message), ["计算 CCO 的分子量和 LogP"]);
   assert.equal(elements.agentModelReadiness.textContent, "不可用");
 });
 
@@ -949,13 +958,13 @@ test("send readiness does not overwrite a draft typed before config load", async
 
   await context.sendDecisionMessage();
 
-  assert.deepEqual(requests.map(request => request.url), ["/api/llm/test"]);
-  assert.equal(JSON.parse(requests[0].options.body).model_name, "draft-model");
+  assert.equal(requests.length, 0);
   assert.equal(sent, 0);
   assert.equal(elements.llmModelName.value, "draft-model");
 });
 
 test("homepage loads the updated settings script instead of the stale cached version", () => {
   const activeHtml = html.replace(/<!--[\s\S]*?-->/g, "");
-  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261111-source-check-v1"></script>'));
+  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261112-chat-send-v1"></script>'));
+  assert.match(activeHtml, /<button[^>]*class="btn"[^>]*aria-label="发送消息"/);
 });

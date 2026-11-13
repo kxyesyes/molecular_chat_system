@@ -36,6 +36,11 @@ def test_compiled_admet_summary_previews_verified_endpoints(admet_web_handler, q
         result = result_of(frames)
         assert result['status'] == 'completed'
         assert result['details_state'] == 'available'
+        tool_events = [frame['event'] for frame in frames if frame['type'] == 'agent_event'
+                       and frame['event']['event'] == 'tool_completed']
+        assert len(tool_events) == (2 if property_expected else 1)
+        assert all('data' not in event['payload'] and event['payload']['status'] == 'succeeded'
+                   for event in tool_events)
         answer = result['display_answer']
         assert 'ADMET 预测结果' in answer
         assert '返回端点：' in answer and '| 端点 | 模型预测值 | 单位 | 类型 |' in answer
@@ -104,6 +109,26 @@ def test_compiled_preview_is_opt_in_and_does_not_change_source():
     assert 'test-endpoint' in (web_scientific_display(result, concise=True) or '')
     assert web_scientific_display(result) is None
     assert result.to_legacy_dict() == before
+
+
+def test_compiled_batch_details_retain_large_multi_molecule_observation():
+    from src.web.result_details_projection import project_result_details
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
+    result = compiled_fixture()
+    result.metadata['workflow_version'] = 'web-admet-batch-v1'
+    first = result.tool_results[0].data[0]
+    first['admet']['endpoints'] = {
+        f'endpoint-{i}': {'value': 0.125, 'dataset_description': 'a' * 300} for i in range(60)}
+    result.tool_results[0].data = [{**first, 'smiles': smiles} for smiles in ('CCO', 'CCN', 'CCC', 'CCCC')]
+    def project():
+        return project_result_details(result, summary='', status='completed', error=None, warnings=[])
+    assert len(json.dumps(result.tool_results[0].data)) > 64 * 1024
+    actual = project()['tool_result_sequence'][0]['data']
+    assert [row['smiles'] for row in actual] == ['CCO', 'CCN', 'CCC', 'CCCC']
+    assert all(len(row['admet']['endpoints']) == 60 for row in actual)
+    result.tool_results[0].data[-1]['oversized'] = 'x' * 65536
+    with pytest.raises(DecisionBoundaryError):
+        project()
 
 
 def test_bound_web_activity_summary_previews_validated_prediction():

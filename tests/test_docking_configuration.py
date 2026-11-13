@@ -168,6 +168,31 @@ class DockingConfigurationTest(unittest.TestCase):
             self.assertEqual(trace["analysis_receptor_method"], "reduce")
             self.assertEqual(trace["analysis_receptor_hydrogens"], "explicit")
 
+    def test_reduce_316_exit_one_requires_complete_receptor_and_clean_diagnostics(self):
+        heavy = "ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00 20.00           N"
+        hydrogen = "ATOM      2  H   ALA A   1       0.900   0.000   0.000  1.00 20.00           H"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, output = root / "input.pdb", root / "out.pdb"
+            source.write_text(heavy + "\nEND\n")
+            dictionary = root / "reduce_wwPDB_het_dict.txt"
+            dictionary.touch()
+            service = MolecularDockingService()
+            service.reduce_cmd = str(root / "reduce.exe")
+            for code, atoms, stderr, expected in [
+                (1, [heavy, hydrogen], "", "reduce"),
+                (1, [hydrogen], "", "copy_unavailable"),
+                (1, [heavy, hydrogen], "ERROR CTab(dict): could not open", "copy_unavailable"),
+                (2, [heavy, hydrogen], "", "copy_unavailable"),
+            ]:
+                with self.subTest(code=code, atoms=len(atoms), stderr=stderr):
+                    stdout = "\n".join(["USER  MOD reduce.3.16.111118 H: found=0, std=0, add=1, rem=0, adj=1", *atoms, "END", ""])
+                    trace = {}
+                    with patch.object(CommandAdapter, "run", return_value=subprocess.CompletedProcess([], code, stdout, stderr)) as run:
+                        service.prepare_analysis_receptor(str(source), str(output), trace=trace)
+                    self.assertIn(str(dictionary), run.call_args.args[0])
+                    self.assertEqual(trace["analysis_receptor_method"], expected)
+
     def test_configure_accepts_direct_prepare_receptor_command(self):
         with tempfile.TemporaryDirectory(prefix="docking_config_") as tmp:
             root = Path(tmp)
