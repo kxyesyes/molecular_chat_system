@@ -55,6 +55,9 @@ def _adjacent_molecule_label(query, smiles):
 
 def recorded_descriptor(query, history, session_id):
     """Read a requested value from the immediately preceding, session-bound record."""
+    if deictic_property_match(query):
+        # The property workflow resolves this structure or asks which molecule to use.
+        return None
     match = re.fullmatch(
         r'\s*(?:请问\s*|请\s*)?(?P<prior>(?:使用|根据|基于|查看)?\s*(?:刚才|上轮|上一轮|之前)的?'
         r'(?:(?:计算)?(?:结果|记录)[，,：:]\s*)?)?(?:(?P<subject>[\w-]{1,80})的\s*)?'
