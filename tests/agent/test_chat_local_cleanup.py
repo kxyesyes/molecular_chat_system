@@ -303,13 +303,15 @@ def test_rag_capability_paths_preserve_raw_receipt_and_cap_accepted_cards(tmp_pa
     assert observation.data == before[:count] and len(observation.data) == count
     assert observation.evidence[0]['retrieval_receipt']['diagnostics']['requested_k'] == count
     packet, = [frame for frame in frames if frame['type'] == 'rag_info']
-    assert set(packet) == {'type', 'molecules', 'message'}
+    assert set(packet) == {'type', 'molecules', 'message', 'turn_id', 'trace_id'}
+    assert packet['turn_id'] == complete['turn_id']
+    assert packet['trace_id'] == complete['trace_id'] == result.trace_id
     assert len(packet['molecules']) == count, 'same immutable request cap with science tools on or off'
     approved, = [block for block in json.loads(result.final_answer)['observations']
                   if block['tool'] == 'rag_search']
     assert packet['molecules'] == [rag_info_molecule(row) for row in approved['data'][:count]]
     card = packet['molecules'][0]
-    assert card['smiles'] == 'CCO' and card['similarity'] == .988
+    assert card['smiles'] == 'CCO' and card['similarity'] == before[0]['similarity_score']
     assert card['source_index'] == before[0]['source_index']
     assert card['provenance'] == approved['data'][0]['provenance']
     assert card['provenance']['source_sha256'] == before[0]['provenance']['source_sha256']
