@@ -160,6 +160,16 @@ def test_durable_artifact_is_available_through_legacy_viewer_result_route(tmp_pa
     assert b"MODEL 2" in response.content
 
 
+def test_pdbqt_file_download_retains_original_line_endings(tmp_path, monkeypatch):
+    from src.task_runtime.completion import DockingCompletionStore
+    raw = _pdbqt_with_two_poses().replace(b"\n", b"\r\n")
+    client = _build_client(tmp_path)
+    monkeypatch.setattr(DockingCompletionStore, "read_pose", lambda self, job_id: raw)
+    url = f"/api/docking/result/{TASK_ID}"
+    assert client.get(url, headers={"Accept": "application/octet-stream"}).content == raw
+    assert client.get(url).content == raw.replace(b"\r\n", b"\n")
+
+
 def test_region_search_returns_candidates_for_uploaded_receptor(tmp_path):
     client = _build_client(tmp_path)
     receptor = (Path(__file__).resolve().parents[1] / "data/samples/PDE4A_apo_6FG5.pdb").read_bytes()
@@ -179,6 +189,21 @@ def test_durable_artifact_supports_pose_sdf_for_every_pose(tmp_path):
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("chemical/x-mdl-sdfile")
     assert b"4.000" in response.content
+
+
+def test_durable_report_uses_owned_pose_and_matches_selected_model(tmp_path):
+    from src.web.routes.docking_report_routes import register_docking_report_routes
+    from src.web.routes.api_routes import _validate_report_base64_payload
+
+    client = _build_client(tmp_path)
+    register_docking_report_routes(client.app, validate_report_base64_payload=_validate_report_base64_payload)
+    url = f"/api/docking/report/{TASK_ID}"
+    response = client.post(url, json={"pose": 2, "format": "md"})
+    assert response.status_code == 200, response.text
+    assert "所选构象 Pose 2" in response.text and "Vina 评分 -6.500" in response.text
+    assert "相互作用分析不可用" in response.text
+    assert client.post(url, json={"pose": 3}).status_code == 422
+    assert client.post("/api/docking/report/missing", json={"pose": 2}).status_code == 404
 
 
 def test_durable_interaction_analysis_uses_owned_staged_inputs(tmp_path, monkeypatch):

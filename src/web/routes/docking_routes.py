@@ -1016,14 +1016,13 @@ def setup_docking_routes(
             # Preserve the legacy text response's universal-newline behavior
             # while durable artifacts continue to be read through the same
             # ownership-checked byte path.
-            content = (await read_owned_docking_pose(job_id, request)).replace(
-                b"\r\n", b"\n"
-            )
+            content = await read_owned_docking_pose(job_id, request)
+            raw_download = request.headers.get("accept") == "application/octet-stream"
 
             return Response(
-                content=content,
-                media_type="text/plain",
-                headers={"Content-Disposition": f"attachment; filename=docking_result_{job_id}.pdbqt"}
+                content=content if raw_download else content.replace(b"\r\n", b"\n"),
+                media_type="application/octet-stream" if raw_download else "text/plain",
+                headers={"Content-Disposition": f"attachment; filename=docking_result_{job_id}.pdbqt", "Vary": "Accept"}
             )
 
         except HTTPException:
@@ -1252,6 +1251,11 @@ def setup_docking_routes(
         if analysis_receptor_trace:
             result.setdefault("provenance", {})["analysis_receptor"] = analysis_receptor_trace
         return result
+
+    # Reports use the same owner-scoped artifact and interaction readers as the viewer.
+    app.state.docking_report_pose = read_owned_docking_pose
+    app.state.docking_report_task = resolve_owned_durable_docking_task
+    app.state.docking_report_interactions = get_docking_interactions
 
     @app.get("/api/docking/pose_sdf/{job_id}")
     async def get_docking_pose_sdf(job_id: str, request: Request, pose: int = 1):

@@ -63,6 +63,14 @@ const rows = [
 const { context, get } = harness();
 
 assert.equal(typeof context.renderDockingResultsTable, "function");
+get("pose-select").value = "2";
+vm.runInContext('renderedInteractionPose = {jobId: "job-1", pose: 1}', context);
+assert.throws(() => context.selectedExportPose("job-1"), /三维结构/);
+vm.runInContext('renderedInteractionPose = {jobId: "job-1", pose: 2, overlay: true}', context);
+assert.throws(() => context.selectedExportPose("job-1"), /一个构象/);
+vm.runInContext('renderedInteractionPose = {jobId: "job-1", pose: 2}', context);
+assert.equal(context.selectedExportPose("job-1"), 2);
+assert.throws(() => context.selectedExportPose("other-job"), /三维结构/);
 context.renderDockingResultsTable(
   { job_id: "job-1", total_poses: 2, best_pose: { pose: 1 }, results: rows },
   { restored: false },

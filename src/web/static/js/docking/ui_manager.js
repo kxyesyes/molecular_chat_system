@@ -207,7 +207,7 @@ function overlayTopN() {
         viewer.zoomTo();
         viewer.render();
         const selected = Number(document.getElementById("pose-select")?.value);
-        if (poseSdfs[selected - 1]) renderedInteractionPose = {jobId, pose: selected};
+        if (poseSdfs[selected - 1]) renderedInteractionPose = {jobId, pose: selected, overlay: poseSdfs.filter(Boolean).length > 1};
         restoreDockingInteractions();
       } catch (e) {
         console.error("叠加多个 Pose 失败:", e);
@@ -932,7 +932,7 @@ function renderDurableTaskSuccess(record, result, options = {}) {
       <div style="font-size: 12px; color: #64748b; margin-top: 8px;">${poseMappingText}</div>
     </div>
     <div class="action-buttons">
-      <button class="action-btn btn-primary" onclick="downloadResults('${Safe.escapeInlineJsString(result.task_id)}')">下载已验证 PDBQT</button>
+      <button class="action-btn btn-primary" onclick="downloadResults('${Safe.escapeInlineJsString(result.task_id)}')">下载全部构象 PDBQT</button>
       ${viewBestPoseButton}
       ${restored ? "" : '<button class="action-btn btn-secondary" onclick="rerunDocking()">重新对接</button>'}
     </div>`;
@@ -1321,8 +1321,10 @@ function renderDockingResultsTable(data, options = {}) {
 
   const actionButtons = safeJobId
     ? `<div class="action-buttons docking-result-actions">
-        <button class="action-btn btn-primary" aria-label="下载已验证对接结果" onclick="downloadResults('${safeJobId}')">下载已验证 PDBQT</button>
-        <button class="action-btn btn-secondary" aria-label="生成对接报告" onclick="generateReport('${safeJobId}')">生成报告</button>
+        <button class="action-btn btn-primary" aria-label="下载已验证对接结果" onclick="downloadResults('${safeJobId}')">下载全部构象 PDBQT</button>
+        ${canViewPose ? `<button class="action-btn btn-secondary" onclick="downloadResults('${safeJobId}', true)">下载所选构象 SDF</button>` : ""}
+        <select aria-label="报告格式" id="docking-report-format"><option value="md">Markdown</option><option value="html">HTML</option><option value="zip">ZIP</option></select>
+        <button class="action-btn btn-secondary" aria-label="生成对接报告" onclick="generateReport('${safeJobId}', ${canViewPose})">生成报告</button>
         ${restored ? "" : '<button class="action-btn btn-secondary" onclick="rerunDocking()">重新对接</button>'}
       </div>`
     : "";
@@ -1783,82 +1785,57 @@ function viewPose(poseNumber) {
     });
 }
 
-// 下载结果
-function downloadResults(jobId) {
-  if (!jobId) {
-    const id = getCurrentJobId && getCurrentJobId();
-    jobId = id || jobId;
+async function saveDockingDownload(response, fallbackName) {
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || error.message || "导出失败");
   }
-  if (!jobId) {
-    alert("缺少任务ID，无法导出结果");
-    return;
-  }
-
-  fetch(`/api/docking/result/${jobId}`)
-    .then((r) => {
-      if (!r.ok) return Promise.reject("导出结果失败");
-      const cd = r.headers.get("Content-Disposition") || "";
-      const match = cd.match(/filename=([^;]+)$/i);
-      const filename = match ? match[1] : `docking_result_${jobId}.pdbqt`;
-      return r.blob().then((blob) => ({ blob, filename }));
-    })
-    .then(({ blob, filename }) => {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    })
-    .catch((e) => {
-      alert(typeof e === "string" ? e : "导出结果失败");
-    });
+  const filename = response.headers.get("Content-Disposition")?.match(/filename="?([^";]+)"?/i)?.[1];
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename || fallbackName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// 生成报告
-function generateReport(jobId) {
-  if (!jobId) {
-    const id = getCurrentJobId && getCurrentJobId();
-    jobId = id || jobId;
+function selectedExportPose(jobId) {
+  const pose = Number(document.getElementById("pose-select")?.value);
+  if (!isRenderedInteractionPose(jobId, pose) || renderedInteractionPose.overlay) {
+    throw new Error("请先在结果表中查看一个构象，待三维结构载入后再导出。");
   }
-  if (!jobId) {
-    alert("缺少任务ID，无法生成报告");
-    return;
-  }
+  return pose;
+}
 
-  const format = "md";
+async function downloadResults(jobId = getCurrentJobId(), selected = false) {
+  try {
+    if (!jobId) throw new Error("缺少任务ID，无法导出结果");
+    const id = encodeURIComponent(jobId);
+    const pose = selected ? selectedExportPose(jobId) : null;
+    const url = selected ? `/api/docking/pose_sdf/${id}?pose=${pose}` : `/api/docking/result/${id}`;
+    const response = selected ? await fetch(url) : await fetch(url, {headers: {Accept: "application/octet-stream"}});
+    await saveDockingDownload(response, selected ? `pose_${pose}.sdf` : `docking_result_${jobId}.pdbqt`);
+  } catch (error) { alert(error.message); }
+}
 
-  fetch(`/api/docking/report/${jobId}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      format: format,
-      viewer_png_base64: null,
-      smiles_images: [],
-    }),
-  })
-    .then((r) => {
-      if (!r.ok) return Promise.reject("生成报告失败");
-      const cd = r.headers.get("Content-Disposition") || "";
-      const match = cd.match(/filename=([^;]+)$/i);
-      const filename = match ? match[1] : `docking_report_${jobId}.${format}`;
-      return r.blob().then((blob) => ({ blob, filename }));
-    })
-    .then(({ blob, filename }) => {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    })
-    .catch((e) => {
-      alert(typeof e === "string" ? e : "生成报告失败");
+async function generateReport(jobId, withPose = true) {
+  try {
+    const format = document.getElementById("docking-report-format")?.value || "md";
+    const payload = {format};
+    if (withPose) {
+      payload.pose = selectedExportPose(jobId);
+      viewer.render();
+      const uri = viewer.pngURI();
+      if (!uri.startsWith("data:image/png;base64,")) throw new Error("无法读取当前三维视图");
+      payload.viewer_png_base64 = uri.slice("data:image/png;base64,".length);
+    }
+    const response = await fetch(`/api/docking/report/${encodeURIComponent(jobId)}`, {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload),
     });
+    await saveDockingDownload(response, `docking_report_${jobId}.${format}`);
+  } catch (error) { alert(error.message); }
 }
 
 // 重置对接

@@ -6,4 +6,6 @@
 
 载入配体后点击「开始分子对接分析」。每个任务搜索当前选定的一个区域。完成后可从 Vina 结果表逐个查看姿势，在三维视图叠加前 N 个构象，或下载 PDBQT。Vina 评分单位为 kcal/mol。
 
+「下载全部构象 PDBQT」保留整次 Vina 输出。点击某行的「查看」后，「下载所选构象 SDF」导出该姿势的配体坐标。报告支持 Markdown、HTML 和 ZIP，记录所选 Pose、Vina 评分、相互作用分析、当前三维截图和完整评分表。ZIP 另含原始多构象 PDBQT 和以实际 Pose 编号命名的 PDB。历史任务未恢复三维视图时，报告只提供结果概览。
+
 接口沿用浏览器会话。`POST /api/docking/cavities` 接收 `protein_file`，返回识别方法、网格间距和候选的 `center`、`size`（Å）、`volume`（Å³）。选择候选或手动确认坐标后，向 `POST /api/docking/tasks` 提交受体、配体、盒中心、边长及 `manual_center=true`。随后通过任务状态、结果摘要和逐姿势 SDF 接口读取实际结果。
