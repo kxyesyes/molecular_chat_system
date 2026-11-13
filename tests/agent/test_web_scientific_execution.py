@@ -3,8 +3,6 @@
 import asyncio
 from dataclasses import replace
 import json
-from pathlib import Path
-import tempfile
 
 import pytest
 
@@ -20,9 +18,8 @@ from src.web.scientific_obligations import ScientificObligationCompiler
 
 
 @pytest.fixture
-def web_handler():
-    state_dir = Path(tempfile.mkdtemp(prefix="medchat-task3-", dir=Path.cwd()))
-    store = SQLiteAgentStateStore(state_dir / "agent.sqlite")
+def web_handler(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / "agent.sqlite")
     handler = make_web_handler([PropertyCalculator()], store, model=PlannedWebModel())
     try:
         yield handler
@@ -32,9 +29,8 @@ def web_handler():
 
 
 @pytest.fixture
-def admet_web_handler():
-    state_dir = Path(tempfile.mkdtemp(prefix="medchat-admet-task3-", dir=Path.cwd()))
-    store = SQLiteAgentStateStore(state_dir / "agent.sqlite")
+def admet_web_handler(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / "agent.sqlite")
     handler = make_web_handler(
         [PropertyCalculator(), ADMETPredictor(backend=FakeBackend())],
         store,
