@@ -455,7 +455,7 @@ _UNREVIEWED_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _METRIC_LIST_INTRODUCER = re.compile(
     r"\b(?:including|include|report|reports|return|returns|calculate|compute|"
     r"measure|predict|evaluate|and|contains?|with|plus)\b|"
-    r"包括|包含|返回|(?<!写进|写入|放进|纳入|用于)报告|计算|测量|"
+    r"包括|包含|返回|(?<!写进|写入|放进|纳入|用于)报告|计算(?:\s*一下)?|测量|"
     rf"{_PREDICT_ACTION}|评估|给出|列出|并|以及|和",
     re.I,
 )
@@ -1003,20 +1003,20 @@ class ScientificObligationCompiler:
 
     @staticmethod
     def is_bare_generic_molecule_request(query: str) -> bool:
-        """Recognize a complete generic subject, never just its leading words.
-
-        A later named/arbitrary subject cannot be replaced by a SMILES supplied
-        on Continue. Keep this grammar bounded to the existing bare calculation
-        form and reuse the compiler's reviewed metric/capability vocabulary.
-        """
+        """A reply may fill a missing molecule only in a wholly generic request."""
         terms = [pattern.pattern for _, patterns in _METRIC_PATTERNS for pattern in patterns]
         terms += [_PROPERTY_REQUEST.pattern, _DRUG_LIKENESS_REQUEST.pattern, _ADMET_PATTERN.pattern]
-        term = '(?:' + '|'.join(terms) + ')'
-        return re.fullmatch(
-            r'\s*(?:请\s*)?计算\s*分子\s*的\s*' + term
-            + r'(?:\s*(?:和|以及|及|与|、|，|,|and)\s*' + term + r')*\s*[。.!?！？]?\s*',
-            query, flags=re.I,
-        ) is not None
+        term = '(?:' + '|'.join(terms) + r')(?:\s*(?:特征|风险))?'
+        action = r'(?:计算|分析|评估|预测|返回|给出|列出)'
+        subject = r'(?:(?:这个|该)?分子\s*的\s*)?'
+        first = r'(?:请\s*)?(?:帮我\s*)?' + action + r'\s*(?:一下\s*)?' + subject + term
+        separator = r'\s*(?:[、，,。；;\n]\s*(?:并且?|再|也)?|以及|并且?|再|和|及|与|and)\s*'
+        chinese = first + '(?:' + separator + '(?:' + action + r'\s*)?' + term + ')*'
+        metrics = term + r'(?:\s*(?:,|and)\s*' + term + ')*'
+        english = (r'(?:please\s+)?(?:calculate|compute|predict|evaluate|analy[sz]e|show)\s+'
+                   r'(?:the\s+)?' + metrics + r'(?:\s+(?:for|of)\s+(?:this|the)\s+molecule)?')
+        return re.fullmatch(r'\s*(?:' + chinese + '|' + english + r')\s*[。.!?！？]?\s*',
+                            query, flags=re.I) is not None
 
     def clarification_tools(self, query: str) -> tuple[str, ...]:
         """Freeze the same reviewed obligations before the subject is supplied."""

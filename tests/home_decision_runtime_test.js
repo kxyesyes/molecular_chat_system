@@ -92,7 +92,7 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
   const document = {readyState: "loading", addEventListener() {}, createElement: tag => new Element(tag),
     querySelector: s => body.querySelector(s), querySelectorAll: s => body.querySelectorAll(s),
     getElementById: id => body.querySelector("#" + id)};
-  const renderer = {scrollToBottom() {}, getCurrentTime: () => "12:00", updateConnectionStatus() {}, showNotification() {}};
+  const renderer = {getCurrentTime: () => "12:00", updateConnectionStatus() {}, showNotification() {}};
   const window = {location: {host: "example.invalid", protocol: "http:"}, addEventListener() {},
     sessionStorage: {
       getItem: key => key === "medchat.decision.waiting.v1" ? storage.get(key) || null : stored,
@@ -116,9 +116,11 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
       return {ok: true, json: async () => vm.runInContext("JSON.parse", context)(JSON.stringify({success: true,
         data: request ? await request(url, JSON.parse(options.body)) : {confirmed: true}}))};},
   });
-  for (const file of ["config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js", "docking_consent.js"]) {
+  for (const file of ["chat_renderer.js", "config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js", "docking_consent.js"]) {
     vm.runInContext(fs.readFileSync(path.join(home, file), "utf8"), context, {filename: file});
   }
+  context.HomeChatRenderer = window.HomeChatRenderer = Object.assign(window.HomeChatRenderer, renderer);
+  context.HomeState.elements = {chatContainer: chat};
   context.HomeConfig = window.HomeConfig;
   let source = fs.readFileSync(path.join(home, "main.js"), "utf8");
   // Expose lexical entry points only in this VM; run the complete real script.
@@ -198,6 +200,51 @@ async function run() {
   const lifecycle = (h, event, t = turn, tr = trace, message = event) => h.sockets.at(-1).emit({
     type: "agent_event", turn_id: t, event: {trace_id: tr, event, message},
   });
+  await test("allocation heartbeats belong to the pending calculation and clear on execution", () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    const heartbeat = {type: "agent_status", stage: "allocation", turn_id: turn, trace_id: trace,
+      message: "正在分配任务，尚未启动科学工具…"};
+    h.socket.emit({...heartbeat, turn_id: nonce}); h.socket.emit({...heartbeat, trace_id: nonce});
+    assert(!h.chat.textContent.includes(heartbeat.message));
+    h.socket.emit(heartbeat); h.socket.emit(heartbeat);
+    assert.equal(h.chat.textContent.split(heartbeat.message).length, 2);
+    lifecycle(h, "tool_started");
+    assert(!h.chat.textContent.includes(heartbeat.message));
+    h.socket.emit(result("partial")); h.socket.emit(heartbeat);
+    assert(!h.chat.textContent.includes(heartbeat.message));
+    h.socket.emit(complete("partial"));
+  });
+  await test("long calculations follow the bottom until the reader scrolls up; a new send follows again", () => {
+    const h = loadHome();
+    const chat = h.chat;
+    let top = 0;
+    Object.defineProperties(chat, {
+      clientHeight: {value: 400},
+      scrollHeight: {get: () => 800 + chat.textContent.length},
+      scrollTop: {get: () => top, set: y => {top = Math.min(y, chat.scrollHeight - chat.clientHeight);}},
+    });
+    chat.scrollTop = chat.scrollHeight;
+    h.ready("pi"); start(h);
+    lifecycle(h, "tool_started");
+    chat.scrollTop = 70;
+    lifecycle(h, "tool_completed");
+    h.flushTimers();
+    assert.equal(top, 70, "progress or a queued scroll displaced the reader");
+    const frame = result("completed");
+    frame.final_answer = "a ".repeat(3000);
+    h.socket.emit(frame);
+    assert.equal(top, 70, "the whole result displaced the reader");
+    chat.scrollTop = chat.scrollHeight;
+    h.socket.emit(complete("completed"));
+    assert.equal(top, chat.scrollHeight - chat.clientHeight, "returning to the bottom resumes following");
+    chat.scrollTop = 70;
+    h.input.value = "继续解释这两组数值"; h.send();
+    assert.equal(top, chat.scrollHeight - chat.clientHeight, "active submission should reveal the new turn");
+    const next = "4".repeat(32), nextTrace = "5".repeat(32);
+    h.socket.emit(accepted(next, nextTrace));
+    h.socket.emit({...frame, turn_id: next, trace_id: nextTrace});
+    assert.equal(top, chat.scrollHeight - chat.clientHeight, "a large result should follow a reader at the bottom");
+  });
   await test("a terminal result settles the panel if the last event was still running", () => {
     const h = loadHome(); h.ready("pi"); start(h); lifecycle(h, "tool_started");
     h.socket.emit(result("cancelled")); h.socket.emit(complete("cancelled"));
@@ -221,8 +268,8 @@ async function run() {
     h.socket.emit(result(status, turn, "5".repeat(32)));
     assert.equal(progress.textContent, "等待结果验证");
     h.socket.emit(result(status));
-    assert.equal(progress.textContent, label);
-    assert.equal(latest().querySelector("strong").textContent, label);
+    assert.equal(progress.textContent, status === "completed" ? "正在交付结果" : label);
+    assert.equal(latest().querySelector("strong").textContent, status === "completed" ? "结果校验完成" : label);
     h.socket.emit(complete(status));
     assert.equal(progress.textContent, label);
   });
@@ -239,10 +286,10 @@ async function run() {
     assert.equal(panel.querySelector(".agent-task-progress").textContent, "等待结果验证");
     h.socket.emit(result("completed", t2, confirmed ? tr2 : trace));
     h.socket.close();
-    const expected = confirmed ? "已完成" : "连接已断开，结果未确认";
+    const expected = confirmed ? "连接已断开，交付未确认" : "连接已断开，结果未确认";
     const item = panel.querySelector(".agent-task-list").lastChild;
     assert.equal(panel.querySelector(".agent-task-progress").textContent, expected);
-    assert.equal(item.querySelector("strong").textContent, expected);
+    assert.equal(item.querySelector("strong").textContent, confirmed ? "结果校验完成" : expected);
     assert(item.classList.contains(confirmed ? "is-complete" : "is-warning"));
     assert.equal(history.textContent, before);
   });
@@ -286,8 +333,11 @@ async function run() {
   });
   await test("a reconnected request cannot mutate the disconnected turn panel", () => {
     const h = loadHome(); h.ready("pi"); start(h); lifecycle(h, "task_started");
-    const first = h.chat.querySelector(".agent-task-panel"), before = first.textContent;
-    h.socket.close(); h.reconnect(); const current = h.sockets.at(-1); current.open(); h.ready("pi");
+    const first = h.chat.querySelector(".agent-task-panel");
+    h.socket.close();
+    assert.equal(first.querySelector(".agent-task-progress").textContent, "连接已断开，结果未确认");
+    const before = first.textContent;
+    h.reconnect(); const current = h.sockets.at(-1); current.open(); h.ready("pi");
     h.input.value = "CCN"; h.send();
     const t2 = "4".repeat(32), tr2 = "5".repeat(32);
     current.emit(accepted(t2, tr2)); lifecycle(h, "task_started", t2, tr2);
@@ -702,6 +752,67 @@ async function run() {
       assert(h.chat.querySelector('.decision-runtime-status').hidden);
     }
   });
+  for (const status of ['partial', 'completed']) await test(`attach only this turn's retrieved molecules to its ${status} answer`, async () => {
+    const h = loadHome(); h.ready('pi'); start(h);
+    const cards = {type: 'rag_info', turn_id: turn, trace_id: trace, molecules: [{smiles: 'CCCl'}]};
+    h.socket.emit({...cards, molecules: [{smiles: 'early'}]});
+    const frame = result(status);
+    frame.metadata.retrieval_performed = true;
+    h.socket.emit(frame); h.socket.emit(candidateEvent());
+    h.socket.emit({...cards, trace_id: '9'.repeat(32), molecules: [{smiles: 'wrong trace'}]});
+    h.socket.emit({...cards, turn_id: '9'.repeat(32), molecules: [{smiles: 'wrong turn'}]});
+    h.socket.emit(cards);
+    const warning = {type: 'status', stage: 'retrieval_cards', turn_id: turn, trace_id: trace,
+      message: '部分检索卡片格式无效，无法展示。'};
+    h.socket.emit({...warning, turn_id: '9'.repeat(32), message: 'wrong turn'});
+    h.socket.emit(warning);
+    h.socket.emit(complete(status)); await tick();
+    h.socket.emit(cards);
+    const box = h.chat.querySelector('.assistant-wrapper .message-box');
+    assert(box.classList.contains('complete'));
+    const notice = box.querySelector('.decision-runtime-status');
+    assert(!notice.hidden && notice.textContent.includes(warning.message) && !notice.textContent.includes('wrong turn'));
+    assert.equal(h.chat.querySelectorAll('.rag-info-container').length, 1);
+    assert.equal(box.querySelector('.rag-info-container details').textContent, '显示 SMILESCCCl');
+    assert(box.querySelector('[data-candidate-id="' + candidateEvent().candidate_set.candidates[0].candidate_id + '"]'));
+    assert.equal(h.requests.length, 1, 'the confirmed selection must still belong to the generated collection');
+  });
+  await test('a retrieval card render failure retains the accepted answer and releases the turn', () => {
+    const h = loadHome(); h.ready('pi'); start(h);
+    const frame = result('completed');
+    frame.metadata.retrieval_performed = true;
+    h.socket.emit(frame);
+    h.socket.emit({type: 'rag_info', turn_id: turn, trace_id: trace, molecules: [{smiles: 'CCO'}]});
+    const box = h.chat.querySelector('.assistant-wrapper .message-box');
+    const append = box.appendChild;
+    box.appendChild = function(child) {
+      if (child.className === 'rag-info-container') throw new Error('injected render failure');
+      return append.call(this, child);
+    };
+    h.socket.emit(complete('completed'));
+    assert(box.classList.contains('complete') && box.textContent.includes(frame.final_answer));
+    assert(box.textContent.includes('分子卡片暂时无法显示'));
+    assert.equal(h.chat.querySelector('.typing-indicator-wrapper'), null);
+    h.input.value = 'Explain the result'; h.send();
+    const chats = h.socket.sent.filter(row => row.type === 'chat');
+    assert.deepEqual(chats.map(row => row.message), ['Explain logP', 'Explain the result']);
+  });
+  await test('retrieval cards distinguish raw scores from missing or invalid measurements', () => {
+    const h = loadHome();
+    h.render.displayRAGInfo([
+      {smiles: 'CCO', similarity: -2, properties: {qed: '0.5invalid', logp: '1.5e-3', hba: '0x10'}},
+      {smiles: 'CCN', similarity: 0, properties: {logp: false}},
+      {smiles: 'CCCl', similarity: 3.5}, {smiles: 'CCC'}, {smiles: 'CCF', similarity: '0.9oops'},
+    ]);
+    const cards = h.chat.querySelectorAll('.molecule-card');
+    for (const [index, value] of ['-2', '0', '3.5', '未提供', '无效'].entries()) {
+      assert(cards[index].textContent.includes('检索得分：' + value), value);
+      assert(!cards[index].textContent.includes('% 相似'));
+    }
+    assert(cards[0].textContent.includes('1.5e-3') && !cards[0].textContent.includes('0.50'));
+    assert.equal(cards[0].textContent.split('无效').length - 1, 2, 'both malformed numeric fields remain unavailable');
+    assert(cards[1].textContent.includes('无效'), 'a boolean is not a measured property');
+  });
   await test('unrequested RAG does not imply target retrieval was skipped', () => {
     const h = loadHome(); h.ready('pi'); start(h);
     const frame = result('failed'); frame.metadata.rag_requested = false;
@@ -934,7 +1045,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261113-chat-rag-status-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261113-agent-delivery-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
@@ -1037,7 +1148,7 @@ async function run() {
   });
   for (const [status, label] of Object.entries({completed: "已完成", partial: "部分完成", waiting_for_input: "等待补充输入"})) {
     await test(`projection failure after ${status} is visible without rewriting scientific status`, async () => {
-      const h = loadHome(); h.ready("pi"); start(h); h.socket.emit(result(status));
+      const h = loadHome(); h.ready("pi"); start(h); lifecycle(h, "task_completed"); h.socket.emit(result(status));
       h.socket.emit(candidateEvent());
       const failedCompletion = {...complete("failed"),
         content: "结果展示未完成，请稍后重试。已完成的计算记录仍保留。",
@@ -1049,6 +1160,7 @@ async function run() {
       const state = h.chat.querySelector(".decision-runtime-status");
       assert(state.textContent.includes(label), "retain the earlier scientific status");
       assert(state.textContent.includes("结果展示失败"), "delivery failure must remain visible");
+      assert.equal(h.chat.querySelector(".agent-task-progress").textContent, "结果展示失败");
       assert(h.chat.textContent.includes(failedCompletion.content));
       assert(h.chat.textContent.includes("Measured value 0; unavailable is not zero."));
       assert.equal(h.requests.length, 0, "discard incomplete candidate projection without ACK");

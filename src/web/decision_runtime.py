@@ -109,15 +109,8 @@ def _oral_explanation_has_unrequested_descriptors(text, metrics):
 
 
 def _resumable_scientific_clarification(plan):
-    if plan is None or plan.status != 'clarification':
-        return False
-    if re.match(r'^\s*(?:请\s*)?计算\s*分子\s*的', plan.original_query) is not None:
-        # Validate the entire bare request before considering any later deictic
-        # word; a trailing "这个分子为阿司匹林" is still an explicit subject.
-        return (plan.missing_fields == ('smiles',)
-                and ScientificObligationCompiler.is_bare_generic_molecule_request(plan.original_query))
-    return any(marker in plan.original_query.casefold()
-               for marker in ('这个分子', '该分子', 'this molecule', 'the molecule'))
+    return (plan is not None and plan.status == 'clarification' and plan.missing_fields == ('smiles',)
+            and ScientificObligationCompiler.is_bare_generic_molecule_request(plan.original_query))
 
 
 def terminal_message_for_reason(reason):
@@ -533,6 +526,9 @@ class _TurnSender:
                                         'BBB', frame[key], flags=re.I)
         if frame['type'] in {'agent_event', 'agent_result', 'complete'}:
             frame['turn_id'] = self.turn.turn_id
+        elif frame['type'] in {'agent_status', 'rag_info'} or (
+                frame['type'] == 'status' and frame.get('stage') == 'retrieval_cards'):
+            frame.update(turn_id=self.turn.turn_id, trace_id=self.turn.trace_id)
         if frame['type'] == 'agent_result':
             self.turn.result_started = True
             plan = getattr(self.turn, 'scientific_plan', None)

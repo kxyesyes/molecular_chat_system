@@ -278,7 +278,6 @@ for (const [terminal, label] of Object.entries(terminalLabels)) {
     setAttribute(name, value) { this.attributes[name] = value; }};
   let mounted = true;
   let renderSucceeds = true;
-  let scrolls = 0;
   const context = {
     window: {HomeTaskState, HomeTaskStatus, HomeTaskPanel: {
       reset(target) { target.rows = []; target.resets += 1; },
@@ -295,7 +294,6 @@ for (const [terminal, label] of Object.entries(terminalLabels)) {
     createAgentTaskPanel: () => mounted ? panel : null,
     resolveAgentEventPresentation,
     getAgentEventLabel,
-    HomeChatRenderer: {scrollToBottom() { scrolls += 1; }},
   };
   vm.createContext(context);
   vm.runInContext(extractFunction("resetAgentTaskPanel"), context);
@@ -330,7 +328,6 @@ for (const [terminal, label] of Object.entries(terminalLabels)) {
   mounted = false;
   context.handleAgentEvent({event: terminal});
   assert.strictEqual(context.agentTaskState, before);
-  assert.strictEqual(scrolls, 4);
 }
 
 for (const [status, label] of [["partial", "部分完成"], ["not_calculated", "未执行（依赖未完成）"]]) {

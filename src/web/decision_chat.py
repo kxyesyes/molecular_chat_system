@@ -1133,7 +1133,8 @@ async def _deliver_result(handler, websocket, frames, execution):
                     'data': [row for block in approved for row in block['data']]}}}
                 _, warnings = await handler._send_agent_rag_results(sender, cards, rag_count)
                 for warning in warnings:
-                    await sender.send_text(json.dumps({'type':'status', 'message':warning}, ensure_ascii=False))
+                    await sender.send_text(json.dumps({'type':'status', 'stage':'retrieval_cards',
+                        'message':warning}, ensure_ascii=False))
 
     # The loop's worker ledger is already sealed. Retain this separate async
     # child without cancelling it: cancellation of a to_thread wrapper is not

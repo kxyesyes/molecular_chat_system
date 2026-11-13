@@ -58,7 +58,7 @@ def _clarification_molecules(query, original, tools, *, molecular_input):
     if query == original or not tools:
         return query
     from src.agent.tools.base_tool import BaseMolecularTool
-    from src.agent.tools.molecular_input import parse_molecular_smiles
+    from src.agent.tools.molecular_input import _MARKER, _unquote, parse_molecular_smiles
     from src.activity.family_contract import resolve_activity_family
     acknowledgements = {'继续', '请继续', '确认', '好的', 'continue', 'proceed', 'ok', 'yes'}
     operations = {
@@ -99,12 +99,23 @@ def _clarification_molecules(query, original, tools, *, molecular_input):
                 pass
         if not molecular_input:
             raise DecisionBoundaryError('web_clarification_changes_request')
-        candidate = re.sub(r'^SMILES\s*[:：=]\s*', '', clause, flags=re.I)
+        # The normal entry accepts prose surrounding a field. A reply may
+        # fill only whole fields, including each member of an explicit batch.
+        fields = re.split(r'，|\s+(?:(?:和|与|and)\s+)?(?=SMILES\b)',
+                          clause.removesuffix('。'), flags=re.I)
         try:
-            # An explicit field validates the entire clause, never a fragment.
-            values = parse_molecular_smiles('SMILES: ' + candidate, parser)
+            candidates = []
+            for field in fields:
+                field = field.strip()
+                marker = _MARKER.match(field)
+                candidates.append(_unquote(field[marker.end():] if marker else field))
+            values = parse_molecular_smiles(';'.join('SMILES: ' + value for value in candidates), parser)
         except ValueError:
             raise DecisionBoundaryError('web_clarification_changes_request') from None
+        # Regular requests may contain prose after the structure; a continuation
+        # may only fill the missing field. Require the entire value to survive.
+        if values != candidates:
+            raise DecisionBoundaryError('web_clarification_changes_request')
         molecules.extend(values)
     return ';'.join('SMILES: ' + value for value in molecules) or None
 

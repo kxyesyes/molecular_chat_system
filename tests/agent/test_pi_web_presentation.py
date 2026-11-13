@@ -5,6 +5,31 @@ import pytest
 from src.agent.contracts import AgentResult, RunOutcome, ToolResult
 from src.web.chat_handler import ChatHandler
 from src.web.decision_chat import _result_frame
+from src.rag.presentation import format_rag_context, rag_info_molecule
+
+
+@pytest.mark.parametrize('score', [-2, 0, 3.5, 0.000001])
+def test_retrieval_score_preserves_the_measured_value(score):
+    row = {'SMILES': 'CCO', 'similarity_score': score, 'logp': 0.00002}
+    assert rag_info_molecule(row)['similarity'] == score
+    assert rag_info_molecule(row)['properties']['logp'] == row['logp']
+    context = format_rag_context([row])
+    assert f'(similarity: {score})' in context
+
+
+def test_retrieval_without_a_score_does_not_create_a_measurement():
+    for row in [{'SMILES': 'CCO'}, {'SMILES': 'CCO', 'similarity_score': None}]:
+        assert rag_info_molecule(row).get('similarity') is None
+        assert '(similarity: not provided)' in format_rag_context([row])
+
+
+@pytest.mark.parametrize('score', [True, '0.5', float('inf'), float('nan')])
+def test_invalid_retrieval_scores_never_reach_cards_or_explanations(score):
+    row = {'SMILES': 'CCO', 'similarity_score': score}
+    with pytest.raises(ValueError):
+        rag_info_molecule(row)
+    with pytest.raises(ValueError):
+        format_rag_context([row])
 
 
 def test_failed_web_terminal_retains_same_sanitized_error_as_result():
@@ -113,7 +138,7 @@ def test_completed_web_retrieval_keeps_cards_and_truthful_attempt_flag():
         execution = {'status':'completed', 'trace_id':turn.trace_id,
             'tool_results':{'rag_search':observation}, 'tool_result_sequence':[observation],
             'final_answer':json.dumps({'observations':[{'tool':'rag_search', 'status':'succeeded',
-                'data':[{'SMILES':'CCO'}, {'SMILES':'CCN'}]}]}),
+                'data':[{'SMILES':'CCO'}, {'SMILES':'CCN'}, {'SMILES':'C', 'similarity_score':'invalid'}]}]}),
             'metadata':{'binding_profile':'medchat-web-v1', 'task_requirements':{
                 'request':{'metadata':{'rag_count':1}}}}}
         frames = [json.dumps({'type':'agent_result', 'final_answer':'accepted', **execution}),
@@ -121,8 +146,13 @@ def test_completed_web_retrieval_keeps_cards_and_truthful_attempt_flag():
         await _deliver_result(ChatHandler(None, None, None, {}), _TurnSender(sender, turn), frames, execution)
         assert socket.frames[0]['metadata']['retrieval_performed'] is True
         card, = [f for f in socket.frames if f['type'] == 'rag_info']
+        assert (card['turn_id'], card['trace_id']) == (turn.turn_id, turn.trace_id)
         assert len(card['molecules']) == 1 and card['molecules'][0]['smiles'] == 'CCO'
         assert 'unverified_pIC50' not in repr(card)
+        warning, = [f for f in socket.frames if f['type'] == 'status']
+        assert (warning['stage'], warning['turn_id'], warning['trace_id']) == (
+            'retrieval_cards', turn.turn_id, turn.trace_id)
+        assert '检索卡片' in warning['message'] and 'invalid' not in warning['message']
     asyncio.run(run())
 
 

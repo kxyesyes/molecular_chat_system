@@ -1375,8 +1375,13 @@ def test_missing_smiles_waits_for_input_without_scientific_tool(web_handler, que
 
 
 @pytest.mark.parametrize('reconnect', [False, True])
-@pytest.mark.parametrize('query', ['请计算这个分子的 LogP', '计算分子的分子量和 logP。'])
-def test_missing_smiles_continuation_resumes_same_scientific_obligation(web_handler, reconnect, query):
+@pytest.mark.parametrize('query,field', [
+    ('请计算这个分子的 LogP', 'CCO'),
+    ('计算分子的分子量和 logP。', 'CCO'),
+    ('计算分子量和 logP。', 'SMILES 是 CCO。'),
+    ('请帮我计算一下分子的分子量和 logP。', 'SMILES 为 CCO'),
+])
+def test_missing_smiles_continuation_resumes_same_scientific_obligation(web_handler, reconnect, query, field):
     async def drive_two_turns():
         session = "missing-smiles-continuation"
         sender = _Sender(WebSocket(session))
@@ -1404,7 +1409,7 @@ def test_missing_smiles_continuation_resumes_same_scientific_obligation(web_hand
             sender.waiting = runtime._restore_durable_waiting(sender, first.trace_id, continuation_id)
             assert sender.waiting is not None
 
-        second = _Turn(dict(message="CCO", enable_tools=True, enable_rag=False),
+        second = _Turn(dict(message=field, enable_tools=True, enable_rag=False),
                        trace_id=sender.waiting.context.trace_id,
                        waiting=sender.waiting)
         web_handler.decision_runtime.active_owners.add(second)
@@ -1460,10 +1465,27 @@ def test_browser_cannot_enable_missing_structure_admission(web_handler, query):
     '计算分子的分子量和 logP；分子为阿司匹林。',
     '计算分子的分子量和 logP\n对象为患者。',
     '计算分子的分子量和 logP。这个分子为阿司匹林。',
+    '计算分子量和 logP。这个分子为阿司匹林。',
+    '请帮我计算分子的分子量和 logP。这个分子为阿司匹林。',
+    '请计算这个分子的 logP。分子为阿司匹林。',
+    '计算这个分子的 logP。结构是阿司匹林。',
+    '计算该分子的分子量。使用阿司匹林。',
+    'Calculate the logP of this molecule. It is aspirin.',
+    '预测该分子的 ADMET 特征，结构是阿司匹林。',
 ])
 def test_bare_subject_clarification_requires_the_entire_generic_request(query):
     plan = ScientificObligationCompiler().compile(query)
     assert not _resumable_scientific_clarification(plan)
+
+
+@pytest.mark.parametrize('query', [
+    '请计算这个分子的 LogP，并预测 ADMET。',
+    '请计算这个分子的 LogP。再预测 ADMET。',
+])
+def test_missing_molecule_preserves_a_second_reviewed_action(query):
+    compiler = ScientificObligationCompiler()
+    assert _resumable_scientific_clarification(compiler.compile(query))
+    assert set(compiler.clarification_tools(query)) == {'property_calculator', 'admet_predictor'}
 
 
 @pytest.mark.parametrize('query', [
