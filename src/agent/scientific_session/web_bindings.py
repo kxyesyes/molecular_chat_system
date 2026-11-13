@@ -381,6 +381,7 @@ class WebBindingResolver:
         payload = resolved if name == 'lead_optimization_verifier' else {'query': resolved}
         if name == 'target_database_search':
             from src.agent.contracts.target_request import UNSUPPORTED_TARGET_SPECIES, unrecognized_lookup_qualifier
+            from src.agent.tools.target_observation import target_resolution_limit
             from src.agent.planning.request_parsing import positive_intent_text
             from src.agent.tools.activity_input import requested_activity_species
             qualifiers = re.findall(r'([\u4e00-\u9fff]{1,12}源)\s*(?=[A-Za-z][A-Za-z0-9_-]*)', original.query)
@@ -400,6 +401,9 @@ class WebBindingResolver:
                 payload['organism'] = 'Mus musculus'
             if re.search(r'功能|\bfunction\b', positive_intent_text(original.query), re.I):
                 payload['include_function'] = True
+            limit = target_resolution_limit(original.query)
+            if limit is not None:
+                payload['resolution_limit'] = min(limit, 20)
         snapshot = context_value(self._input_journal.context(turn), query_content_bytes=True)
         selected = context_value(context, query_content_bytes=True)['resolved_molecule']
         selection = _digest(selected) if selected is not None else None

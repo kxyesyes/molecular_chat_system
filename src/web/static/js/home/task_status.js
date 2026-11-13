@@ -115,6 +115,12 @@ window.HomeTaskStatus = (() => {
     return match ? `${match[1]} 个候选缺少可用的活性证据。` : text;
   }
 
+  const targetWarnings = new Map([
+    ["structure_list_truncated", "仅返回部分结构列表"],
+    ["structure_resolution_missing", "部分实验结构缺少分辨率"],
+    ["partial_authoritative_results", "靶点检索记录不完整"],
+  ]);
+
   function message(event) {
     const type = displayEventType(event?.event || event?.type, event?.payload);
     if (type === "tool_cancelled") return event.payload.quality?.invocation_may_still_be_running
@@ -136,7 +142,7 @@ window.HomeTaskStatus = (() => {
         "Physicochemical endpoints are calculated by RDKit inside ADMET-AI.",
         "Risk summary is a screening heuristic, not a safety conclusion.",
       ]);
-      const warnings = Array.isArray(event?.payload?.warnings)
+      let warnings = Array.isArray(event?.payload?.warnings)
         ? event.payload.warnings.filter(item => typeof item === "string" && !informational.has(item))
         : [];
       const optionalFailures = warnings.filter(item => optionalFailureMessage(item, toolName) !== item);
@@ -150,10 +156,13 @@ window.HomeTaskStatus = (() => {
         if (!independent.length) {
           return `${toolNames[toolName] || "计算步骤"}：步骤未完成；具体原因见失败步骤。`;
         }
-        text = independent.map(rankWarning).join("；");
-      } else {
-        text = warnings.map(item => rankWarning(optionalFailureMessage(item, toolName))).join("；");
+        warnings = independent;
       }
+      if (toolName === "target_database_search" && warnings.includes("structure_list_truncated")) {
+        warnings = warnings.filter(item => item !== "partial_authoritative_results");
+      }
+      text = warnings.map(item => toolName === "target_database_search" && targetWarnings.has(item)
+        ? targetWarnings.get(item) : rankWarning(optionalFailureMessage(item, toolName))).join("；");
     }
     text = optionalFailureMessage(text, toolName);
     for (const label of Object.values(toolNames)) {

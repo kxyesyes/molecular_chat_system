@@ -11,7 +11,7 @@ from src.target_identifiers import canonical_target_identifier, target_mentions
 from src.target_search.exact_pdb import requested_pdb_id, target_text_without_pdb
 
 from .base_tool import BaseMolecularTool
-from .target_observation import target_planning_data
+from .target_observation import resolution_preview, target_planning_data
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,7 @@ class TargetDatabaseTool(BaseMolecularTool):
     def execute(self, query: Any) -> Dict[str, Any]:
         result = self._create_base_result(query)
         include_function = isinstance(query, dict) and query.get('include_function') is True
+        resolution_limit = query.get('resolution_limit') if isinstance(query, dict) else None
         organism = query.get('organism') if isinstance(query, dict) else None
         if organism not in (None, 'Homo sapiens', 'Mus musculus'):
             result.update(status='invalid_input', message='Unsupported target organism.',
@@ -260,13 +261,21 @@ class TargetDatabaseTool(BaseMolecularTool):
                             for structure in target.get("recommended_structures", [])
                             if isinstance(structure, dict)
                         ]
+                        if resolution_limit is not None and target_id in (None, ""):
+                            recommended_structures = []
+                            result["warnings"].append("未取得靶点记录标识，无法核对结构列表和分辨率排序。")
                         if target_id not in (None, ""):
                             try:
                                 structure_payload = service.get_target_structures(
                                     int(target_id)
                                 )
-                                structures = structure_payload.get("structures", [])
-                                if len(structures) > 20:
+                                structures = structure_payload["structures"]
+                                if not isinstance(structures, list):
+                                    raise ValueError("Invalid structure list")
+                                if resolution_limit is not None:
+                                    target['searched_structure_count'] = len(structures)
+                                    structures, target['comparable_structure_count'] = resolution_preview(structures, resolution_limit)
+                                elif len(structures) > 20:
                                     result.setdefault("warnings", []).append("structure_list_truncated")
                                 recommended_structures = [
                                     dict(structure)
@@ -274,10 +283,12 @@ class TargetDatabaseTool(BaseMolecularTool):
                                     if isinstance(structure, dict)
                                 ]
                             except Exception:
-                                result.setdefault("warnings", []).append(
-                                    "Could not load structures for target "
-                                    f"{target_id}."
-                                )
+                                if resolution_limit is not None:
+                                    recommended_structures = []
+                                    result["warnings"].append("读取结构列表失败，无法核对分辨率排序。")
+                                else:
+                                    result.setdefault("warnings", []).append(
+                                        f"Could not load structures for target {target_id}.")
                         target["recommended_structures"] = self._guard_structure_freshness(
                             target,
                             recommended_structures,
@@ -360,7 +371,8 @@ class TargetDatabaseTool(BaseMolecularTool):
             ) or any(
                 isinstance(target, dict) and bool(target.get("stale"))
                 for target in targets
-            ) or "structure_list_truncated" in result["warnings"]
+            ) or "structure_list_truncated" in result["warnings"] or (
+                resolution_limit is not None and any('searched_structure_count' not in t for t in targets))
             if isinstance(query, str) and re.search(r'分辨率|\bresolution\b', query, re.I):
                 if any(structure.get('structure_type') == 'experimental' and structure.get('resolution') is None
                        for target in targets if isinstance(target, dict)

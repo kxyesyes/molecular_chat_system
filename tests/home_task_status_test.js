@@ -70,6 +70,13 @@ assert.strictEqual(status.label("tool_started", "activity_predictor"), "调用 �
 assert.strictEqual(status.label('tool_started', 'candidate_ranker'), '调用 候选排序');
 assert.strictEqual(status.label('validation_warning'), '执行提醒');
 assert.strictEqual(status.className("task_partial"), "is-warning");
+const targetWarnings = status.message({event:"validation_warning", tool:"target_database_search",
+  message:"Tool result has validation warnings", payload:{warnings:[
+    "structure_list_truncated", "partial_authoritative_results", "structure_resolution_missing",
+  ]}});
+assert(targetWarnings.includes("结构列表") && targetWarnings.includes("分辨率") &&
+  !targetWarnings.includes("_") && !targetWarnings.includes("靶点检索记录不完整"),
+  "the panel explains the specific limits of the structure lookup once");
 assert.strictEqual(status.className("task_completed"), "is-complete");
 assert.strictEqual(status.className("tool_started"), "is-running");
 assert.strictEqual(status.message({event:'tool_failed', tool:'admet_predictor', message:'Observation preparation failed'}),

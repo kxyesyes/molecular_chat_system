@@ -208,6 +208,10 @@ def prepare_summary(handler, result, *, business_view=None):
             identifiers[evidence_id] = '该记录'
 
     def human_text(text):
+        if text == 'structure_list_truncated':
+            return '本次仅返回部分结构记录。'
+        if text == 'partial_authoritative_results':
+            return '靶点检索结果不完整。'
         rank_warning = re.fullmatch(r'ADMET evidence was absent or unusable for (\d+) ranked candidate\(s\)', text)
         if rank_warning:
             return f'{rank_warning.group(1)} 个候选缺少可用的 ADMET 证据。'
@@ -247,6 +251,12 @@ def prepare_summary(handler, result, *, business_view=None):
     diagnostic = partial_projection({**details, 'metadata': result.metadata})
     internal_view_warnings = {'rank_source_unavailable'} if (business_view is not None
         and 'rank_source_unavailable' in business_view.get('warnings', [])) else set()
+    # The cited target view already states the exact scope of this incomplete
+    # ranking. Suppress only that same issue; other steps and warnings remain.
+    target_scope_shown = ('无法确认全库分辨率最高的结构' in safe_body
+                          and len(result.tool_results) == 1
+                          and result.tool_results[0].tool_name == 'target_database_search'
+                          and result.tool_results[0].success and result.tool_results[0].error is None)
     public_warnings = [human_text(item) for item in handler._sanitize_agent_warnings(
         [item for item in details['warnings']
          if item not in _ADMET_INFORMATIONAL_WARNINGS and item not in internal_view_warnings],
@@ -264,7 +274,7 @@ def prepare_summary(handler, result, *, business_view=None):
                 message = message.removesuffix(_ACTIVITY_INFORMATIONAL_SUFFIX)
             message = human_text(message)
             issues.append(f'{name}：{state}。{message}')
-        if not issues and not public_warnings:
+        if not issues and not public_warnings and not target_scope_shown:
             if has_observations and not details_error:
                 issues.append('部分请求尚未完成，详情见明细。')
                 generic_partial_issue = True

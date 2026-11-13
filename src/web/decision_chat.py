@@ -15,6 +15,7 @@ from src.agent.persistence.redaction import redact_sensitive, sanitize_bounded
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.worker_ownership import WorkerCleanupError
 from .model_lifecycle import finish_on_cancel
+from src.agent.tools.target_observation import resolution_preview, target_resolution_limit
 
 
 MAX_PENDING_EVENTS = 128
@@ -390,7 +391,8 @@ def _activity_display_answer(data, *, concise=False):
     return '\n'.join(lines).rstrip()
 
 
-def _target_display_answer(data, evidence_id=None, *, concise=False, experimental_only=False, include_function=True):
+def _target_display_answer(data, evidence_id=None, *, concise=False, experimental_only=False, include_function=True,
+                           resolution_limit=None):
     """Render the bounded target lookup rows without exposing audit JSON."""
     if not isinstance(data, list):
         return ''
@@ -442,14 +444,20 @@ def _target_display_answer(data, evidence_id=None, *, concise=False, experimenta
     for row in rows:
         structures = row.get('recommended_structures')
         if not isinstance(structures, list):
-            if not experimental_only:
-                continue
             structures = []
-        if not structures and not experimental_only:
+        if not structures and not experimental_only and resolution_limit is None:
             continue
         target = _display_cell(row.get('gene_symbol', row.get('target_name', '靶点')))
         lines.extend(['', f'**{target} 检索到的结构记录**'])
-        if experimental_only:
+        if resolution_limit is not None:
+            searched = row.get('searched_structure_count', len(structures))
+            structures, comparable = resolution_preview(structures, resolution_limit)
+            comparable = row.get('comparable_structure_count', comparable)
+            lines.append(f'本次检索 {searched} 条结构记录，其中 {comparable} 条实验结构有可比较的分辨率。'
+                         f'按分辨率数值从小到大列出 {len(structures)} 条，无法确认全库分辨率最高的结构。')
+            if resolution_limit > 20:
+                lines.append('单次最多展示 20 条结构。')
+        elif experimental_only:
             structures = [structure for structure in structures if isinstance(structure, dict)
                           and structure.get('structure_type') == 'experimental']
             if not structures:
@@ -479,10 +487,11 @@ def _target_display_answer(data, evidence_id=None, *, concise=False, experimenta
                 f'配体 ID：{_display_cell(ligand_text)}。'
             )
         count = row.get('structure_count')
-        if experimental_only:
-            lines.append('结构记录总数包括其他类型；此处仅展示已返回的实验结构。')
-        elif type(count) is int and count > len(structures[:20]):
-            lines.append(f'当前展示 {len(structures[:20])} 条，记录总数为 {count}；结构列表未完整展示。')
+        if resolution_limit is None:
+            if experimental_only:
+                lines.append('结构记录总数包括其他类型；此处仅展示已返回的实验结构。')
+            elif type(count) is int and count > len(structures[:20]):
+                lines.append(f'当前展示 {len(structures[:20])} 条，记录总数为 {count}；结构列表未完整展示。')
         if any(isinstance(structure, dict) and structure.get('cache_status') == 'unverified'
                for structure in structures[:20]):
             lines.append('本地结构记录尚未核验；用于对接前，请按靶点和 PDB 编号重新查询结构。')
@@ -680,9 +689,11 @@ def web_scientific_display(result, *, concise=False, requested_admet_endpoints=(
                     section.append('排序依据：0.5 ×（0.7 × QED + 0.3 × LogP 区间评分）；仅使用分子性质。')
                 lines.append('\n'.join(section))
         elif name == 'target_database_search' and data:
+            query = result.metadata.get('task_requirements', {}).get('request', {}).get('query', '')
             lines.append(_target_display_answer(data, block.get('evidence_id'), concise=concise,
                                                 experimental_only=experimental_only,
-                                                include_function=include_target_function))
+                                                include_function=include_target_function,
+                                                resolution_limit=target_resolution_limit(query)))
         elif (name == 'target_database_search' and (data is None or data == [])
               and block.get('lookup_status') == 'not_found'
               and block.get('status') == 'succeeded'

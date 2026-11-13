@@ -343,7 +343,7 @@ def _scientific_data(result):
         for row, original in zip(rows, result.data):
             row.update(_pick(original, (
                 'function', 'has_experimental_structure', 'has_alphafold_structure',
-                'experimental_structure_count', 'alphafold_structure_count',
+                'experimental_structure_count', 'alphafold_structure_count', 'searched_structure_count', 'comparable_structure_count',
                 'source_url', 'target_stale', 'structures_stale',
                 'target_retrieved_at', 'target_expires_at',
                 'structures_retrieved_at', 'structures_expires_at')))
