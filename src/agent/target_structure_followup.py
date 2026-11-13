@@ -488,10 +488,13 @@ def structure_followup(query, history, session_id, *, enable_tools=True):
             return {'content': '缺少上一轮可核对的结构记录，请先检索靶点结构。', 'status': 'partial'}
         rows = [row for row in evidence['structures'] if row.get('resolution') is not None]
         if not rows:
-            return {'content': '已检索结构没有可比较的分辨率，无法判断；对接准备状态也未核实。',
+            return {'content': '已检索结构没有可比较的分辨率，无法判断。',
                     'status': 'partial', 'evidence': deepcopy(evidence)}
         best = min(row['resolution'] for row in rows)
         identifiers = '、'.join(row['structure_id'] for row in rows if row['resolution'] == best)
+        if '对接' not in query:
+            return {'content': f'在上一轮列出且有分辨率记录的结构中，{identifiers} 的分辨率最高（{best:g} Å）。',
+                    'status': 'completed', 'evidence': deepcopy(evidence)}
         if docking_choice:
             return {'content': f'目前不能确定哪个受体最适合对接。在已检索且有分辨率记录的结构中，'
                     f'{identifiers} 分辨率最高（{best:g} Å），可作为进一步核查的起点；'
