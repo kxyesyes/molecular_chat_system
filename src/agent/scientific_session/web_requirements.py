@@ -341,7 +341,7 @@ def compile_web_requirements(context, *, allowed_tools):
             # The legacy planner adds this exact bound step for numeric bounds.
             # Explicit calculation is the same obligation, not an opaque tool.
             from src.agent.planning.step_templates import molecular_design_steps
-            plan.steps = molecular_design_steps(plan.steps[0].input_data, include_properties=True)
+            plan.steps.insert(1, molecular_design_steps(plan.steps[0].input_data, include_properties=True)[1])
             plan.metadata['atomic'] = False
         plan.steps = [s for s in plan.steps if s.tool_name not in forbidden]
         if plan.workflow_name == 'hit_to_lead_optimization':

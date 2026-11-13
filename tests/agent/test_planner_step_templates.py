@@ -349,9 +349,9 @@ def test_generation_property_bounds_require_independent_property_evidence():
     plan = TaskPlanner().plan(_context("molecular_design", query))
 
     assert [step.tool_name for step in plan.steps] == [
-        "llm_molecular_generator", "property_calculator"
+        "llm_molecular_generator", "property_calculator", "drug_likeness_assessment"
     ]
-    property_step = plan.steps[-1]
+    property_step = plan.steps[1]
     assert property_step.required is True
     assert property_step.continue_on_error is False
 

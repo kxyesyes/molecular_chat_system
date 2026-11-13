@@ -75,9 +75,9 @@ def test_unbounded_generation_keeps_single_step_and_full_legacy_contract(query):
     }
 
 
-def test_catalog_only_adds_descriptor_permission_and_compiles_bound_result():
+def test_catalog_allows_candidate_checks_and_compiles_bound_result():
     policy = WorkflowCatalog().require("molecular_design")
-    assert policy.allowed_tools == ("llm_molecular_generator", "property_calculator")
+    assert policy.allowed_tools == ("llm_molecular_generator", "property_calculator", "drug_likeness_assessment")
     plan = WorkflowPlan("molecular_design", [
         WorkflowStep("generate", "llm_molecular_generator", "Generate 2 molecules", output_key="result"),
         WorkflowStep("properties", "property_calculator", input_binding="$.outputs.result",

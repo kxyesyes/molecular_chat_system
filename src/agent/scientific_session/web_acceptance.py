@@ -80,6 +80,9 @@ def web_observation_reasons(result, record, step, *, request_query):
             requirement = SimpleNamespace(tool_name=name, expected_smiles=subjects,
                 exact_molecule_count=len(subjects), required_metrics=metrics)
             reasons += _check_batch(requirement, result)['reason_codes']
+            if (name == 'drug_likeness_assessment' and step.metadata.get('require_lipinski_compliance')
+                    and any(not row['assessment']['lipinski_rule_of_five']['compliance'] for row in result.data)):
+                reasons.append('lipinski_goal_not_satisfied')
             if 'subject_mismatch' in reasons:
                 expected = {_canonical(value) for value in subjects}
                 observed = [_canonical(row['smiles']) for row in result.data]
@@ -370,6 +373,10 @@ def _scientific_data(result):
         for row, original in zip(rows, result.data):
             row['assessment']['overall_assessment'] = _pick(
                 original['assessment']['overall_assessment'], ('score',))
+            rules = original['assessment']['lipinski_rule_of_five']
+            row['assessment']['lipinski_rule_of_five']['violations'] = [
+                key for key in ('molecular_weight', 'logp', 'hba', 'hbd')
+                if rules['details'][key]['pass'] is False]
         return rows
     if result.tool_name == 'llm_molecular_generator':
         candidates = CandidateSet.from_dict(result.data)

@@ -626,6 +626,10 @@ def web_scientific_display(result, *, concise=False, requested_admet_endpoints=(
                         and type(lipinski.get('compliance')) is bool):
                     verdict = '符合' if lipinski['compliance'] else '不符合'
                     lines.append(f"Lipinski 五规则：{verdict}本工具判定，违反 {lipinski['violation_count']} 项（允许至多 1 项）。")
+                    labels = {'molecular_weight': '分子量', 'logp': 'logP', 'hba': 'HBA', 'hbd': 'HBD'}
+                    violations = [labels[key] for key in lipinski.get('violations', []) if key in labels]
+                    if violations:
+                        lines.append('超限指标：' + '、'.join(violations) + '。')
                     properties = assessment.get('molecular_properties', {})
                     if isinstance(properties, dict):
                         fields = (('分子量 (Da)', 'molecular_weight'), ('logP', 'logp'),

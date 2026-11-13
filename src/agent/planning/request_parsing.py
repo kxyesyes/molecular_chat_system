@@ -91,6 +91,24 @@ def looks_like_design(query: str) -> bool:
     return has_generation_intent(query) and not target_lookup_result_annotation(query)
 
 
+def requests_lipinski_compliant_candidates(query: str) -> bool:
+    """Recognize a rule the newly generated molecules must meet."""
+    rule = r"(?:Lipinski(?:['’]s)?|利平斯基|五规则|rule[ -]of[ -]five)"
+    compliance = (r"(?<!不)(?:符合|满足|遵循)\s*" + rule
+                  + r"|\b(?:satisf(?:y|ying)|meet(?:ing)?|follow(?:ing)?|comply(?:ing)?\s+with)\s+(?:the\s+)?" + rule
+                  + r"|" + rule + r"[ -]compliant\b")
+    positive = positive_intent_text(query)
+    if not looks_like_design(positive):
+        return False
+    for clause in re.split(r"[，,；;。\n]", positive):
+        if not re.search(compliance, clause, re.I) or re.search(r"不(?:要求|必|用)|\bnot\b", clause, re.I):
+            continue
+        if looks_like_design(clause) or re.match(
+                r"\s*(?:要求|且|并|均|都|各候选|候选分子|它们)?\s*(?:均|都)?\s*(?:" + compliance + ")", clause, re.I):
+            return True
+    return False
+
+
 def requests_generated_properties(query: str) -> bool:
     """Recognize an explicit descriptor step whose subject is the generated candidates."""
     text = positive_intent_text(query)
