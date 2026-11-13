@@ -687,6 +687,21 @@ async function run() {
     const state = h.chat.querySelector('.decision-runtime-status');
     assert(!state.hidden && state.textContent.includes('未执行知识库检索'));
   });
+  await test('requested retrieval reports an unconfirmed result after completion', () => {
+    for (const status of ['partial', 'completed']) {
+      const h = loadHome(); h.ready('pi'); start(h);
+      const frame = result(status); frame.metadata.retrieval_performed = null;
+      h.socket.emit(frame); h.socket.emit(complete(status));
+      const state = h.chat.querySelector('.decision-runtime-status');
+      assert(!state.hidden && state.textContent.includes('未能确认知识库检索结果'));
+    }
+    for (const outcome of [true, undefined]) {
+      const h = loadHome(); h.ready('pi'); start(h);
+      const frame = result('completed'); frame.metadata.retrieval_performed = outcome;
+      h.socket.emit(frame); h.socket.emit(complete('completed'));
+      assert(h.chat.querySelector('.decision-runtime-status').hidden);
+    }
+  });
   await test('unrequested RAG does not imply target retrieval was skipped', () => {
     const h = loadHome(); h.ready('pi'); start(h);
     const frame = result('failed'); frame.metadata.rag_requested = false;
@@ -919,7 +934,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261112-chat-send-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261113-chat-rag-status-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");

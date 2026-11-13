@@ -407,7 +407,12 @@
       const text = window.MedChatStatus.isNonSuccess(message.status) && structuredReason &&
         !baseText.includes(structuredReason)
         ? `${baseText}\n\n失败原因：${structuredReason}` : baseText;
-      turn.result = {status: message.status, text, metadata: message.metadata || {},
+      let retrievalNotice = "";
+      if (message.metadata?.rag_requested === true) {
+        if (message.metadata.retrieval_performed === false) retrievalNotice = " 本轮未执行知识库检索。";
+        if (message.metadata.retrieval_performed === null) retrievalNotice = " 未能确认知识库检索结果。";
+      }
+      turn.result = {status: message.status, text, metadata: message.metadata || {}, retrievalNotice,
         details: message.result_format === "summary_details_v1" && message.details_state === "available"
           ? message.details : null};
       if (agentTaskState.lastEventType === "pending_source_check") {
@@ -440,9 +445,7 @@
           });
         }
       }
-      const rag = message.metadata?.retrieval_performed === false && message.metadata.rag_requested === true
-        ? " 本轮未执行知识库检索。" : "";
-      decisionStatus(turn, decisionStatuses[message.status] + rag);
+      decisionStatus(turn, decisionStatuses[message.status] + retrievalNotice);
       turn.box.setAttribute("data-content", text);
       turn.box.querySelector(".message-content").innerHTML = HomeFormatters.formatContent(text,
         {displayKind: message.metadata?.display_kind});
@@ -454,7 +457,7 @@
       const isNonSuccess = window.MedChatStatus.isNonSuccess(status);
       const projectionFailed = message.status === "failed" && message.error?.code === "result_projection_failed";
       if (turn.statusElement) turn.statusElement.hidden = status === "completed" && !projectionFailed &&
-        !(metadata.rag_requested === true && metadata.retrieval_performed === false);
+        !turn.result.retrievalNotice;
       let finalText = text;
       if (projectionFailed) {
         // Delivery failure does not rewrite the scientific workflow result.
