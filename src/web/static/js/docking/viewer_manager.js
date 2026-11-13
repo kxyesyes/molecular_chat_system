@@ -81,10 +81,8 @@ const ViewerManager = {
         } else {
           format = "pdbqt";
         }
-      } else if (type === "ligand" && pdbData.includes("$$$$")) {
+      } else if (type === "ligand" && (pdbData.includes("$$$$") || pdbData.includes("M  END"))) {
         format = "sdf";
-      } else if (type === "ligand" && pdbData.includes("M  END")) {
-        format = "mol";
       }
 
       if (type === "protein") {
@@ -170,10 +168,8 @@ const ViewerManager = {
         let ligandFormat = "pdb";
         if (ligandPdbText && ligandPdbText.length > 0) {
           ligandFormat = "pdb";
-        } else if (ligandDataToUse.includes("$$$$")) {
+        } else if (ligandDataToUse.includes("$$$$") || ligandDataToUse.includes("M  END")) {
           ligandFormat = "sdf";
-        } else if (ligandDataToUse.includes("M  END")) {
-          ligandFormat = "mol";
         }
 
         if (!ligandDataToUse) {
@@ -219,8 +215,8 @@ const ViewerManager = {
         AppState.viewer.setStyle(
           {},
           {
-            stick: { radius: 0.2, colorscheme: "greenCarbon" },
-            sphere: { scale: 0.3, colorscheme: "greenCarbon" },
+            stick: { radius: 0.2, colorscheme: resultLigandColor() },
+            sphere: { scale: 0.3, colorscheme: resultLigandColor() },
           },
         );
       }
@@ -253,13 +249,14 @@ const ViewerManager = {
   },
 
   // 导出图片
-  exportImage() {
+  async exportImage() {
     if (AppState.viewer) {
-      const png = AppState.viewer.pngURI();
-      const link = document.createElement("a");
-      link.download = "molecule_structure.png";
-      link.href = png;
-      link.click();
+      AppState.viewer.render();
+      try {
+        await saveDockingDownload(await fetch(AppState.viewer.pngURI()), "molecule_structure.png");
+      } catch {
+        Utils.showToast("当前三维视图导出失败，请重试。", "error");
+      }
     }
   },
 };
@@ -305,6 +302,22 @@ const StyleManager = {
     if (!viewer) return;
     AppState.currentStyle = styleName || AppState.currentStyle || "default";
     try {
+      if (renderedInteractionPose || AppState.currentViewerMode === "ligand") {
+        viewer.setBackgroundColor(styleName === "dark" ? "#0b1020" : "white");
+        if (AppState.currentViewerMode === "ligand") {
+          viewer.setStyle({}, {stick: {radius: 0.25, colorscheme: resultLigandColor()}});
+        } else {
+          viewer.setStyle({model: 0, resn: CONFIG.PROTEIN_RESIDUES}, {cartoon: {color: resultProteinColor()}});
+          const ligands = viewer.getModelList().slice(1);
+          ligands.forEach((model, index) => {
+            const colorscheme = renderedInteractionPose.overlay
+              ? overlayPoseColors[index % overlayPoseColors.length] : resultLigandColor();
+            model.setStyle({}, {stick: {radius: 0.25, colorscheme}});
+          });
+        }
+        viewer.render();
+        return;
+      }
       viewer.setBackgroundColor("white");
       viewer.setStyle({}, {});
       viewer.removeAllLabels();

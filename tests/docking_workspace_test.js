@@ -80,8 +80,8 @@ test("restoring the viewer theme preserves the separate colors of overlaid Vina 
   };
   const through = new Promise(resolve => {
     const ctx = {window: {}, viewer, onStyleChange() {}, currentProteinData: null, console,
-      AppState: {currentStyle: "gray"}, setTimeout: fn => { fn(); resolve(); },
-      getCurrentJobId: () => "job", document: {getElementById: id => id === "overlay-count" ? {value: "2"} : null},
+      AppState: {currentStyle: "gray", currentJobId: "job"}, setTimeout: fn => { fn(); resolve(); },
+      syncViewerModeState() {}, document: {getElementById: id => id === "overlay-count" ? {value: "5"} : id === "pose-select" ? {options: {length: 2}, value: "1"} : null},
       StyleManager: {apply() { atoms.forEach(model => model.setStyle({}, {})); }},
       fetch: async () => ({ok: true, text: async () => "pose"}),
     };
@@ -90,4 +90,14 @@ test("restoring the viewer theme preserves the separate colors of overlaid Vina 
   });
   await through;
   assert.deepEqual(atoms.map(model => model.style.stick?.colorscheme), ["greenCarbon", "blueCarbon"]);
+});
+test("the single-ligand viewer reads an unterminated single SD record with the SDF parser", () => {
+  let format;
+  const viewer = {clear() {}, setStyle() {}, zoomTo() {}, render() {},
+    addModel(_text, selectedFormat) { format = selectedFormat; }};
+  const ctx = {window: {}, AppState: {viewer}, console, resultLigandColor: () => "greenCarbon",
+    document: {getElementById() { return null; }}};
+  vm.runInNewContext(readFileSync("src/web/static/js/docking/viewer_manager.js", "utf8"), ctx);
+  ctx.loadMolecule("pose\n  RDKit\n\n  1  0  0  0  0  0            999 V2000\nM  END\n", "ligand");
+  assert.equal(format, "sdf");
 });

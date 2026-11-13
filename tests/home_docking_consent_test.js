@@ -46,7 +46,7 @@ function success(patch = {}) { return view({sequence: 10, send_generation: 10, t
     pose: {artifact_id: "pose", size_bytes: 100, sha256: hash,
       download_path: `/api/agent/docking/tasks/${task}/artifacts/pose`}}, ...patch}); }
 const template = fs.readFileSync(path.join(__dirname, "../src/web/templates/index.html"), "utf8");
-assert(template.includes("/static/js/home/docking_consent.js?v=20261101-source-inventory-v1"),
+assert(template.includes("/static/js/home/docking_consent.js?v=20261113-vina-score-v2"),
   "the changed docking feedback script needs its own cache version");
 const filename = path.join(__dirname, "../src/web/static/js/home/docking_consent.js");
 assert(fs.existsSync(filename), "D6 docking consent lifecycle module is absent");

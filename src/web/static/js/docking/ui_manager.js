@@ -126,28 +126,31 @@ function nextPose() {
   onPoseSelectChange(sel);
 }
 
+function resultProteinColor() {
+  return {gray: "#bfbfbf", dark: "#e6eef8"}[AppState.currentStyle] || "spectrum";
+}
+function resultLigandColor() {
+  return {gray: "magentaCarbon", dark: "yellowCarbon"}[AppState.currentStyle] || "greenCarbon";
+}
+
+const overlayPoseColors = ["greenCarbon", "blueCarbon", "magentaCarbon", "yellowCarbon", "cyanCarbon", "orangeCarbon"];
+
 function overlayTopN() {
-  const viewSequence = beginDockingView();
+  const jobId = AppState.currentJobId;
+  const selector = document.getElementById("pose-select");
   const nInput = document.getElementById("overlay-count");
-  let n = parseInt(nInput && nInput.value ? nInput.value : "1");
-  if (isNaN(n) || n < 1) n = 1;
-
-  const jobId = typeof getCurrentJobId === "function" ? getCurrentJobId() : null;
-  if (!jobId) return;
-
+  if (!jobId || !selector.options.length) return;
+  const n = Math.min(selector.options.length, Math.max(1, Math.trunc(Number(nInput.value)) || 1));
+  nInput.value = String(n);
+  if (n === 1) return viewPose(1);
+  const viewSequence = ++dockingViewSequence;
   if (!viewer) initViewer();
-
-
-  // 为每个 pose 并发请求标准 SDF（用 null 代替失败的 pose）
-  const posePromises = [];
-  for (let i = 1; i <= n; i++) {
-    posePromises.push(fetchDockedPoseSdf(jobId, i).catch(() => null));
-  }
-
-  Promise.all(posePromises)
+  const poses = Array.from({length: n}, (_, index) => fetchDockedPoseSdf(jobId, index + 1));
+  return Promise.all(poses)
     .then((poseSdfs) => {
       if (viewSequence !== dockingViewSequence) return;
       try {
+        beginDockingView();
         viewer.clear();
 
         const receptor = receptorForView(jobId);
@@ -157,8 +160,7 @@ function overlayTopN() {
             receptor.format,
           );
           if (prot && prot.setStyle) {
-            const proteinColor = {gray: "#bfbfbf", dark: "#e6eef8"}[AppState.currentStyle] || "spectrum";
-            prot.setStyle({}, { cartoon: { color: proteinColor } });
+            prot.setStyle({}, { cartoon: { color: resultProteinColor() } });
             const waterAndOtherResns = [
               "HOH",
               "WAT",
@@ -194,18 +196,9 @@ function overlayTopN() {
           }
         }
 
-        const colors = [
-          "greenCarbon",
-          "blueCarbon",
-          "magentaCarbon",
-          "yellowCarbon",
-          "cyanCarbon",
-          "orangeCarbon",
-        ];
         poseSdfs.forEach((poseSdf, idx) => {
-          if (!poseSdf) return;
           const lig = viewer.addModel(poseSdf, "sdf");
-          const cs = colors[idx % colors.length];
+          const cs = overlayPoseColors[idx % overlayPoseColors.length];
           if (lig && lig.setStyle) {
             lig.setStyle({}, { stick: { radius: 0.25, colorscheme: cs } });
           }
@@ -213,14 +206,19 @@ function overlayTopN() {
 
         viewer.zoomTo();
         viewer.render();
-        const selected = Number(document.getElementById("pose-select")?.value);
-        if (poseSdfs[selected - 1]) renderedInteractionPose = {jobId, pose: selected, overlay: poseSdfs.filter(Boolean).length > 1};
+        const selected = Number(selector.value);
+        const pose = selected >= 1 && selected <= n ? selected : 1;
+        selector.value = String(pose);
+        renderedInteractionPose = {jobId, pose, overlay: true};
+        syncViewerModeState("complex");
         restoreDockingInteractions();
       } catch (e) {
         console.error("叠加多个 Pose 失败:", e);
       }
     })
-    .catch((err) => console.warn("加载 Pose 叠加结果失败:", err));
+    .catch(() => {
+      if (viewSequence === dockingViewSequence) Utils.showToast("构象叠加加载失败，请重试。", "error");
+    });
 }
 
 function showProtein() {
@@ -236,16 +234,24 @@ function showProtein() {
   }
 }
 
-function showLigand() {
-  beginDockingView();
-  const historical = historyReceptor && historyReceptor.jobId === AppState.currentJobId;
-  const ligandToShow = historical ? AppState.dockedLigandData : (AppState.originalLigandData || AppState.currentLigandData);
-
+async function showLigand() {
+  const sequence = beginDockingView();
+  const jobId = AppState.currentJobId;
+  if (jobId) {
+    const pose = Number(document.getElementById("pose-select").value) || 1;
+    try {
+      const sdf = await fetchDockedPoseSdf(jobId, pose);
+      if (sequence !== dockingViewSequence || jobId !== AppState.currentJobId) return;
+      loadMolecule(sdf, "ligand");
+    } catch {
+      if (sequence === dockingViewSequence) Utils.showToast("无法加载所选构象的配体。", "error");
+    }
+    return;
+  }
+  const ligandToShow = AppState.originalLigandData || AppState.currentLigandData;
   if (ligandToShow) {
     loadMolecule(ligandToShow, "ligand");
     setActiveButton("show-ligand-btn");
-  } else if (historical) {
-    Utils.showToast("请先查看此任务的一个构象。", "warning");
   } else {
     const ligandFile = document.getElementById("ligand-file").files[0];
     const smilesInput = document.getElementById("smiles-input").value.trim();
@@ -330,24 +336,11 @@ function showNotification(message, type) {
 }
 
 function showComplex() {
-  const jobId = typeof getCurrentJobId === "function" ? getCurrentJobId() : null;
-
+  const jobId = getCurrentJobId();
   if (jobId) {
-    loadComplexStructure(jobId);
-    setActiveButton("show-complex-btn");
+    loadComplexStructure(jobId, Number(document.getElementById("pose-select").value) || 1);
   } else {
-    const resultsContent = document.getElementById("results-content");
-    const hasResults = resultsContent.innerHTML.includes("结构编号");
-
-    if (hasResults) {
-      if (jobId) {
-        loadComplexStructure(jobId);
-      } else {
-        alert("复合物结构数据不可用，请重新进行对接分析");
-      }
-    } else {
-      alert("请先进行分子对接分析以生成复合物结构");
-    }
+    alert("请先加载已验证的对接结果");
   }
 }
 
@@ -939,7 +932,7 @@ function renderDurableTaskSuccess(record, result, options = {}) {
     <div style="margin-bottom: 20px; padding: 16px; background: #f0fdf4; border-radius: 8px; border-left: 4px solid #16a34a;">
       <div style="font-weight: bold; color: #166534;">持久化对接任务完成</div>
       <div style="font-size: 14px; color: #166534; margin-top: 4px;">任务ID：${Safe.escapeHtml(result.task_id)} · 已验证构象数：${result.total_poses}</div>
-      <div style="font-size: 14px; color: #166534; margin-top: 4px;">最佳结合能：${result.binding_energy.toFixed(3)} kcal/mol</div>
+      <div style="font-size: 14px; color: #166534; margin-top: 4px;">最佳 Vina 评分：${result.binding_energy.toFixed(3)} kcal/mol</div>
       <div style="font-size: 12px; color: #475569; margin-top: 8px;">警告：${warningText}</div>
       <div style="font-size: 12px; color: #475569; margin-top: 4px;">产物：${artifactText}</div>
       <div style="font-size: 12px; color: #64748b; margin-top: 8px;">${poseMappingText}</div>
@@ -1335,21 +1328,13 @@ function renderDockingResultsTable(data, options = {}) {
   const totalPoses = results.length;
   const rows = results.map((result) => {
     const bindingEnergy = dockingResultNumber(result.binding_energy);
-    const energyValue = typeof result.binding_energy === "number" && Number.isFinite(result.binding_energy)
-      ? result.binding_energy
-      : null;
-    const energyClass = energyValue !== null && energyValue <= -8
-      ? "score-high"
-      : energyValue !== null && energyValue <= -6
-        ? "score-medium"
-        : "score-low";
     const viewButton = canViewPose
       ? `<button class="action-btn btn-primary docking-pose-view-btn" aria-label="查看 Pose ${result.pose}" onclick="viewPose(${result.pose})">查看</button>`
       : "<span class=\"docking-pose-view-disabled\">—</span>";
     return `
       <tr>
         <td>Pose ${result.pose}</td>
-        <td><span class="${energyClass}">${bindingEnergy}</span></td>
+        <td class="docking-vina-score">${bindingEnergy}</td>
         <td>${dockingResultNumber(result.ligand_efficiency, 3)}</td>
         <td>${dockingResultNumber(result.rmsd_lb)}</td>
         <td>${dockingResultNumber(result.rmsd_ub)}</td>
@@ -1620,7 +1605,7 @@ function loadComplexStructure(jobId, poseNumber = 1) {
             receptor.format,
           );
           if (protModel && protModel.setStyle) {
-            protModel.setStyle({}, { cartoon: { color: "spectrum" } });
+            protModel.setStyle({}, { cartoon: { color: resultProteinColor() } });
             const waterAndOtherResns = [
               "HOH",
               "WAT",
@@ -1680,7 +1665,7 @@ function loadComplexStructure(jobId, poseNumber = 1) {
         if (ligandModel && ligandModel.setStyle) {
           ligandModel.setStyle(
             {},
-            { stick: { radius: 0.25, colorscheme: "greenCarbon" } },
+            { stick: { radius: 0.25, colorscheme: resultLigandColor() } },
           );
         }
 
@@ -1739,7 +1724,7 @@ function viewPose(poseNumber) {
           receptor.format,
         );
         if (prot && prot.setStyle) {
-          prot.setStyle({}, { cartoon: { color: "spectrum" } });
+          prot.setStyle({}, { cartoon: { color: resultProteinColor() } });
           const waterAndOtherResns = [
             "HOH",
             "WAT",
@@ -1780,12 +1765,13 @@ function viewPose(poseNumber) {
         if (ligModel && ligModel.setStyle) {
           ligModel.setStyle(
             {},
-            { stick: { radius: 0.25, colorscheme: "greenCarbon" } },
+            { stick: { radius: 0.25, colorscheme: resultLigandColor() } },
           );
         }
         viewer.zoomTo();
         viewer.render();
         renderedInteractionPose = {jobId, pose: poseNumber};
+        syncViewerModeState("complex");
         restoreDockingInteractions();
       } else {
         alert(`未能获取 Pose ${poseNumber} 的标准结构`);

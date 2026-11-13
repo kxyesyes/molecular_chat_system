@@ -549,6 +549,30 @@ test("restoring a running task initializes the progress manager on a fresh page"
   assert.equal(c.readRememberedDockingTask(), null);
 });
 
+test("returning to the complex keeps the selected pose", () => {
+  const {context: c, get} = harness();
+  get("pose-select").value = "4";
+  c.getCurrentJobId = () => "job";
+  c.setActiveButton = () => {};
+  let requested;
+  c.loadComplexStructure = (...args) => { requested = args; };
+  c.showComplex();
+  assert.deepEqual(requested, ["job", 4]);
+});
+
+test("result ligand view loads the selected task pose instead of the input ligand", async () => {
+  const {context: c, get} = harness();
+  get("pose-select").value = "4";
+  c.AppState.currentJobId = "job";
+  c.AppState.originalLigandData = "input coordinates";
+  c.fetchDockedPoseSdf = async (id, pose) => id + "-" + pose;
+  let displayed;
+  c.loadMolecule = data => { displayed = data; };
+  c.setActiveButton = () => {};
+  await c.showLigand();
+  assert.equal(displayed, "job-4");
+});
+
 (async () => {
   let failures = 0;
   for (const [name, fn] of tests) {
