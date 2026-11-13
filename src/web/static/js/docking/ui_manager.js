@@ -939,7 +939,7 @@ function renderDurableTaskSuccess(record, result, options = {}) {
     <div style="margin-bottom: 20px; padding: 16px; background: #f0fdf4; border-radius: 8px; border-left: 4px solid #16a34a;">
       <div style="font-weight: bold; color: #166534;">持久化对接任务完成</div>
       <div style="font-size: 14px; color: #166534; margin-top: 4px;">任务ID：${Safe.escapeHtml(result.task_id)} · 已验证构象数：${result.total_poses}</div>
-      <div style="font-size: 14px; color: #166534; margin-top: 4px;">最佳结合能：${result.binding_energy.toFixed(3)} kcal/mol</div>
+      <div style="font-size: 14px; color: #166534; margin-top: 4px;">最佳 Vina 评分：${result.binding_energy.toFixed(3)} kcal/mol</div>
       <div style="font-size: 12px; color: #475569; margin-top: 8px;">警告：${warningText}</div>
       <div style="font-size: 12px; color: #475569; margin-top: 4px;">产物：${artifactText}</div>
       <div style="font-size: 12px; color: #64748b; margin-top: 8px;">${poseMappingText}</div>
@@ -1335,21 +1335,13 @@ function renderDockingResultsTable(data, options = {}) {
   const totalPoses = results.length;
   const rows = results.map((result) => {
     const bindingEnergy = dockingResultNumber(result.binding_energy);
-    const energyValue = typeof result.binding_energy === "number" && Number.isFinite(result.binding_energy)
-      ? result.binding_energy
-      : null;
-    const energyClass = energyValue !== null && energyValue <= -8
-      ? "score-high"
-      : energyValue !== null && energyValue <= -6
-        ? "score-medium"
-        : "score-low";
     const viewButton = canViewPose
       ? `<button class="action-btn btn-primary docking-pose-view-btn" aria-label="查看 Pose ${result.pose}" onclick="viewPose(${result.pose})">查看</button>`
       : "<span class=\"docking-pose-view-disabled\">—</span>";
     return `
       <tr>
         <td>Pose ${result.pose}</td>
-        <td><span class="${energyClass}">${bindingEnergy}</span></td>
+        <td class="docking-vina-score">${bindingEnergy}</td>
         <td>${dockingResultNumber(result.ligand_efficiency, 3)}</td>
         <td>${dockingResultNumber(result.rmsd_lb)}</td>
         <td>${dockingResultNumber(result.rmsd_ub)}</td>

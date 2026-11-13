@@ -172,7 +172,7 @@
       if (event.view_status === "SUCCEEDED" && !state.stopped) {
         const result = event.result;
         node("p", "以下为 Vina 计算预测，不代表实验验证的结合活性。", box);
-        table(box, [["最佳结合能 (kcal/mol)", result.best_energy_kcal_mol], ["构象数", result.pose_count],
+        table(box, [["最佳 Vina 评分 (kcal/mol)", result.best_energy_kcal_mol], ["构象数", result.pose_count],
           ["工具", result.tool_version], ["评分类型", result.score_kind], ["构象文件 SHA-256", result.pose.sha256],
           ["输入 SHA-256", result.input_hash], ["配置 SHA-256", result.config_hash], ["工具策略 SHA-256", result.tool_policy_digest]]);
         const link = node("a", "下载已验证构象", box); link.setAttribute("href", result.pose.download_path); return;

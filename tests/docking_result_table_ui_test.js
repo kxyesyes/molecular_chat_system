@@ -76,6 +76,7 @@ context.renderDockingResultsTable(
   { restored: false },
 );
 assert.match(get("results-content").innerHTML, /结构编号/);
+assert.doesNotMatch(get("results-content").innerHTML, /score-(high|medium|low)/);
 assert.match(get("results-content").innerHTML, /-8\.4/);
 for (const value of ["-6.234", "0.423", "1.863", "Vina"]) {
   assert(get("results-content").innerHTML.includes(value), "retain verified Vina result " + value);
