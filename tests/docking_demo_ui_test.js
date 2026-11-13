@@ -11,8 +11,8 @@ const uiSource = fs.readFileSync("src/web/static/js/docking/ui_manager.js", "utf
 
 assert.match(template, /载入示例[：:]\s*曼氏血吸虫 PDE4A apo（6FG5）\+ 罗氟司特/);
 assert.match(source, /已载入曼氏血吸虫 PDE4A apo（6FG5）和罗氟司特/);
-assert.match(template, /docking\/ui_manager\.js\?v=20261112-docking-resume-v3/);
-assert.match(template, /docking\/main\.js\?v=20261112-demo-search-v2/);
+assert.match(template, /docking\/ui_manager\.js\?v=20261112-docking-regions-v4/);
+assert.match(template, /docking\/main\.js\?v=20261112-demo-regions-v3/);
 assert.match(source, /async function loadDockingDemo\(\)/);
 assert.match(source, /\/api\/docking\/demo\/pde4a-apo/);
 assert.match(source, /PDE4A_apo_6FG5\.pdb/);

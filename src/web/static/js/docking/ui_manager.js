@@ -406,6 +406,7 @@ function loadProteinFile(file) {
   AppState.currentComplexData = null;
   if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
   return new Promise((resolve, reject) => {
+    if (typeof clearDockingCavities === "function") clearDockingCavities();
     const reader = new FileReader();
     reader.onload = function (e) {
       beginDockingView();
@@ -558,6 +559,7 @@ function removeFile(index, inputId, displayId) {
   });
 
   input.files = dt.files;
+  if (inputId === "protein-file" && typeof clearDockingCavities === "function") clearDockingCavities();
   display.innerHTML = "";
 
   Array.from(input.files).forEach((file, i) => {
@@ -993,6 +995,9 @@ async function loadDurableResultDetails(result, options = {}) {
         ? { pose: result.best_pose_index }
         : null,
     }, { restored });
+    if (typeof mountDockingConsensus === "function") {
+      mountDockingConsensus(result.task_id, jobId, !restored && !!result.result_job_id);
+    }
     if (!restored && result.result_job_id && typeof currentProteinData !== "undefined" && currentProteinData) {
       const bestPose = Number.isInteger(result.best_pose_index) && result.best_pose_index > 0
         ? result.best_pose_index
@@ -1208,7 +1213,7 @@ function startDocking() {
     return;
   }
   if (!AppState.dockingBoxCenterTouched) {
-    Utils.showToast("请点击“自动定位”，或输入对接盒中心坐标后再开始。", "warning");
+    Utils.showToast("请选择候选空腔、点击自动定位或输入搜索盒中心。", "warning");
     return;
   }
 
@@ -1881,6 +1886,7 @@ function generateReport(jobId) {
 function resetDocking(options = {}) {
   const preserveInputs = options.preserveInputs === true;
   if (!preserveInputs) {
+    if (typeof clearDockingCavities === "function") clearDockingCavities();
     document.getElementById("protein-file").value = "";
     document.getElementById("ligand-file").value = "";
     document.getElementById("smiles-input").value = "";

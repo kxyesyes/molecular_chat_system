@@ -191,7 +191,7 @@ async function loadDockingDemo() {
     document.getElementById("exhaustiveness").value = "24";
     document.getElementById("num_modes").value = "20";
     document.getElementById("energy_range").value = "3";
-    Utils.showToast("已载入曼氏血吸虫 PDE4A apo（6FG5）和罗氟司特。请点击“自动定位”，或输入对接盒中心坐标。", "success", 6000);
+    Utils.showToast("已载入曼氏血吸虫 PDE4A apo（6FG5）和罗氟司特。可识别候选空腔或自定义搜索区域。", "success", 6000);
   } catch (error) {
     Utils.showToast(`示例载入失败：${error.message || "未知错误"}`, "warning", 7000);
   } finally {

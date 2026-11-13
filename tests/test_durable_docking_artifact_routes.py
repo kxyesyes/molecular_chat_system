@@ -144,7 +144,9 @@ def _build_client(tmp_path: Path, docking_service=None):
         request.scope["agent_session_id"] = OWNER
         return await call_next(request)
 
-    setup_docking_routes(app, docking_service=docking_service, task_runtime=runtime)
+    from src.web.routes.api_routes import _read_upload_limited
+    setup_docking_routes(app, docking_service=docking_service, task_runtime=runtime,
+                         read_upload_limited=_read_upload_limited)
     return TestClient(app, base_url="https://localhost")
 
 
@@ -156,6 +158,28 @@ def test_durable_artifact_is_available_through_legacy_viewer_result_route(tmp_pa
     assert response.status_code == 200, response.text
     assert response.content.startswith(b"MODEL 1")
     assert b"MODEL 2" in response.content
+
+
+def test_region_search_and_consensus_use_owned_pose_frames(tmp_path, monkeypatch):
+    from src.docking.pose_export import pose_sdf_from_pdbqt
+
+    client = _build_client(tmp_path)
+    receptor = (Path(__file__).resolve().parents[1] / "data/samples/PDE4A_apo_6FG5.pdb").read_bytes()
+    regions = client.post("/api/docking/cavities", files={"protein_file": ("sample.pdb", receptor)})
+    assert regions.status_code == 200, regions.text
+    assert regions.json()["cavities"][0]["volume"] > 0
+    reference = pose_sdf_from_pdbqt(_pdbqt_with_two_poses().decode(), 1)
+    files = {"structure": ("reference.sdf", reference)}
+    url = f"/api/docking/tasks/{TASK_ID}/consensus"
+    response = client.post(url, files=files, data={"mode": "import"})
+    assert response.status_code == 200, response.text
+    rows = response.json()["rows"]
+    assert rows[0]["pose"] == 1 and rows[0]["rmsd"] == 0.0 and rows[1]["rmsd"] > 5
+    assert response.json()["provenance"]["mode"] == "import"
+    monkeypatch.setenv("MEDCHAT_FITDOCK_BIN", str(tmp_path / "missing"))
+    assert client.get("/api/docking/fitdock/status").json() == {"available": False}
+    assert client.post(url, files=files, data={"mode": "template"}).status_code == 503
+    assert client.post(url.replace(TASK_ID, "other"), files=files, data={"mode": "import"}).status_code == 404
 
 
 def test_durable_artifact_supports_pose_sdf_for_every_pose(tmp_path):

@@ -12,7 +12,7 @@
   <script src="/static/vendor/3dmol/3Dmol-min.js?v=2.5.4"></script>
 
   <!-- 页面样式 -->
-  <link rel="stylesheet" href="/static/css/molecular_docking.css?v=20261027-result-table-v2" />
+  <link rel="stylesheet" href="/static/css/molecular_docking.css?v=20261112-cavities" />
   <link rel="stylesheet" href="/static/css/mobile_baseline.css?v=20260511a" />
   <link rel="stylesheet" href="/static/css/subpage_header.css?v=20260525a" />
 </head>
@@ -105,7 +105,15 @@
 
       <!-- 对接参数 -->
       <div class="input-section">
-        <div class="section-title">对接参数</div>
+        <div class="section-title">对接区域</div>
+        <div class="cavity-picker">
+          <button type="button" class="action-btn btn-secondary" onclick="detectDockingCavities(this)">识别候选空腔</button>
+          <label for="cavity-choice">搜索区域</label>
+          <select id="cavity-choice" onchange="applyDockingCavity(this)">
+            <option value="">自定义区域</option>
+          </select>
+          <div id="cavity-status" role="status"></div>
+        </div>
 
         <!-- 盒子中心坐标 -->
         <div style="margin-bottom: 15px">
@@ -166,7 +174,7 @@
             显示对接盒子
           </button>
           <button class="action-btn btn-secondary" onclick="autoSetBoxToLigand()" id="auto-box-btn"
-            style="flex: 1; padding: 8px 12px; font-size: 13px" title="自动将盒子中心设置为配体中心">
+            style="flex: 1; padding: 8px 12px; font-size: 13px" title="按结构内配体定位；无配体时使用蛋白中心">
             自动定位
           </button>
         </div>
@@ -388,8 +396,9 @@
   <script src="/static/js/docking/viewer_manager.js?v=20261007-safe-dom-v1"></script>
   <script src="/static/js/docking/interactions.js?v=20261031-interaction-status-v2"></script>
   <script src="/static/js/docking/docking_box.js?v=20261012-box-confirmation-v1"></script>
-    <script src="/static/js/docking/ui_manager.js?v=20261112-docking-resume-v3"></script>
-    <script src="/static/js/docking/main.js?v=20261112-demo-search-v2"></script>
+  <script src="/static/js/docking/workspace.js?v=20261112-1"></script>
+    <script src="/static/js/docking/ui_manager.js?v=20261112-docking-regions-v4"></script>
+    <script src="/static/js/docking/main.js?v=20261112-demo-regions-v3"></script>
 </body>
 
 </html>
