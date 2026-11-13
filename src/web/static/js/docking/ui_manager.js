@@ -1,11 +1,17 @@
 // ==================== UI状态管理 ====================
 const Safe = window.MedChatSafeRender;
 let dockingViewSequence = 0;
+let renderedInteractionPose = null;
+function isRenderedInteractionPose(jobId, pose) {
+  return renderedInteractionPose?.jobId === jobId && renderedInteractionPose.pose === pose;
+}
 let submittedDockingProtein;
 let boundDockingProtein = null;
 let loadedDockingProteinFile = null;
 const batchDockingProteins = new Map();
 function beginDockingView() {
+  renderedInteractionPose = null;
+  if (typeof clearInteractionOverlays === "function") clearInteractionOverlays();
   const status = document.getElementById("interaction-status");
   if (status) status.textContent = "";
   return ++dockingViewSequence;
@@ -74,19 +80,6 @@ function onPoseSelectChange(sel) {
   }
 }
 
-// 保存当前样式和相互作用状态
-function saveCurrentViewState() {
-  const state = typeof interactionsState === "undefined" ? {} : interactionsState;
-  return {
-    style: AppState.currentStyle,
-    interactions: {
-      hydrogenBonds: !!state.hydrogenBonds,
-      piPiInteractions: !!state.piPiInteractions,
-      hydrophobicInteractions: !!state.hydrophobicInteractions,
-    },
-  };
-}
-
 async function fetchDockedPoseSdf(jobId, poseNumber = 1) {
   const response = await fetch(
     `/api/docking/pose_sdf/${jobId}?pose=${poseNumber}`,
@@ -102,14 +95,13 @@ async function fetchDockedPoseSdf(jobId, poseNumber = 1) {
   return await response.text();
 }
 
-function restoreDockingInteractions(state) {
-  if (!state) return;
+function restoreDockingInteractions() {
   const viewSequence = dockingViewSequence;
   setTimeout(() => {
     if (viewSequence !== dockingViewSequence) return;
-    if (state.interactions.hydrogenBonds) displayHydrogenBonds();
-    if (state.interactions.piPiInteractions) displayPiPiInteractions();
-    if (state.interactions.hydrophobicInteractions)
+    if (AppState.interactions?.hydrogenBonds) displayHydrogenBonds();
+    if (AppState.interactions?.piPiInteractions) displayPiPiInteractions();
+    if (AppState.interactions?.hydrophobicInteractions)
       displayHydrophobicInteractions();
   }, 100);
 }
@@ -139,7 +131,6 @@ function overlayTopN() {
 
   if (!viewer) initViewer();
 
-  const savedState = saveCurrentViewState();
 
   // 为每个 pose 并发请求标准 SDF（用 null 代替失败的 pose）
   const posePromises = [];
@@ -159,7 +150,7 @@ function overlayTopN() {
             AppState.currentProteinFormat || "pdb",
           );
           if (prot && prot.setStyle) {
-            const proteinColor = {gray: "#bfbfbf", dark: "#e6eef8"}[savedState.style] || "spectrum";
+            const proteinColor = {gray: "#bfbfbf", dark: "#e6eef8"}[AppState.currentStyle] || "spectrum";
             prot.setStyle({}, { cartoon: { color: proteinColor } });
             const waterAndOtherResns = [
               "HOH",
@@ -215,7 +206,9 @@ function overlayTopN() {
 
         viewer.zoomTo();
         viewer.render();
-        restoreDockingInteractions(savedState);
+        const selected = Number(document.getElementById("pose-select")?.value);
+        if (poseSdfs[selected - 1]) renderedInteractionPose = {jobId, pose: selected};
+        restoreDockingInteractions();
       } catch (e) {
         console.error("叠加多个 Pose 失败:", e);
       }
@@ -1654,6 +1647,9 @@ function loadComplexStructure(jobId, poseNumber = 1) {
         viewer.render();
 
         currentComplexData = ligandPdbqt;
+        renderedInteractionPose = {jobId, pose: selectedPoseNumber};
+        const selector = document.getElementById("pose-select");
+        if (selector) selector.value = String(selectedPoseNumber);
         if (typeof syncViewerModeState === "function") {
           syncViewerModeState("complex");
         } else {
@@ -1667,13 +1663,7 @@ function loadComplexStructure(jobId, poseNumber = 1) {
           autoFocusToLigand();
         }, 500);
 
-        setTimeout(() => {
-          if (viewSequence !== dockingViewSequence) return;
-          if (interactionsState.hydrogenBonds) displayHydrogenBonds();
-          if (interactionsState.piPiInteractions) displayPiPiInteractions();
-          if (interactionsState.hydrophobicInteractions)
-            displayHydrophobicInteractions();
-        }, 100);
+        restoreDockingInteractions();
       } catch (e) {
         console.error("复合物渲染失败:", e);
         if (typeof Utils?.showToast === "function") {
@@ -1697,7 +1687,6 @@ function viewPose(poseNumber) {
   if (poseSelect) poseSelect.value = String(poseNumber);
   if (!viewer) initViewer();
 
-  const savedState = saveCurrentViewState();
 
   const renderPose = (poseSdf) => {
     try {
@@ -1754,7 +1743,8 @@ function viewPose(poseNumber) {
         }
         viewer.zoomTo();
         viewer.render();
-        restoreDockingInteractions(savedState);
+        renderedInteractionPose = {jobId, pose: poseNumber};
+        restoreDockingInteractions();
       } else {
         alert(`未能获取 Pose ${poseNumber} 的标准结构`);
       }
@@ -1873,6 +1863,7 @@ function generateReport(jobId) {
 
 // 重置对接
 function resetDocking(options = {}) {
+  beginDockingView();
   const preserveInputs = options.preserveInputs === true;
   if (!preserveInputs) {
     if (typeof clearDockingCavities === "function") clearDockingCavities();

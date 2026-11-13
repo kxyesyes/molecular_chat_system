@@ -29,7 +29,7 @@ function toggleHydrogenBonds() {
     displayHydrogenBonds();
   } else {
     btn.classList.remove("active");
-    removeInteractions("hbonds");
+    removeInteractions("hydrogen_bond");
   }
 }
 
@@ -46,7 +46,7 @@ function togglePiPiInteractions() {
     displayPiPiInteractions();
   } else {
     btn.classList.remove("active");
-    removeInteractions("pipi");
+    removeInteractions("pi_pi");
   }
 }
 
@@ -78,6 +78,8 @@ const INTERACTION_COLORS = {
 // Cache the in-flight promise as well as its response so toggling several
 // overlays does not launch duplicate (and comparatively expensive) analyses.
 const interactionAnalysisCache = new Map();
+const interactionShapes = new Map();
+const interactionSwitch = {hydrogen_bond: "hydrogenBonds", pi_pi: "piPiInteractions", hydrophobic: "hydrophobicInteractions"};
 
 function interactionAnalysisKey(jobId, pose) {
   return `${jobId}:${pose}`;
@@ -119,7 +121,8 @@ function interactionGeometryOccurrences(interaction) {
 function renderInteractionEvidence(kind, interactions) {
   if (!viewer || !Array.isArray(interactions)) return 0;
   const color = INTERACTION_COLORS[kind] || "#16a3ff";
-  let rendered = 0;
+  removeInteractions(kind);
+  const shapes = [];
   interactions.forEach((interaction) => {
     interactionGeometryOccurrences(interaction).forEach((geometry) => {
       const displayGeometry = geometry?.display_geometry;
@@ -134,7 +137,7 @@ function renderInteractionEvidence(kind, interactions) {
       ) {
         return;
       }
-      viewer.addCylinder({
+      const shape = viewer.addCylinder({
         start,
         end,
         radius: 0.1,
@@ -143,11 +146,14 @@ function renderInteractionEvidence(kind, interactions) {
         fromCap: 1,
         toCap: 1,
       });
-      rendered += 1;
+      shapes.push(shape);
     });
   });
-  if (rendered > 0) viewer.render();
-  return rendered;
+  if (shapes.length) {
+    interactionShapes.set(kind, shapes);
+    viewer.render();
+  }
+  return shapes.length;
 }
 
 // 相互作用只展示后端成熟分析器的结构化证据；浏览器端不再自行猜测化学作用。
@@ -160,11 +166,16 @@ async function requestInteractionAnalysis(kind) {
     Utils.showToast("请先加载有效的对接任务和构象", "warning");
     return;
   }
+  const isCurrent = () => interactionsState[interactionSwitch[kind]] &&
+    getCurrentJobId() === jobId && Number(poseSelect?.value || 1) === pose &&
+    (typeof getDockingViewSequence !== "function" || getDockingViewSequence() === viewSequence) &&
+    (typeof isRenderedInteractionPose !== "function" || isRenderedInteractionPose(jobId, pose));
+  if (!isCurrent()) return;
   const status = document.getElementById("interaction-status");
   if (status) status.textContent = "";
   try {
     const analysis = await fetchInteractionAnalysis(jobId, pose);
-    if ((typeof getDockingViewSequence === "function" && getDockingViewSequence() !== viewSequence) || getCurrentJobId() !== jobId || parseInt(poseSelect?.value || "1", 10) !== pose) return;
+    if (!isCurrent()) return;
     if (analysis.status === "failed") {
       const detail = analysis.warnings?.[0] || analysis.detail;
       Utils.showToast(
@@ -196,7 +207,7 @@ async function requestInteractionAnalysis(kind) {
       Utils.showToast(`已显示 ${rendered} 条${kind}相互作用证据`, "success");
     }
   } catch (error) {
-    if ((typeof getDockingViewSequence === "function" && getDockingViewSequence() !== viewSequence) || getCurrentJobId() !== jobId) return;
+    if (!isCurrent()) return;
     console.warn("后端相互作用分析不可用:", error);
     Utils.showToast("相互作用分析服务不可用，未显示推测结果", "warning");
   }
@@ -214,53 +225,20 @@ function displayHydrophobicInteractions() {
   return requestInteractionAnalysis("hydrophobic");
 }
 
-// 移除特定类型的相互作用
-function removeInteractions(type) {
-  viewer.removeAllShapes();
-  // 不要在这里调用 StyleManager.apply：
-  // 它会执行全局 setStyle({},{}) 并依赖配体识别，某些场景会导致配体样式丢失/看起来消失。
-  // 这里仅清理 shape，然后按当前开关重新绘制其余相互作用。
-
-  const hasOtherInteractions =
-    (type !== "hbonds" && interactionsState.hydrogenBonds) ||
-    (type !== "pipi" && interactionsState.piPiInteractions) ||
-    (type !== "hydrophobic" && interactionsState.hydrophobicInteractions);
-
-  // 若所有相互作用都已关闭，恢复一次复合物基础视图，确保蛋白/配体样式稳定存在。
-  if (!hasOtherInteractions) {
-    try {
-      const jobId =
-        typeof getCurrentJobId === "function" ? getCurrentJobId() : null;
-      const poseSelect = document.getElementById("pose-select");
-      const currentPose = poseSelect
-        ? parseInt(poseSelect.value || "1", 10)
-        : 1;
-
-      // 保持当前 pose，不要默认回到 pose 1
-      if (
-        jobId &&
-        typeof viewPose === "function" &&
-        Number.isFinite(currentPose)
-      ) {
-        viewPose(Math.max(1, currentPose));
-      } else if (jobId && typeof loadComplexStructure === "function") {
-        loadComplexStructure(jobId);
-      } else {
-        viewer.render();
-      }
-    } catch (e) {
-      console.warn("恢复复合物视图失败:", e);
-      viewer.render();
-    }
-    return;
+// 3Dmol reuses shape positions after clearing the scene. Only remove the
+// original object if it still occupies its slot.
+function removeInteractions(kind) {
+  const shapes = interactionShapes.get(kind);
+  if (!shapes) return;
+  for (const shape of shapes) {
+    if (viewer.shapes[shape.shapePosition] === shape) viewer.removeShape(shape);
   }
+  interactionShapes.delete(kind);
+  viewer.render();
+}
 
-  if (type !== "hbonds" && interactionsState.hydrogenBonds)
-    displayHydrogenBonds();
-  if (type !== "pipi" && interactionsState.piPiInteractions)
-    displayPiPiInteractions();
-  if (type !== "hydrophobic" && interactionsState.hydrophobicInteractions)
-    displayHydrophobicInteractions();
+function clearInteractionOverlays() {
+  for (const kind of interactionShapes.keys()) removeInteractions(kind);
 }
 
 // 显示相互作用信息提示
