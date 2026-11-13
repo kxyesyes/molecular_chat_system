@@ -143,7 +143,17 @@ def pose_sdf_from_pdbqt(
     heavy_atoms = {atom.GetIdx() for atom in mol.GetAtoms() if atom.GetAtomicNum() > 1}
     if not heavy_atoms.issubset(assigned_atoms):
         raise PoseExportError("Pose 未完整映射全部重原子")
-    export_mol = mol if keep_hydrogens else Chem.RemoveHs(mol)
+    if keep_hydrogens:
+        # Vina merges nonpolar H into their parents. Place only those absent
+        # from the artifact, retaining its heavy-atom and donor-H coordinates.
+        partial = Chem.RWMol(mol)
+        for idx in reversed(range(mol.GetNumAtoms())):
+            if idx not in assigned_atoms:
+                partial.RemoveAtom(idx)
+        partial.UpdatePropertyCache(strict=False)
+        export_mol = Chem.AddHs(partial, addCoords=True)
+    else:
+        export_mol = Chem.RemoveHs(mol)
     sdf_block = Chem.MolToMolBlock(export_mol)
     if not sdf_block:
         raise PoseExportError("无法导出标准 SDF", 500)

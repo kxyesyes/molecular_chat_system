@@ -3080,7 +3080,7 @@ def _c4a_runtime_rig(tmp_path, monkeypatch, request, *, hold=False, fault=None):
     original_wrap = base.CommandAdapter.wrap_command
 
     def analysis_argv(adapter, *args):
-        if type(adapter) is base.CommandAdapter and args[:4] == ("-NOFLIP", "-Quiet", "-DB", "dict"):
+        if type(adapter) is base.CommandAdapter and args[:2] == ("-NOFLIP", "-Quiet"):
             assert adapter._ownership_scope is p.scope and p.scope is not None
             p.phase = "analysis"
             p.phases.append(p.phase)

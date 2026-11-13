@@ -2220,7 +2220,7 @@ class _C4aServiceRig:
         real_wrap = CommandAdapter.wrap_command
 
         def analysis_argv(adapter, *args):
-            if type(adapter) is CommandAdapter and args[:4] == ("-NOFLIP", "-Quiet", "-DB", "dict"):
+            if type(adapter) is CommandAdapter and args[:2] == ("-NOFLIP", "-Quiet"):
                 # Exercise real process ownership without a host reduce install.
                 # Empty synthetic stdout deliberately leaves analysis unavailable.
                 self._spawn_phase = "analysis-receptor"
