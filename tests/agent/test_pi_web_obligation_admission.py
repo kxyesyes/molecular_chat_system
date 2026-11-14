@@ -254,3 +254,16 @@ def test_reason_forwarding_is_closed_and_never_publishes_other_exception_text(mo
         admission.prepare_web_request({'message': '你好'}, session_id='owner', trace_id='closed-reason')
     assert caught.value.code == 'request_clarification_required'
     assert str(caught.value) == 'request_clarification_required'
+
+
+def test_target_design_docking_energy_prohibition_keeps_only_design_actions():
+    from src.agent.contracts.docking_intent import explicit_docking_action
+    query = ('以 PDE5 为靶点设计 10 个候选分子，并筛选 Top 3。分子生成必须使用本地 '
+             'Ollama gmm-llama:latest，后续用真实性质/ADMET/RG-MPNN 结果评分；'
+             '没有真实 docking 参数时不要给 docking energy。')
+    assert not explicit_docking_action(query)
+    assert explicit_docking_action(query + '然后执行分子对接')
+    plan = compile_web_requirements(context(query), allowed_tools=WEB_TOOLS)
+    assert {s.tool_name for s in plan.steps} == {
+        'target_database_search', 'llm_molecular_generator', 'property_calculator',
+        'admet_predictor', 'activity_predictor', 'candidate_ranker'}

@@ -400,3 +400,30 @@ def test_invalid_drug_likeness_score_cannot_be_published(make, monkeypatch, inva
     answer = json.loads(api().render_web_scientific_answer(case.resolver, evidence_ids=ids))
     assert not answer['acceptance']['finish_eligible']
     assert 'data' not in answer['observations'][1]
+
+
+def test_three_evidence_top_three_survives_conflict_outside_selected_candidates():
+    from src.agent.contracts import ToolProvenance, ToolResult
+    from src.agent.orchestrators import WorkflowStep
+    from src.agent.tools.candidate_ranker import CandidateRanker
+    from src.agent.validators.molecule_candidates import sanitize_generated_candidates
+    from tests.agent.test_family_activity_tool import family_row, conflict_row
+
+    smiles = ['CCO', 'CCN', 'CCC', 'CCF']
+    outputs = {'molecules': sanitize_generated_candidates(smiles, requested_count=4).candidate_set.to_dict(),
+               'properties': [{'smiles': s, 'properties': {'qed': .7, 'logp': 2.}} for s in smiles],
+               'admet': [{'smiles': s, 'admet': {'prediction_method': 'admet_ai', 'risk_count': 1,
+                         'total_endpoints': 24}} for s in smiles],
+               'activity': [family_row(smiles=s) for s in smiles[:3]] + [conflict_row(smiles=smiles[3])]}
+    payload = {'metadata': {'docking_top_n': 3, 'required_evidence': ['properties', 'admet', 'activity']},
+               'outputs': outputs}
+    data = CandidateRanker().execute(payload)['data']
+    assert data['ranked_candidates'][-1]['missing_required_evidence'] == ['activity']
+    result = ToolResult.success_result('candidate_ranker', data=data,
+        provenance=ToolProvenance(tool_name='candidate_ranker', tool_version='1'))
+    def reasons():
+        return api().web_observation_reasons(result, {'input_data': {'query': payload}},
+            WorkflowStep('ranking', result.tool_name), request_query='rank')
+    assert reasons() == []
+    result.data['top_candidates'][0]['score'] += .01
+    assert 'ranking_evidence_mismatch' in reasons()

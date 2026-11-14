@@ -97,7 +97,9 @@ class SingleAttemptTool:
         # on this request-local view, never on the shared adapter.
         guarded = ({'dispatch_guard': self._dispatch_guard}
                    if self._dispatch_guard is not None else {})
-        raw_validator = validate_raw_observation
+        def raw_validator(raw):
+            return validate_raw_observation(raw, tool_name=self.name)
+
         from src.agent.tooling.target_contract import TargetToolAdapter, LOOKUP_STATUS
         if type(self.adapter) is TargetToolAdapter and self.name == 'target_database_search':
             def raw_validator(raw):

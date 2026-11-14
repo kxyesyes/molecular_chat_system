@@ -253,6 +253,8 @@ def positive_intent_text(query: str) -> str:
     This is shared by routing and deterministic planning. In particular the
     mere occurrence of a tool/endpoint in a prohibition is not authorization.
     """
+    from src.agent.contracts.docking_intent import without_docking_energy_prohibition
+    query = without_docking_energy_prohibition(query)
     text = re.sub(r"不要\s*跳过|do\s+not\s+skip|don't\s+skip", "", query, flags=re.I)
     # Keep punctuation intact: it can be part of a receptor path, a decimal
     # docking-box coordinate, or the canonical generation grammar.
@@ -290,6 +292,8 @@ def wants_activity(query: str) -> bool:
 
 def property_calculation_forbidden(query: str) -> bool:
     """A design bound does not override an explicit descriptor prohibition."""
+    from src.agent.contracts.docking_intent import without_docking_energy_prohibition
+    query = without_docking_energy_prohibition(query)
     text = re.sub(r"不要\s*跳过|do\s+not\s+skip|don't\s+skip", "", query, flags=re.I)
     operation = r"(?:(?:计算|运行|执行|评估|预测|进行)|\b(?:calculat\w*|comput\w*|run\w*|perform\w*|predict\w*)\b)"
     subject = r"(?:(?:候选)?(?:分子的?)?(?:理化性质|性质|描述符|分子量)|property_calculator\b|\b(?:properties|property|descriptors?|MW|logP|TPSA|QED|HBA|HBD)\b)"

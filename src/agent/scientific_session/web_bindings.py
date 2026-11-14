@@ -34,7 +34,7 @@ _RECORD_LIMIT = 512 * 1024
 
 
 def _wire(value, limit=65536):
-    validate_json(value, max_bytes=limit, reason=_ERROR)
+    validate_json(value, max_bytes=limit, max_nodes=65536 if limit == _RECORD_LIMIT else 16384, reason=_ERROR)
     return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
 
 
@@ -314,11 +314,17 @@ class WebBindingResolver:
             if output_key not in outputs and output_key not in optional:
                 raise DecisionBoundaryError('web_dependency_unusable')
             roles.append({'role': 'dependency', 'step_ref': dependency,
-                          'evidence_id': identity, 'output_sha256': _digest(source.data)})
+                          'evidence_id': identity, 'output_sha256': _digest(source.data, _RECORD_LIMIT)})
         # No additional output outside the compiled dependency allowlist can
         # enter $.workflow, even when Pi chose independent actions earlier.
         keys = {steps[ref].output_key for ref in self.requirements.dependencies[step.name]}
         outputs = {key: value for key, value in outputs.items() if key in keys}
+        if name == 'candidate_ranker' and isinstance(outputs.get('admet'), list):
+            # Bind the complete output digest above. Only these validated
+            # fields enter the ranker's risk fraction; endpoints stay in the ledger.
+            outputs['admet'] = [{**row, 'admet': {key: row['admet'][key] for key in (
+                'prediction_method', 'risk_count', 'total_endpoints', 'demo_mode', 'fallback_used')
+                if key in row['admet']}} for row in outputs['admet']]
         original = self._input_journal.context(0)
         if name not in ('llm_molecular_generator', 'rag_search', 'target_database_search'):
             if step.input_data == original.query and context.query != original.query:
@@ -550,7 +556,7 @@ class WebBindingResolver:
         try:
             self._check_owner()
             validate_json(checkpoint, max_bytes=_RECORD_LIMIT, reason=_ERROR)
-            before = _wire(observation_value(result))
+            before = _wire(observation_value(result), _RECORD_LIMIT)
             if (type(checkpoint) is not dict or type(checkpoint['metadata']) is not dict
                     or result.status.value not in ('succeeded', 'partial')
                     or result.error is not None or checkpoint['error'] is not None
@@ -572,8 +578,8 @@ class WebBindingResolver:
                     or provenance.tool_version != adapter.spec.version
                     or provenance.demo_mode is not False or provenance.fallback_used is not False
                     or provenance.input_digest != input_digest
-                    or provenance.output_digest != _digest(result.data)
-                    or _wire(checkpoint['output']) != _wire(result.to_legacy_dict())
+                    or provenance.output_digest != _digest(result.data, _RECORD_LIMIT)
+                    or _wire(checkpoint['output'], _RECORD_LIMIT) != _wire(result.to_legacy_dict(), _RECORD_LIMIT)
                     or result.quality['step_id'] != step.name or result.quality['output_key'] != step.name
                     or result.quality['binding_record_sha256'] != _digest(record, _RECORD_LIMIT)):
                 raise DecisionBoundaryError(_ERROR)
@@ -599,7 +605,7 @@ class WebBindingResolver:
             identity = EvidenceLedger(self._owner[0]).register_tool_result(
                 step.name, input_digest, candidate, binding_proof=proof)
             if (identity != result.quality['evidence_id'] or candidate.success is not result.success
-                    or _wire(observation_value(candidate)) != before):
+                    or _wire(observation_value(candidate), _RECORD_LIMIT) != before):
                 raise DecisionBoundaryError(_ERROR)
             return True
         except DecisionBoundaryError:
@@ -623,14 +629,14 @@ class WebBindingResolver:
         if compiled.metadata.get('candidate_source') and has_usable_observation(result) and not restored:
             from src.agent.validators import align_candidate_results
             if result.provenance is None or (result.provenance.output_digest is not None
-                    and result.provenance.output_digest != _digest(result.data)):
+                    and result.provenance.output_digest != _digest(result.data, _RECORD_LIMIT)):
                 raise DecisionBoundaryError('candidate_output_digest_mismatch')
             _, outputs = self._outputs(prior)
             aligned = align_candidate_results(outputs.get(compiled.metadata['candidate_source']), result,
                                                required=compiled.required)
             if aligned is not result:
                 raise DecisionBoundaryError(_ERROR)
-            result.provenance = replace(result.provenance, output_digest=_digest(result.data))
+            result.provenance = replace(result.provenance, output_digest=_digest(result.data, _RECORD_LIMIT))
             # Candidate alignment renders the entire structured data a second
             # time as indented JSON. Keep the authoritative data untouched, but
             # avoid letting that redundant presentation copy exhaust the Web

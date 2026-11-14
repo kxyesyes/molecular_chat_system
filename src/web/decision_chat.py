@@ -689,11 +689,22 @@ def web_scientific_display(result, *, concise=False, requested_admet_endpoints=(
         elif name == 'candidate_ranker' and isinstance(data, dict):
             rows = data.get('top_candidates', [])
             if rows:
+                evidence = [row.get('ranking_evidence', {}) for row in rows]
+                if all(e.get('weights_used') == {'properties': .5, 'admet': .25, 'activity': .25}
+                       for e in evidence):
+                    section = ['## 候选排序', '',
+                               '| 排名 | SMILES | 性质（50%） | ADMET（25%） | 活性（25%） | 优先级分数 |',
+                               '|---:|---|---:|---:|---:|---:|']
+                    for row, scores in zip(rows, evidence):
+                        values = (row['rank'], row['canonical_smiles'], scores['property_score'],
+                                  scores['admet_score'], scores['activity_score'], row['score'])
+                        section.append('| ' + ' | '.join(map(_display_cell, values)) + ' |')
+                    lines.insert(0, '\n'.join(section))
+                    continue
                 section = ['## 候选排序', '', '| 排名 | SMILES | 优先级分数 |', '|---:|---|---:|']
                 for row in rows:
                     section.append('| ' + ' | '.join(_display_cell(row.get(key)) for key in
                         ('rank', 'canonical_smiles', 'score')) + ' |')
-                evidence = [row.get('ranking_evidence', {}) for row in rows]
                 if all(e.get('weights_used') == {'properties': .5, 'admet': None, 'activity': None}
                        and e.get('admet_score') is None and e.get('activity_score') is None for e in evidence):
                     section.append('排序依据：0.5 ×（0.7 × QED + 0.3 × LogP 区间评分）；仅使用分子性质。')

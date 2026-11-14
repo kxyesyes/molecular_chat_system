@@ -231,3 +231,17 @@ def test_generation_constraint_projection_preserves_audit_and_acceptance(cited_p
     assert 'synthetic descriptor fixture' in complete['content']
     assert public['final_answer'] == result.final_answer == audit
     assert public['status'] == complete['status'] == 'partial'
+
+
+def test_three_evidence_ranking_shows_component_scores_and_weights_first():
+    from src.web.decision_chat import web_scientific_display
+    row = {'rank': 1, 'canonical_smiles': 'CCO', 'score': .65,
+           'ranking_evidence': {'property_score': .6, 'admet_score': .8, 'activity_score': .6,
+                                'weights_used': {'properties': .5, 'admet': .25, 'activity': .25}}}
+    audit = json.dumps({'acceptance': {'profile': 'medchat-web-v1'}, 'observations': [
+        {'tool': 'candidate_ranker', 'status': 'succeeded', 'data': {'top_candidates': [row]}}]})
+    result = AgentResult('rank', True, audit, final_answer=audit, outcome=RunOutcome.COMPLETED,
+                         metadata={'binding_profile': 'medchat-web-v1'})
+    answer = web_scientific_display(result, concise=True)
+    assert '性质（50%）' in answer and 'ADMET（25%）' in answer and '活性（25%）' in answer
+    assert '| 1 | CCO | 0.6 | 0.8 | 0.6 | 0.65 |' in answer

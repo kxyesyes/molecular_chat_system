@@ -144,10 +144,10 @@ def web_observation_reasons(result, record, step, *, request_query):
             required = set(payload['metadata'].get('required_evidence', ['properties']))
             if (set(data['required_evidence']) != required or data.get('unrankable_candidates')
                     or any(row.get('missing_required_evidence') or
-                        required & set(row.get('missing_evidence', [])) for row in rows)):
+                        required & set(row.get('missing_evidence', [])) for row in data['top_candidates'])):
                 reasons.append('required_ranking_evidence_missing')
             from src.agent.contracts.property_ranking_request import property_only_design_request
-            if property_only_design_request(request_query):
+            if property_only_design_request(request_query) or required == {'properties', 'admet', 'activity'}:
                 # Recompute only this fixed, deterministic heuristic from the
                 # already bound inputs; type/identity checks alone do not prove
                 # that a producer's scores, weights or ordering are correct.
@@ -472,7 +472,7 @@ def render_web_scientific_answer(resolver, *, required_tools=(), evidence_ids, i
         limitations=['Computed/predicted/retrieved evidence is not experimental validation.',
             'Partial or missing evidence does not establish completion or optimization success.',
             'ADMET available_methods is method-scoped; unknown alerts remain unknown.'])
-    validate_json(payload, max_bytes=65536, reason=_ERROR)
+    validate_json(payload, max_bytes=512 * 1024, max_nodes=65536, reason=_ERROR)
     payload = redact_sensitive(deepcopy(payload))
     resolver.verify_binding_closure()
     return json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True)

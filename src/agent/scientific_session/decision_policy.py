@@ -399,6 +399,23 @@ def model_observation(result, task_acceptance, *, record_references=None):
                 quality['model_provenance'] = [
                     {'data_row_provenance_ref': next(i for i, original in enumerate(originals) if original == value)}
                     if value in originals else value for value in model_provenance]
+    ranking_plan = (isinstance(task_acceptance, dict) and task_acceptance.get('profile') == 'medchat-web-v1'
+                    and any(check.get('tool_name') == 'candidate_ranker'
+                            for check in task_acceptance.get('checks', [])))
+    if ranking_plan and isinstance(data, list) and result.tool_name in ('activity_predictor', 'admet_predictor'):
+        # Pi chooses a step reference. The ranker independently receives the
+        # authenticated inputs, including full per-candidate activity provenance.
+        keys = ('candidate_id', 'smiles', 'status', 'success', 'family_id', 'activity_probability',
+                'predicted_pIC50', 'classification_regression_consistent')
+        summaries = []
+        for row in data:
+            summary = {key: row[key] for key in keys if key in row}
+            if isinstance(row.get('admet'), dict):
+                summary['admet'] = {key: row['admet'][key] for key in
+                                    ('prediction_method', 'risk_count', 'total_endpoints') if key in row['admet']}
+            summaries.append(summary)
+        data = summaries
+        quality = {key: quality[key] for key in ('evidence_id', 'step_id', 'validated') if key in quality}
     projected = {
         "tool_name": result.tool_name,
         "success": legacy["success"],
