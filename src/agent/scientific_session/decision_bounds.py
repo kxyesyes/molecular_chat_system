@@ -70,7 +70,16 @@ def configuration_generation(value):
     return value
 
 
-def observation_value(result, *, max_bytes=64 * 1024, max_nodes=16384):
+def prediction_batch_limits(tool_name, data):
+    # Full, local evidence can include one endpoint table or model provenance
+    # per molecule. The decision protocol retains its separate 64 KiB budget.
+    if (type(tool_name) is str and tool_name in ('admet_predictor', 'activity_predictor')
+            and type(data) is list and 2 <= len(data) <= 16):
+        return min(512 * 1024, len(data) * 64 * 1024), 65536
+    return 64 * 1024, 16384
+
+
+def observation_value(result, *, max_bytes=None, max_nodes=16384):
     """Bound fields before invoking any dataclass conversion/copy hooks."""
     from dataclasses import fields
     from src.agent.contracts import (
@@ -86,6 +95,8 @@ def observation_value(result, *, max_bytes=64 * 1024, max_nodes=16384):
         return {name: getattr(value, name) for name in names}
 
     value = shallow(result, ToolResult)
+    if max_bytes is None:
+        max_bytes, max_nodes = prediction_batch_limits(result.tool_name, result.data)
     if type(result.success) is not bool:
         raise DecisionBoundaryError('invalid_observation_success')
     if type(result.status) is not ObservationStatus:
@@ -106,12 +117,13 @@ def observation_value(result, *, max_bytes=64 * 1024, max_nodes=16384):
     return {'tool_name': result.tool_name, **result.to_legacy_dict()}
 
 
-def validate_raw_observation(raw):
+def validate_raw_observation(raw, *, tool_name=None):
     from src.agent.contracts import ToolResult
     if type(raw) is ToolResult:
         observation_value(raw)
     else:
-        validate_json(raw, max_bytes=64 * 1024, reason='observation_too_large')
+        size, nodes = prediction_batch_limits(tool_name, raw.get('data') if type(raw) is dict else None)
+        validate_json(raw, max_bytes=size, max_nodes=nodes, reason='observation_too_large')
         # Legacy conversion applies truthiness and drops status/error on its
         # success branch. Never let that promote contradictory observations.
         if type(raw) is dict and (

@@ -173,13 +173,14 @@ window.HomeChatRenderer = (function () {
     elements.connectionStatus.style.transition = "all 0.3s ease";
   }
 
-  function scrollToBottom() {
-    const elements = getElements();
-    if (!elements.chatContainer) return;
+  function isNearBottom() {
+    const {chatContainer} = getElements();
+    return chatContainer && chatContainer.scrollHeight - chatContainer.clientHeight - chatContainer.scrollTop <= 24;
+  }
 
-    setTimeout(function () {
-      elements.chatContainer.scrollTop = elements.chatContainer.scrollHeight;
-    }, 100);
+  function scrollToBottom() {
+    const {chatContainer} = getElements();
+    if (chatContainer) chatContainer.scrollTop = chatContainer.scrollHeight;
   }
 
   function addSystemMessage(message, isError) {
@@ -202,13 +203,15 @@ window.HomeChatRenderer = (function () {
     `;
     msgDiv.textContent = `提示 ${message}`;
 
+    const follow = isNearBottom();
     elements.chatContainer.appendChild(msgDiv);
-    elements.chatContainer.scrollTop = elements.chatContainer.scrollHeight;
+    if (follow) scrollToBottom();
   }
 
   return {
     addSystemMessage: addSystemMessage,
     getCurrentTime: getCurrentTime,
+    isNearBottom,
     scrollToBottom: scrollToBottom,
     showNotification: showNotification,
     showToast: showToast,

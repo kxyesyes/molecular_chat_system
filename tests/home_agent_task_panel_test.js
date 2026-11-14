@@ -30,7 +30,7 @@ assert(!source.includes('["failed", "rejected", "cancelled", "timeout", "unavail
   "homepage must not duplicate the shared non-success status list");
 assert(template.includes("/static/js/home/task_status.js"),
   "homepage must load the Agent task status module before the entrypoint");
-assert(template.includes("/static/js/home/task_status.js?v=20261112-step-labels-v1"),
+assert(template.includes("/static/js/home/task_status.js?v=20261114-result-reading-v1"),
   "optional-failure presentation changes require a refreshed task-status cache key");
 assert(template.includes("/static/js/home/task_panel.js"),
   "homepage must load the Agent task panel renderer before the entrypoint");
@@ -278,7 +278,6 @@ for (const [terminal, label] of Object.entries(terminalLabels)) {
     setAttribute(name, value) { this.attributes[name] = value; }};
   let mounted = true;
   let renderSucceeds = true;
-  let scrolls = 0;
   const context = {
     window: {HomeTaskState, HomeTaskStatus, HomeTaskPanel: {
       reset(target) { target.rows = []; target.resets += 1; },
@@ -295,7 +294,6 @@ for (const [terminal, label] of Object.entries(terminalLabels)) {
     createAgentTaskPanel: () => mounted ? panel : null,
     resolveAgentEventPresentation,
     getAgentEventLabel,
-    HomeChatRenderer: {scrollToBottom() { scrolls += 1; }},
   };
   vm.createContext(context);
   vm.runInContext(extractFunction("resetAgentTaskPanel"), context);
@@ -330,7 +328,6 @@ for (const [terminal, label] of Object.entries(terminalLabels)) {
   mounted = false;
   context.handleAgentEvent({event: terminal});
   assert.strictEqual(context.agentTaskState, before);
-  assert.strictEqual(scrolls, 4);
 }
 
 for (const [status, label] of [["partial", "部分完成"], ["not_calculated", "未执行（依赖未完成）"]]) {

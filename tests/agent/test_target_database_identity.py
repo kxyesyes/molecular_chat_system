@@ -72,6 +72,13 @@ def test_exact_pdb_named_accession_and_structure_details_keep_identity(gene, suc
         assert not service.structure_calls
 
 
+def test_two_aliases_for_one_database_record_share_one_structure_lookup():
+    row = {**egfr_row(), 'target_id': 131, 'gene_symbol': 'PDE5A', 'uniprot_id': 'O76074'}
+    result, service = execute(['PDE5A', 'PDE5'], {'PDE5A': [row], 'PDE5': [row]})
+    assert [target['uniprot_id'] for target in result['data']] == ['O76074']
+    assert service.structure_calls == [131]
+
+
 @pytest.mark.parametrize("query,accessions,target_ids", [
     ("Find EGFR (UniProt P00533) and BCHE (UniProt P06276) for structures.",
      ["P00533", "P06276"], [2, 1]),

@@ -249,6 +249,10 @@
         if (!decisionTurn.result) {
           finishPendingSourceCheck(decisionTurn, "disconnected", "连接已断开，结果未确认", "is-warning");
         }
+        const progress = decisionTurn.taskPanel?.querySelector(".agent-task-progress");
+        if (progress) {
+          progress.textContent = decisionTurn.result ? "连接已断开，交付未确认" : "连接已断开，结果未确认";
+        }
         decisionStatus(decisionTurn, decisionTurn.result
           ? `${decisionTurn.statusElement.textContent} 连接已断开，结果传输未确认结束。`
           : "连接已断开，执行结果未确认。");
@@ -308,9 +312,9 @@
     catch (_) {closeProtocolSocket(ws, 1011, "request send failed"); return false;}
   }
 
-  function sendDecisionMessage(resume = false) {
+  function sendDecisionMessage(resume = false, repeat = null) {
     if (typeof dockingUI !== "undefined" && dockingUI?.blocked()) return;
-    const message = elements.input.value;
+    const message = repeat ? repeat.query : elements.input.value;
     if (!message.trim() || decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
     if (agentConfigInputVersion !== (agentConfigSavedInputVersion ?? 0)) {
       HomeChatRenderer.showNotification("模型配置有未保存的修改，请先保存。", "warning");
@@ -324,17 +328,22 @@
         ...(scientificReferences?.outgoing() || {})};
     if (decisionResultFormat) payload.result_format = decisionResultFormat;
     if (!sendDecisionControl(payload)) return;
+    if (!resume && !repeat && !payload.reference && !payload.selection) {
+      const request = /^\s*请?重复执行\s*([23])\s*次\s+[A-Za-z0-9@+\-\[\]()=#\\/.:%]+\s*的综合评价[，,]\s*比较每次调用的工具顺序[、，,]事件流和最终结论是否一致[。.!！]?\s*$/.exec(message);
+      if (request) repeat = {query: message, count: Number(request[1]), runs: []};
+    }
     decisionTurn = {socket: ws, phase: "pending", turnId: null, traceId: null, requestText: message,
-      resume: resume ? decisionWaiting : null, cancelSent: false, result: null};
+      resume: resume ? decisionWaiting : null, cancelSent: false, result: null, repeat, events: []};
     scientificReferences?.startRequest();
     moleculeCandidateLifecycle.startRequest();
     evidenceReportLifecycle?.startRequest();
     if (!chatMode) enterChatMode();
-    addUserMessage(message);
+    addUserMessage(repeat && repeat.runs.length ? `第 ${repeat.runs.length + 1} 次综合评价` : message);
     decisionTurn.userMessage = elements.chatContainer.lastChild;
-    elements.input.value = "";
+    if (!repeat || !repeat.runs.length) elements.input.value = "";
     showTypingIndicator();
     updateDecisionControls();
+    HomeChatRenderer.scrollToBottom();
   }
 
   function handleDecisionMessage(message, socket) {
@@ -388,9 +397,31 @@
     if (!turn.turnId || (strict ? message.trace_id !== turn.traceId : message.turn_id !== turn.turnId)) return true;
     if (strict) return !turn.result; // existing strict DTOs never receive a turn_id
     if (message.type === "agent_event") {
-      return Boolean(turn.result) || message.event?.trace_id !== turn.traceId;
+      if (turn.result || message.event?.trace_id !== turn.traceId) return true;
+      if (turn.repeat) turn.events.push([message.event.event, message.event.tool || ""]);
+      removeTypingIndicator();
+      return false;
     }
     if (message.trace_id !== turn.traceId) return true;
+    if (message.type === "rag_info") {
+      if (["completed", "partial"].includes(turn.result?.status) && !turn.result.retrievalCards &&
+          turn.result.metadata.retrieval_performed === true && Array.isArray(message.molecules)) {
+        turn.result.retrievalCards = message.molecules;
+      }
+      return true;
+    }
+    if (message.type === "status" && message.stage === "retrieval_cards" && turn.result &&
+        typeof message.message === "string") {
+      turn.result.retrievalNotice = " " + message.message;
+      return true;
+    }
+    if (message.type === "agent_status" && message.stage === "allocation") {
+      const indicator = elements.chatContainer.querySelector(".typing-indicator");
+      if (!turn.result && indicator && typeof message.message === "string") {
+        indicator.textContent = message.message;
+      }
+      return true;
+    }
     if (message.type === "agent_result") {
       if (turn.result || !Object.prototype.hasOwnProperty.call(decisionStatuses, message.status)) return true;
       let baseText = typeof message.display_answer === "string" ? message.display_answer :
@@ -415,21 +446,23 @@
       turn.result = {status: message.status, text, metadata: message.metadata || {}, retrievalNotice,
         details: message.result_format === "summary_details_v1" && message.details_state === "available"
           ? message.details : null};
+      const deliveryStatus = message.status === "completed" ? "正在交付结果" : decisionStatuses[message.status];
       if (agentTaskState.lastEventType === "pending_source_check") {
         const itemClass = message.status === "completed" ? "is-complete" :
           ["partial", "cancelled", "waiting_for_input", "not_calculated"].includes(message.status)
             ? "is-warning" : "is-error";
-        finishPendingSourceCheck(turn, message.status, decisionStatuses[message.status], itemClass);
+        finishPendingSourceCheck(turn, message.status,
+          message.status === "completed" ? "结果校验完成" : deliveryStatus, itemClass);
       } else if (turn.taskPanel?.getAttribute("data-trace-id") === turn.traceId) {
         // A finished calculation can be followed by cancelled or incomplete
         // interpretation; the final result owns the overall task status.
-        const progress = turn.taskPanel.querySelector(".agent-task-progress");
         const heading = turn.taskPanel.querySelector(".agent-task-list")?.lastChild?.querySelector("strong");
-        if (progress) progress.textContent = decisionStatuses[message.status];
         if (heading && agentTaskState.lastEventType === "task_completed" && message.status !== "completed") {
           heading.textContent = "计算步骤完成";
         }
       }
+      const progress = turn.taskPanel?.querySelector(".agent-task-progress");
+      if (progress) progress.textContent = deliveryStatus;
       if (message.status === "waiting_for_input" && message.metadata?.waiting_for_input === true
           && /^[a-f0-9]{32}$/.test(message.metadata.continuation_id || "")) {
         // Cache the opaque pointer before complete can be lost. The active
@@ -445,7 +478,7 @@
           });
         }
       }
-      decisionStatus(turn, decisionStatuses[message.status] + retrievalNotice);
+      decisionStatus(turn, deliveryStatus + retrievalNotice);
       turn.box.setAttribute("data-content", text);
       turn.box.querySelector(".message-content").innerHTML = HomeFormatters.formatContent(text,
         {displayKind: message.metadata?.display_kind});
@@ -456,9 +489,25 @@
       const {status, text, metadata} = turn.result;
       const isNonSuccess = window.MedChatStatus.isNonSuccess(status);
       const projectionFailed = message.status === "failed" && message.error?.code === "result_projection_failed";
+      const progress = turn.taskPanel?.querySelector(".agent-task-progress");
+      if (progress) progress.textContent = projectionFailed ? "结果展示失败" : decisionStatuses[status];
+      decisionStatus(turn, decisionStatuses[status] + turn.result.retrievalNotice);
       if (turn.statusElement) turn.statusElement.hidden = status === "completed" && !projectionFailed &&
         !turn.result.retrievalNotice;
       let finalText = text;
+      const repeat = turn.repeat;
+      const continueRepeat = repeat && !projectionFailed && !turn.cancelSent && ["partial", "completed"].includes(status);
+      if (continueRepeat) {
+        repeat.runs.push({events: turn.events, tools: turn.events.filter(e => e[0] === "tool_started").map(e => e[1]),
+          answer: text, status});
+        if (repeat.runs.length === repeat.count) {
+          const same = key => repeat.runs.every(run => JSON.stringify(run[key]) === JSON.stringify(repeat.runs[0][key]));
+          finalText = text.replace("本轮只执行了一次工作流，尚未完成多轮一致性比较。", "").trim();
+          finalText += `\n\n${repeat.count} 次运行的工具顺序${same("tools") ? "一致" : "有差异"}，事件流${same("events") ? "一致" : "有差异"}，完成状态${same("status") ? "一致" : "有差异"}。各轮结果正文${same("answer") ? "一致" : "有差异，请对照各轮明细"}。`;
+        }
+      } else if (repeat && status === "failed" && !projectionFailed) {
+        finalText += `\n\n第 ${repeat.runs.length + 1}/${repeat.count} 次运行失败，已停止比较。此前返回结果的轮次：${repeat.runs.length}。`;
+      }
       if (projectionFailed) {
         // Delivery failure does not rewrite the scientific workflow result.
         const notice = typeof message.content === "string" && message.content.trim()
@@ -470,6 +519,15 @@
         moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear();
       }
       completeLastMessage(finalText, {displayKind: metadata.display_kind}); clearToolStatus();
+      if (!projectionFailed && turn.result.retrievalCards) {
+        try {
+          displayRAGInfo(turn.result.retrievalCards, null, turn.box);
+        } catch {
+          turn.statusElement.hidden = false;
+          decisionStatus(turn, turn.statusElement.textContent + " 检索记录已保留，分子卡片暂时无法显示。");
+          if (progress) progress.textContent = "检索卡片展示失败";
+        }
+      }
       updateAgentReadinessFromTurn(metadata);
       const missingSmiles = metadata.missing_fields?.length === 1 && metadata.missing_fields[0] === "smiles";
       const invalidSmiles = metadata.stop_reason === "invalid_molecular_input";
@@ -507,7 +565,9 @@
       } else {
         setDecisionWaiting(metadata.stop_reason === "continuation_rejected" ? turn.resume : null);
       }
-      updateDecisionControls(); return true;
+      updateDecisionControls();
+      if (continueRepeat && repeat.runs.length < repeat.count) sendDecisionMessage(false, repeat);
+      return true;
     }
     return true; // decision mode does not accept legacy stream/message authority
   }
@@ -660,6 +720,9 @@
           dataLength: event.data ? event.data.length : 0,
         });
 
+        // A table may grow by more than a screen in this single frame.
+        // Measure before rendering, while the reader's position is still known.
+        const follow = HomeChatRenderer.isNearBottom();
         try {
           handleWebSocketMessage(event.data, socket);
         } catch (error) {
@@ -667,6 +730,7 @@
           console.error("WebSocket message handling failed");
           showErrorMessage("消息处理失败，连接已关闭。");
         }
+        if (follow) HomeChatRenderer.scrollToBottom();
       },
 
       onError: (error, currentSocket) => {
@@ -808,8 +872,11 @@
           if (!moleculeCandidateLifecycle.isRequestInFlight()) {
             void scientificReferences?.restore(payload => {
               if (!chatMode) enterChatMode();
+              const follow = HomeChatRenderer.isNearBottom();
               const box = addAssistantMessage("已恢复此前确认的候选集合；这不是新的计算结果。");
-              return renderMoleculeCandidates(box, payload);
+              const rendered = renderMoleculeCandidates(box, payload);
+              if (follow) HomeChatRenderer.scrollToBottom();
+              return rendered;
             });
           }
           break;
@@ -967,7 +1034,11 @@
       elements.input.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
           e.preventDefault();
-          sendMessage();
+          if (decisionMode && decisionWaiting) {
+            decisionControls.resume.click();
+          } else {
+            sendMessage();
+          }
         }
       });
       console.log("✅ 绑定输入框事件");
@@ -1924,6 +1995,7 @@
 
       // 显示正在输入状态
       showTypingIndicator();
+      HomeChatRenderer.scrollToBottom();
 
       console.log("✅ 消息发送成功");
     } catch (error) {
@@ -2091,9 +2163,6 @@
     messageWrapper.appendChild(messageContainer);
     elements.chatContainer.appendChild(messageWrapper);
 
-    // 滚动到底部
-    HomeChatRenderer.scrollToBottom();
-
     // 保存到历史
     currentMessages.push({ role: "user", content: content });
     HomeState.currentMessages = currentMessages.slice();
@@ -2174,9 +2243,6 @@
     messageContainer.appendChild(messageBox);
     messageWrapper.appendChild(messageContainer);
     elements.chatContainer.appendChild(messageWrapper);
-
-    // 滚动到底部
-    HomeChatRenderer.scrollToBottom();
 
     // 保存到历史
     currentMessages.push({ role: "assistant", content: content });
@@ -2286,9 +2352,6 @@
             `;
       messageContent.appendChild(cursor);
     }
-
-    // 滚动到底部
-    HomeChatRenderer.scrollToBottom();
   }
 
   function resolveCompletionAction(state) {
@@ -2421,8 +2484,6 @@
       statusDiv.style.opacity = "0";
       setTimeout(() => statusDiv.remove(), 300);
     }, 3000);
-
-    HomeChatRenderer.scrollToBottom();
   }
 
   // 显示工具状态 - 美化版
@@ -2451,8 +2512,6 @@
     toolDiv.appendChild(iconSpan);
     toolDiv.appendChild(messageSpan);
     elements.chatContainer.appendChild(toolDiv);
-
-    HomeChatRenderer.scrollToBottom();
   }
 
   function createAgentTaskPanel() {
@@ -2523,8 +2582,6 @@
     if (!rendered) return;
 
     agentTaskState = window.HomeTaskState.record(agentTaskState, presentation);
-
-    HomeChatRenderer.scrollToBottom();
   }
 
   function getAgentEventLabel(type, toolName, payload) {
@@ -2591,7 +2648,6 @@
     errorDiv.appendChild(errorContent);
 
     elements.chatContainer.appendChild(errorDiv);
-    HomeChatRenderer.scrollToBottom();
   }
 
   // 显示输入指示器 - 美化版
@@ -2651,7 +2707,6 @@
     typingContainer.appendChild(typingDiv);
     typingWrapper.appendChild(typingContainer);
     elements.chatContainer.appendChild(typingWrapper);
-    HomeChatRenderer.scrollToBottom();
   }
 
   // 移除输入指示器
@@ -2708,7 +2763,7 @@
       sendMessage();
     }
   }
-  function displayRAGInfo(molecules, infoMessage) {
+  function displayRAGInfo(molecules, infoMessage, resultBox) {
     console.log("📊 显示RAG信息:", molecules);
 
     if (!molecules || molecules.length === 0) {
@@ -2807,9 +2862,8 @@
       pageMolecules.forEach((mol, pageIndex) => {
         const globalIndex = startIdx + pageIndex;
         const smiles = mol.smiles || mol.SMILES || "";
-        const similarity = mol.similarity
-          ? (parseFloat(mol.similarity) * 100).toFixed(1)
-          : "";
+        const similarity = mol.similarity == null ? "未提供" :
+          Number.isFinite(mol.similarity) ? String(mol.similarity) : "无效";
         const properties = mol.properties || {};
 
         // 创建与反向寻靶一致的卡片样式
@@ -2856,11 +2910,7 @@
           <div style="font-weight: 700; color: #4f46e5; font-size: 16px;">#${
             globalIndex + 1
           }</div>
-          ${
-            similarity
-              ? `<div style="background: #dcfce7; color: #166534; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px;">${similarity}% 相似</div>`
-              : ""
-          }
+          <div style="color: #475569; font-size: 12px;">检索得分：${similarity}</div>
         `;
 
         // 分子图片区域 - 使用后端API生成图片（动态高度）
@@ -2935,18 +2985,21 @@
           }
 
           if (foundValue !== null) {
-            const propValue = parseFloat(foundValue);
+            const text = typeof foundValue === "string" ? foundValue.trim() : String(foundValue);
+            const numeric = (typeof foundValue === "number" || typeof foundValue === "string") &&
+              /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text) && Number.isFinite(Number(text));
+            const propValue = numeric ? Number(text) : null;
             
             // 根据属性类型设置颜色
             let valueColor = "#334155";
             let bgColor = "#f8fafc";
-            if (prop === "qed") {
+            if (numeric && prop === "qed") {
               valueColor = propValue >= 0.7 ? "#059669" : propValue >= 0.5 ? "#d97706" : "#dc2626";
               bgColor = propValue >= 0.7 ? "#ecfdf5" : propValue >= 0.5 ? "#fffbeb" : "#fef2f2";
-            } else if (prop === "logp") {
+            } else if (numeric && prop === "logp") {
               valueColor = propValue >= -0.4 && propValue <= 5.6 ? "#059669" : "#dc2626";
               bgColor = propValue >= -0.4 && propValue <= 5.6 ? "#ecfdf5" : "#fef2f2";
-            } else if (prop === "molwt") {
+            } else if (numeric && prop === "molwt") {
               valueColor = propValue <= 500 ? "#059669" : propValue <= 600 ? "#d97706" : "#dc2626";
               bgColor = propValue <= 500 ? "#ecfdf5" : propValue <= 600 ? "#fffbeb" : "#fef2f2";
             }
@@ -2965,7 +3018,7 @@
             propItem.innerHTML = `
               <span style="color: #64748b; font-size: 11px; font-weight: 500;">${escapeHtml(propertyLabels[prop] || prop)}</span>
               <span style="color: ${valueColor}; font-weight: 700; font-size: 12px; font-family: 'Inter', ui-sans-serif, system-ui;">${
-                prop === "molwt" ? propValue.toFixed(1) : propValue.toFixed(2)
+                numeric ? text : "无效"
               }</span>
             `;
             propertiesGrid.appendChild(propItem);
@@ -3013,7 +3066,7 @@
         font-weight: 500;
       `;
         copyBtn.textContent = "复制 SMILES";
-        copyBtn.onclick = () => copyToClipboard(smiles);
+        copyBtn.onclick = () => copyToClipboard(smiles, smilesDetails);
 
         const analyzeBtn = document.createElement("button");
         analyzeBtn.style.cssText = `
@@ -3200,6 +3253,11 @@
       ragInfoContainer.appendChild(paginationContainer);
     }
 
+    if (resultBox) {
+      resultBox.appendChild(ragInfoContainer);
+      return;
+    }
+
     // 将 RAG 容器包装成与 AI 消息气泡完全一致的布局结构（实现左侧对齐和统一宽度）
     const messageWrapper = document.createElement("div");
     messageWrapper.className = "message-wrapper assistant-wrapper";
@@ -3232,7 +3290,6 @@
 
     // 添加到聊天容器
     elements.chatContainer.appendChild(messageWrapper);
-    HomeChatRenderer.scrollToBottom();
   }
 
   // 渲染RAG检索到的分子结构（保留作为备用）
@@ -3325,18 +3382,15 @@
   }
 
   // 复制SMILES到剪贴板
-  function copyToClipboard(text) {
-    navigator.clipboard
-      .writeText(text)
-      .then(() => {
-        HomeChatRenderer.showNotification(
-          `已复制SMILES: ${text.substring(0, 20)}...`,
-          "success"
-        );
-      })
-      .catch(() => {
-        HomeChatRenderer.showNotification("复制失败", "error");
-      });
+  async function copyToClipboard(text, details) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      details.open = true;
+      HomeChatRenderer.showNotification("无法写入剪贴板，请选中卡片中的 SMILES 手动复制。", "error");
+      return;
+    }
+    HomeChatRenderer.showNotification("已复制 SMILES", "success");
   }
 
   // 分析分子
@@ -3369,15 +3423,6 @@
     elements.connectionStatus.style.transition = "all 0.3s ease";
 
     console.log(`🔗 连接状态更新: ${status} -> ${config.text}`);
-  }
-
-  // 滚动到底部
-  function scrollToBottom() {
-    if (elements.chatContainer) {
-      setTimeout(() => {
-        elements.chatContainer.scrollTop = elements.chatContainer.scrollHeight;
-      }, 100);
-    }
   }
 
   // 添加增强样式
@@ -3919,26 +3964,13 @@
         justify-content: center;
         gap: 4px;
       `;
-        copyBtn.textContent = "📋 复制";
-        copyBtn.onclick = () => {
-          navigator.clipboard.writeText(candidate.canonical_smiles).then(() => {
-            copyBtn.textContent = "✅ 已复制";
-            copyBtn.style.background = "#10b981";
-            setTimeout(() => {
-              copyBtn.textContent = "📋 复制";
-              copyBtn.style.background = "#4f46e5";
-            }, 2000);
-          });
-        };
+        copyBtn.textContent = "复制 SMILES";
+        copyBtn.onclick = () => copyToClipboard(candidate.canonical_smiles, smilesDetails);
         copyBtn.addEventListener("mouseenter", () => {
-          if (!copyBtn.textContent.includes("已复制")) {
-            copyBtn.style.background = "#4338ca";
-          }
+          copyBtn.style.background = "#4338ca";
         });
         copyBtn.addEventListener("mouseleave", () => {
-          if (!copyBtn.textContent.includes("已复制")) {
-            copyBtn.style.background = "#4f46e5";
-          }
+          copyBtn.style.background = "#4f46e5";
         });
         actionsSection.appendChild(copyBtn);
         if (payload.reference && scientificReferences) {

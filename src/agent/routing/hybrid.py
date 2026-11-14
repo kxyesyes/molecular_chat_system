@@ -12,7 +12,8 @@ from src.agent.persistence.base import AgentStateStore
 from src.agent.contracts.generation_request import has_generation_intent
 from src.agent.contracts.target_request import analyze_target_request, TARGET_CLARIFICATION
 from src.agent.planning.request_parsing import (
-    positive_intent_text, property_calculation_forbidden, requests_generated_properties, target_lookup_text,
+    positive_intent_text, property_calculation_forbidden, requests_generated_properties,
+    requests_lipinski_compliant_candidates, target_lookup_text,
 )
 from src.agent.property_constraints import requested_property_bounds
 from src.target_identifiers import TARGET_PATTERN
@@ -227,7 +228,7 @@ class HybridSkillRouter:
             add("activity_prediction", 0.9, "activity endpoint requested")
         bounds, unknown_bounds = requested_property_bounds(lower)
         generated_properties = generation and (bounds or unknown_bounds or
-            (not has_smiles and requests_generated_properties(text)))
+            (not has_smiles and (requests_generated_properties(text) or requests_lipinski_compliant_candidates(text))))
         molecular_subject = has_smiles or bool(re.search(r"分子|化合物|候选|\bmolecules?\b|\bcompounds?\b|\bcandidates?\b", lower))
         if (not generated_properties or "admet" in lower) and (self._contains(
             lower,
@@ -477,8 +478,10 @@ class HybridSkillRouter:
         tools = list(policy.allowed_tools) if policy else []
         if workflow_name == "molecular_design":
             bounds, unknown = requested_property_bounds(query)
-            if not (bounds or unknown) or property_calculation_forbidden(query):
+            if not (bounds or unknown or requests_generated_properties(query)) or property_calculation_forbidden(query):
                 tools = [tool for tool in tools if tool != "property_calculator"]
+            if not requests_lipinski_compliant_candidates(query):
+                tools = [tool for tool in tools if tool != "drug_likeness_assessment"]
         return tools
 
     @staticmethod

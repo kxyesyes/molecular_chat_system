@@ -92,6 +92,25 @@ def test_invalid_binding_without_failed_producer_remains_input_failure(binding, 
     assert failure.error.details.get("reason") != "dependency_blocked"
 
 
+def test_verified_empty_reverse_result_skips_structure_lookup(strict_source_factory):
+    from src.agent.tools.reverse_target_tool import ReverseTargetTool
+
+    reverse = ReverseTargetTool(strict_source_factory(('CCO',)))
+    dependent = Tool("target_database_search", ToolResult.success_result("target_database_search", data=[]))
+    result = WorkflowOrchestrator().run(
+        AgentContext("synthetic empty match", "verified-empty"),
+        [WorkflowStep("reverse", reverse.name, input_data="[Na+]", output_key="targets"),
+         WorkflowStep("structures", dependent.name, input_binding="$.outputs.targets", required=False)],
+        {tool.name: tool for tool in (reverse, dependent)},
+    )
+    assert result.tool_results[0].quality['prediction_status'] == 'verified_empty'
+    assert dependent.calls == []
+    skipped = result.tool_results[1]
+    assert skipped.status.value == 'not_calculated'
+    assert skipped.error.details['blocked_by'] == ['reverse']
+    assert '无匹配' in skipped.message
+
+
 def test_reverse_receipt_failure_and_blocked_structure_reason_reach_public_reply(strict_source_factory, monkeypatch):
     from src.agent.tools.reverse_target_tool import ReverseTargetTool
     from src.web.agent_result_presentation import partial_projection

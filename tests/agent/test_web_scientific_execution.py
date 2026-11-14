@@ -302,19 +302,25 @@ def test_oral_absorption_and_bioavailability_concept_distinguishes_systemic_expo
     assert all(term in complete['content'] for term in ('肠壁', '体循环', '原形', '首过', '作用部位'))
 
 
-def test_target_resolution_ranking_does_not_claim_complete_corpus(tmp_path):
+@pytest.mark.parametrize('truncated', [False, True])
+def test_target_resolution_ranking_does_not_claim_complete_corpus(tmp_path, truncated):
     from src.agent.tools.target_database_tool import TargetDatabaseTool
+    calls = []
     class Service:
         def search_targets(self, query, **kwargs):
+            calls.append(query)
             return {'status': 'resolved', 'results': [{'target_id': 1, 'gene_symbol': 'EGFR',
-                'uniprot_id': 'P00533', 'organism': 'Homo sapiens', 'structure_count': 2}],
+                'uniprot_id': 'P00533', 'organism': 'Homo sapiens', 'structure_count': 21 if truncated else 2}],
                 'warnings': [], 'lookup_path': ['local']}
         def get_target_structures(self, target_id):
             return {'structures': [
                 {'structure_id': '1M17', 'source': 'RCSB_PDB', 'structure_type': 'experimental',
                  'resolution': 2.6, 'ligand_ids': ['AQ4']},
                 {'structure_id': '1MOX', 'source': 'RCSB_PDB', 'structure_type': 'experimental',
-                 'resolution': 2.5, 'ligand_ids': ['NAG']}]}
+                 'resolution': 2.5, 'ligand_ids': ['NAG']}] + ([
+                    {'structure_id': f'2A{i:02}', 'source': 'RCSB_PDB', 'structure_type': 'experimental',
+                     'resolution': 2.0 if i == 0 else 1.0 if i == 18 else 3.0, 'ligand_ids': []}
+                    for i in range(19)] if truncated else [])}
         def close(self):
             pass
     tool = TargetDatabaseTool()
@@ -322,11 +328,26 @@ def test_target_resolution_ranking_does_not_claim_complete_corpus(tmp_path):
     handler = make_web_handler([tool], SQLiteAgentStateStore(tmp_path / 'target.sqlite'), model=PlannedWebModel())
     try:
         query = '请查询人源 EGFR 的 UniProt 编号和实验解析结构，列出分辨率最高的三个 PDB 条目并说明是否有配体。'
-        _, frames = run_web_turn(handler, query)
+        history = []
+        _, frames = run_web_turn(handler, query, history, 'ranked-structures', result_format='summary_details_v1')
         result = result_of(frames)
         assert result['status'] == 'partial', result
-        assert '无法确认全库分辨率最高' in json.dumps(result, ensure_ascii=False)
-        assert '1M17' in json.dumps(result, ensure_ascii=False)
+        answer = result['final_answer']
+        assert all(term in answer for term in ('无法确认全库分辨率最高', 'P00533', '1MOX', 'NAG'))
+        if truncated:
+            assert answer.index('2A18') < answer.index('2A00') < answer.index('1MOX')
+            assert '2A01' not in answer and '1M17' not in answer and '21' in answer
+            assert not any(word in answer for word in ('structure_list_truncated', 'partial_authoritative_results', '失败'))
+            assert answer.startswith('## 靶点数据库检索结果'), answer
+            assert not any(f.get('event', {}).get('event') == 'tool_failed' for f in frames)
+            assert [s['structure_id'] for s in history[-1]['target_structure_evidence']['structures']] == ['2A18', '2A00', '1MOX']
+            next_result, _ = run_web_turn(handler, '刚才列出的结构中哪个分辨率最高？', history,
+                                          'ranked-structures', result_format='summary_details_v1')
+            assert '2A18' in next_result['content'] and '1 Å' in next_result['content']
+            assert next_result['status'] == 'completed' and '对接' not in next_result['content']
+            assert len(calls) == 1
+        else:
+            assert answer.index('1MOX') < answer.index('1M17') and 'AQ4' in answer
     finally:
         handler.agent_system.tool_registry.close()
 
@@ -1375,8 +1396,13 @@ def test_missing_smiles_waits_for_input_without_scientific_tool(web_handler, que
 
 
 @pytest.mark.parametrize('reconnect', [False, True])
-@pytest.mark.parametrize('query', ['请计算这个分子的 LogP', '计算分子的分子量和 logP。'])
-def test_missing_smiles_continuation_resumes_same_scientific_obligation(web_handler, reconnect, query):
+@pytest.mark.parametrize('query,field', [
+    ('请计算这个分子的 LogP', 'CCO'),
+    ('计算分子的分子量和 logP。', 'CCO'),
+    ('计算分子量和 logP。', 'SMILES 是 CCO。'),
+    ('请帮我计算一下分子的分子量和 logP。', 'SMILES 为 CCO'),
+])
+def test_missing_smiles_continuation_resumes_same_scientific_obligation(web_handler, reconnect, query, field):
     async def drive_two_turns():
         session = "missing-smiles-continuation"
         sender = _Sender(WebSocket(session))
@@ -1404,7 +1430,7 @@ def test_missing_smiles_continuation_resumes_same_scientific_obligation(web_hand
             sender.waiting = runtime._restore_durable_waiting(sender, first.trace_id, continuation_id)
             assert sender.waiting is not None
 
-        second = _Turn(dict(message="CCO", enable_tools=True, enable_rag=False),
+        second = _Turn(dict(message=field, enable_tools=True, enable_rag=False),
                        trace_id=sender.waiting.context.trace_id,
                        waiting=sender.waiting)
         web_handler.decision_runtime.active_owners.add(second)
@@ -1460,10 +1486,27 @@ def test_browser_cannot_enable_missing_structure_admission(web_handler, query):
     '计算分子的分子量和 logP；分子为阿司匹林。',
     '计算分子的分子量和 logP\n对象为患者。',
     '计算分子的分子量和 logP。这个分子为阿司匹林。',
+    '计算分子量和 logP。这个分子为阿司匹林。',
+    '请帮我计算分子的分子量和 logP。这个分子为阿司匹林。',
+    '请计算这个分子的 logP。分子为阿司匹林。',
+    '计算这个分子的 logP。结构是阿司匹林。',
+    '计算该分子的分子量。使用阿司匹林。',
+    'Calculate the logP of this molecule. It is aspirin.',
+    '预测该分子的 ADMET 特征，结构是阿司匹林。',
 ])
 def test_bare_subject_clarification_requires_the_entire_generic_request(query):
     plan = ScientificObligationCompiler().compile(query)
     assert not _resumable_scientific_clarification(plan)
+
+
+@pytest.mark.parametrize('query', [
+    '请计算这个分子的 LogP，并预测 ADMET。',
+    '请计算这个分子的 LogP。再预测 ADMET。',
+])
+def test_missing_molecule_preserves_a_second_reviewed_action(query):
+    compiler = ScientificObligationCompiler()
+    assert _resumable_scientific_clarification(compiler.compile(query))
+    assert set(compiler.clarification_tools(query)) == {'property_calculator', 'admet_predictor'}
 
 
 @pytest.mark.parametrize('query', [

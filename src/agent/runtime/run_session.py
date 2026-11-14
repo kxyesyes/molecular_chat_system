@@ -1082,6 +1082,21 @@ class WorkflowRunSession:
                     if tool is not None else "missing"
                 )
         journal.adapter_version = str(getattr(tool, "adapter_version", self.orchestrator.adapter_version))
+        if (not self.dynamic and step.tool_name == "target_database_search"
+                and step.input_binding == "$.outputs.targets" and journal.input_data == []):
+            source = next((item for item in reversed(self.results)
+                           if item.quality.get("output_key") == "targets"), None)
+            if (source is not None and source.tool_name == "reverse_target_predictor" and source.success
+                    and source.quality.get("prediction_status") == "verified_empty"):
+                journal.dependency_blocked = True
+                details = {"reason": "dependency_blocked", "blocked_by": [source.quality["step_id"]],
+                           "executed": False, "prediction_status": "verified_empty"}
+                journal.result = ToolResult.error_result(
+                    step.tool_name, AgentErrorCode.VALIDATION_ERROR,
+                    "反向寻靶在当前阈值下无匹配，已跳过结构检索。",
+                    details=details, quality=dict(details), status=ObservationStatus.NOT_CALCULATED,
+                )
+                return
         if not journal.checkpoint_checked:
             dispatch = self.orchestrator.step_dispatch
             if dispatch is not None:

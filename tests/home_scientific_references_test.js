@@ -136,17 +136,22 @@ async function run() {
 async function restoredVisibilityTest(payload) {
   const source = fs.readFileSync(path.join(root, "src/web/static/js/home/main.js"), "utf8");
   const ready = source.slice(source.indexOf('case "connection_ready":'), source.indexOf('case "pong":'));
-  let renderRestore, chatVisible = false;
+  let renderRestore, chatVisible = false, nearBottom = false, scrolls = 0;
   const handle = new Function("HomeChatRenderer", "moleculeCandidateLifecycle", "scientificReferences",
     "addAssistantMessage", "renderMoleculeCandidates", "enterChatMode", "message", "console",
     `let chatMode = false; switch(message.type) {${ready}}`);
-  handle({updateConnectionStatus() {}, showNotification() {}}, {isRequestInFlight: () => false},
+  handle({updateConnectionStatus() {}, showNotification() {},
+    isNearBottom: () => nearBottom, scrollToBottom: () => {scrolls++;}}, {isRequestInFlight: () => false},
     {restore: callback => {renderRestore = callback;}}, () => ({}), () => {
       assert(chatVisible, "restored cards must be visible, not mounted in the hidden welcome-page chat container");
       return mounted(payload);
     }, () => {chatVisible = true;}, {type: "connection_ready"}, {log() {}});
   assert.equal(chatVisible, false, "a connection without a valid restored view must keep the welcome screen");
   renderRestore(payload);
+  assert.equal(scrolls, 0, "restoring cards must preserve the reader's position");
+  nearBottom = true;
+  renderRestore(payload);
+  assert.equal(scrolls, 1, "restoration should follow when the reader is at the bottom");
   const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
   assert(template.includes('/static/js/home/main.js?v=20260925-terminal-labels-v1'),
     "terminal labels fix must invalidate the previous cached main script and preserve restoration visibility");

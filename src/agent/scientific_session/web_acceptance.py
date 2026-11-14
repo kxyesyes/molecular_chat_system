@@ -80,6 +80,9 @@ def web_observation_reasons(result, record, step, *, request_query):
             requirement = SimpleNamespace(tool_name=name, expected_smiles=subjects,
                 exact_molecule_count=len(subjects), required_metrics=metrics)
             reasons += _check_batch(requirement, result)['reason_codes']
+            if (name == 'drug_likeness_assessment' and step.metadata.get('require_lipinski_compliance')
+                    and any(not row['assessment']['lipinski_rule_of_five']['compliance'] for row in result.data)):
+                reasons.append('lipinski_goal_not_satisfied')
             if 'subject_mismatch' in reasons:
                 expected = {_canonical(value) for value in subjects}
                 observed = [_canonical(row['smiles']) for row in result.data]
@@ -141,10 +144,10 @@ def web_observation_reasons(result, record, step, *, request_query):
             required = set(payload['metadata'].get('required_evidence', ['properties']))
             if (set(data['required_evidence']) != required or data.get('unrankable_candidates')
                     or any(row.get('missing_required_evidence') or
-                        required & set(row.get('missing_evidence', [])) for row in rows)):
+                        required & set(row.get('missing_evidence', [])) for row in data['top_candidates'])):
                 reasons.append('required_ranking_evidence_missing')
             from src.agent.contracts.property_ranking_request import property_only_design_request
-            if property_only_design_request(request_query):
+            if property_only_design_request(request_query) or required == {'properties', 'admet', 'activity'}:
                 # Recompute only this fixed, deterministic heuristic from the
                 # already bound inputs; type/identity checks alone do not prove
                 # that a producer's scores, weights or ordering are correct.
@@ -343,7 +346,7 @@ def _scientific_data(result):
         for row, original in zip(rows, result.data):
             row.update(_pick(original, (
                 'function', 'has_experimental_structure', 'has_alphafold_structure',
-                'experimental_structure_count', 'alphafold_structure_count',
+                'experimental_structure_count', 'alphafold_structure_count', 'searched_structure_count', 'comparable_structure_count',
                 'source_url', 'target_stale', 'structures_stale',
                 'target_retrieved_at', 'target_expires_at',
                 'structures_retrieved_at', 'structures_expires_at')))
@@ -370,6 +373,10 @@ def _scientific_data(result):
         for row, original in zip(rows, result.data):
             row['assessment']['overall_assessment'] = _pick(
                 original['assessment']['overall_assessment'], ('score',))
+            rules = original['assessment']['lipinski_rule_of_five']
+            row['assessment']['lipinski_rule_of_five']['violations'] = [
+                key for key in ('molecular_weight', 'logp', 'hba', 'hbd')
+                if rules['details'][key]['pass'] is False]
         return rows
     if result.tool_name == 'llm_molecular_generator':
         candidates = CandidateSet.from_dict(result.data)
@@ -420,7 +427,7 @@ def render_web_scientific_answer(resolver, *, required_tools=(), evidence_ids, i
     # A transport-budget/dependency stop is not a model finish or successful task. The
     # server may still display already authenticated work without inventing a
     # model citation or dropping evidence to squeeze in another model request.
-    interrupted = interruption_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable',
+    interrupted = interruption_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable', 'reverse_target_no_matches',
                                          'activity_target_conflict_or_unknown')
     if ((interruption_reason is not None and not interrupted)
             or (interrupted and evidence_ids is not None)
@@ -465,7 +472,7 @@ def render_web_scientific_answer(resolver, *, required_tools=(), evidence_ids, i
         limitations=['Computed/predicted/retrieved evidence is not experimental validation.',
             'Partial or missing evidence does not establish completion or optimization success.',
             'ADMET available_methods is method-scoped; unknown alerts remain unknown.'])
-    validate_json(payload, max_bytes=65536, reason=_ERROR)
+    validate_json(payload, max_bytes=512 * 1024, max_nodes=65536, reason=_ERROR)
     payload = redact_sensitive(deepcopy(payload))
     resolver.verify_binding_closure()
     return json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True)

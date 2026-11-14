@@ -27,6 +27,10 @@ _SHOW_EN = re.compile(rf'(?:please\s+)?(?:show|list|display|provide)\s+'
 _PRIOR_VALUE = re.compile(
     r'(?:我)?(?:上一轮|上次|刚才)(?:的)?\s*(?:预测的?)?pIC50\s*(?:是)?(?:多少|什么)|'
     r'what\s+(?:was|is)\s+(?:my|the)\s+(?:previous|last)\s+(?:predicted\s+)?pIC50', re.I)
+_ORDINAL_CONSISTENCY = re.compile(
+    rf'(?:请\s*)?(?:(?:解释|说明|查看)\s*)?{_PRIOR_ZH}第\s*'
+    r'(?P<position>[1-9]\d?|[一二三四五六七八九十]+)\s*个\s*(?:分子|候选(?:分子)?)的'
+    r'分类(?:和|与)回归(?:预测|结果)?(?:是否一致|一致吗|为什么不一致)')
 _EXPLAIN = re.compile(
     r'(?:请\s*)?(?:并\s*)?解释(?:分类(?:与|和)回归不一致(?:意味着什么|的含义|的原因)?|'
     r'(?:上一轮|上次|刚才|上述)(?:的)?活性(?:结果|预测))|'
@@ -73,6 +77,7 @@ def inspection_request(query):
                if part.strip()]
     selectors, recognized, unknown, all_candidates = [], False, False, False
     activity_inspection = False
+    positions = []
     for clause in clauses:
         match = next((match for pattern in (_WHY_ZH, _WHY_EN, _SHOW_ZH, _SHOW_EN)
                       if (match := pattern.fullmatch(clause))), None)
@@ -82,6 +87,13 @@ def inspection_request(query):
                 _ACTIVITY_FIELDS.search(clause))
             selectors.extend(value for value in match.groups() if value is not None)
             all_candidates = all_candidates or bool(re.search(r'所有候选|全部候选|这些候选|它们', clause))
+        elif ordinal := _ORDINAL_CONSISTENCY.fullmatch(clause):
+            number = ordinal['position']
+            chinese = ('一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
+                       '十一', '十二', '十三', '十四', '十五', '十六')
+            positions.append(int(number) if number.isascii() else
+                             chinese.index(number) + 1 if number in chinese else 0)
+            recognized = activity_inspection = True
         elif _EXPLAIN.fullmatch(clause) or _PRIOR_VALUE.fullmatch(clause):
             recognized = True
             activity_inspection = True
@@ -94,6 +106,7 @@ def inspection_request(query):
     intent_clauses = [_NO_RECALCULATE.split(clause, maxsplit=1)[0].strip() for clause in clauses]
     if recognized and not unknown and activity_inspection:
         return {'selectors': tuple(selectors), 'all': all_candidates,
+                **({'positions': positions} if positions else {}),
                 'raw_values': bool(re.search(r'原始|\b(?:original|raw)\b', query, re.I))}
     # Keep this guard in the evidence-inspection domain. Quoting a prohibition
     # in unrelated chat must not disable scientific work in subsequent turns.

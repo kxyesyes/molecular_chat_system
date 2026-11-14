@@ -11,6 +11,8 @@ const source = fs.readFileSync(path.join(root, "static/js/home/main.js"), "utf8"
 // strips them before our send handler can read the value.
 const composer = template.match(/<div class="fill">([\s\S]*?)<button\b[^>]*class="btn"/);
 assert(composer, "home composer must exist");
+assert(!template.includes('/static/images/r7.png') && !template.includes('/static/images/r8.png'),
+  "the text composer must not display inactive voice and attachment actions");
 assert(/<textarea\b[^>]*rows="3"[^>]*><\/textarea>/.test(composer[1]),
   "composer must use a native three-row textarea to preserve multiline SMILES");
 assert(!/<input\b/.test(composer[1]), "composer must not sanitize away pasted newlines");
@@ -23,8 +25,8 @@ assert(start >= 0 && end > start);
 const listeners = {};
 const input = {value: "比较以下两个分子的性质：\nCCO\nCCN", addEventListener(type, fn) {listeners[type] = fn;}};
 const sent = [];
-new Function("elements", "sendMessage", "console", source.slice(start, end))(
-  {input}, () => sent.push(input.value), {log() {}, warn() {}});
+new Function("elements", "sendMessage", "decisionMode", "console", source.slice(start, end))(
+  {input}, () => sent.push(input.value), false, {log() {}, warn() {}});
 const handler = listeners.keydown || listeners.keypress;
 assert.equal(typeof handler, "function", "composer must bind keyboard sending");
 let prevented = false;

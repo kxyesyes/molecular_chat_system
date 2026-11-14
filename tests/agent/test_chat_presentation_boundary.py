@@ -348,7 +348,7 @@ def test_rag_atomic_format_and_nonmutation(prompt_api):
                                          "score": 0.5000, "source": {"id": "fixture"}}]
     before = copy.deepcopy(rows)
     assert prompt_api.rag(h, rows) == (
-        'Relevant molecular data found:\n1. SMILES: F/C=C/F (similarity: 0.912)'
+        'Relevant molecular data found:\n1. SMILES: F/C=C/F (similarity: 0.91234)'
         '\n   score: 0.5\n   source: {"id": "fixture"}' + NOTICE)
     assert rows == before
 
