@@ -306,6 +306,7 @@ class ScientificAcceptanceRunner:
             None if supplied_tools else build_tool_registry(self.tools.values())
         )
         self._execution_tools = dict(self.tools)
+        self._initialize_real_rag = not supplied_tools
         if self.tool_registry is not None:
             registered = self.tool_registry.as_mapping()
             for name in ("target_database_search", "reverse_target_predictor"):
@@ -372,6 +373,16 @@ class ScientificAcceptanceRunner:
             execution_error = "skill_not_found"
 
         if policy is not None:
+            if actual_skill == "rag_search" and self._initialize_real_rag:
+                from src.rag.service import RAGSystem
+
+                service = RAGSystem({"rag": {
+                    "csv_path": str(self.project_root / "data/canonical_moses_5w.csv"),
+                    "vector_store_path": str(self.project_root / "data/molecular_faiss_index"),
+                }})
+                asyncio.run(service.initialize())
+                self.tools["rag_search"].rag_system = service
+                self._initialize_real_rag = False
             repeat_runs = int(case.metadata.get("repeat_runs", 1) or 1)
             with tempfile.TemporaryDirectory(
                 prefix="medchat-scientific-acceptance-"
@@ -937,6 +948,12 @@ def _normalize_forbidden_pattern_scan(
 
     normalized = re.sub(
         unit_field,
+        replace_endpoint_unit,
+        normalized,
+    )
+    # ADMET-AI also repeats units in an endpoint-to-unit mapping.
+    normalized = re.sub(
+        rf'(?i)"{endpoint}"\s*:\s*"kcal/mol(?=")',
         replace_endpoint_unit,
         normalized,
     )
@@ -1938,13 +1955,13 @@ def _check_data_flow_generated_smiles_consumed(
 
     consumed_by = []
     observed_downstream = []
+    after_generation = tool_results[tool_results.index(generator) + 1:]
     for tool_name in downstream_tools:
-        result = _find_tool(tool_results, tool_name)
-        if result is None or not result.success:
+        outputs = [item.data for item in after_generation if item.tool_name == tool_name and item.success]
+        if not outputs:
             continue
         observed_downstream.append(tool_name)
-        downstream_smiles = _canonical_smiles_set(result.data)
-        if downstream_smiles & generated:
+        if any(_canonical_smiles_set(data) & generated for data in outputs):
             consumed_by.append(tool_name)
     if consumed_by:
         return {

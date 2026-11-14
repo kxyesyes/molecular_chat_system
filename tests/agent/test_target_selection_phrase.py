@@ -8,6 +8,14 @@ from src.agent.planning.task_planner import TaskPlanner
 from src.agent.routing import HybridSkillRouter
 
 
+def test_design_role_accepts_scoring_and_model_instructions_without_hiding_other_targets():
+    query = ('以 PDE5 为靶点设计 10 个候选分子，并筛选 Top 3。'
+             '分子生成必须使用本地 Ollama gmm-llama:latest，后续用真实性质/ADMET/RG-MPNN 结果评分；'
+             '没有真实 docking 参数时不要给 docking energy。')
+    assert HybridSkillRouter().decide(query).selected_skill == 'target_driven_design'
+    assert target_request.analyze_target_request(query + '改用 UNKNOWN').needs_clarification
+
+
 @pytest.mark.parametrize('target, canonical', [
     ('PDE', 'PDE'), ('pde-family', 'PDE'), ('PDE5A', 'PDE5A'),
     ('BuChE', 'BCHE'), ('丁酰胆碱酯酶', 'BCHE'),

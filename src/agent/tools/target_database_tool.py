@@ -371,7 +371,8 @@ class TargetDatabaseTool(BaseMolecularTool):
             ) or any(
                 isinstance(target, dict) and bool(target.get("stale"))
                 for target in targets
-            ) or "structure_list_truncated" in result["warnings"] or (
+            ) or ("structure_list_truncated" in result["warnings"]
+                  and not canonical_target_identifier(query)) or (
                 resolution_limit is not None and any('searched_structure_count' not in t for t in targets))
             if isinstance(query, str) and re.search(r'分辨率|\bresolution\b', query, re.I):
                 if any(structure.get('structure_type') == 'experimental' and structure.get('resolution') is None

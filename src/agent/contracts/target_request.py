@@ -159,6 +159,12 @@ _DESIGN_PROPERTY_CONSTRAINT = re.compile(
 )
 _DESIGN_OUTPUT = re.compile(r'(?:返回|输出|给出)[ \t]*(?:SMILES|分子结构)(?![A-Za-z0-9_])', re.I)
 _DESIGN_CONSTRAINT_CHECK = re.compile(r'(?:逐项)?(?:检查|验证)(?:上述|所有)?(?:约束|条件)')
+_DESIGN_SCORING = re.compile(
+    r'筛选\s*Top\s*(?:100|[1-9][0-9]?)(?![0-9])|'
+    r'分子生成(?:必须)?使用(?:本地\s*)?(?:Ollama\s+)?gmm-llama(?::latest)?|'
+    r'(?:后续)?用(?:真实)?(?:性质|ADMET|RG-MPNN)(?:\s*[/、]\s*(?:性质|ADMET|RG-MPNN))*\s*结果评分|'
+    r'没有(?:真实)?\s*docking\s*参数时不要给\s*(?:docking\s+energy|结合能)', re.I,
+)
 
 
 def _analysis_item(query: str, position: int, end: int) -> tuple[int, str] | None:
@@ -244,8 +250,9 @@ def _role_tail(query: str, start: int, end: int) -> tuple[list[str], list[tuple[
         constraint = _DESIGN_PROPERTY_CONSTRAINT.match(query, position, end)
         output = _DESIGN_OUTPUT.match(query, position, end)
         check = _DESIGN_CONSTRAINT_CHECK.match(query, position, end)
-        if constraint or output or check:
-            position = (constraint or output or check).end()
+        scoring = _DESIGN_SCORING.match(query, position, end)
+        if constraint or output or check or scoring:
+            position = (constraint or output or check or scoring).end()
         elif head := _ANALYSIS_HEAD.match(query, position, end):
             item = _analysis_item(query, head.end(), end)
             if item is None:

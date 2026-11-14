@@ -229,6 +229,9 @@ def test_long_structure_list_reports_truncation(monkeypatch):
     assert result['status'] == 'partial' and 'structure_list_truncated' in result['warnings']
     assert len(result['data'][0]['recommended_structures']) == 20
     assert '当前展示 20 条，记录总数为 21' in _target_display_answer(result['data'], concise=True)
+    identity = tool.execute('PDE4A')
+    assert identity['status'] == 'resolved'
+    assert 'structure_list_truncated' in identity['warnings']
 
 
 @pytest.mark.parametrize('query', [
