@@ -505,6 +505,8 @@
           finalText = text.replace("本轮只执行了一次工作流，尚未完成多轮一致性比较。", "").trim();
           finalText += `\n\n${repeat.count} 次运行的工具顺序${same("tools") ? "一致" : "有差异"}，事件流${same("events") ? "一致" : "有差异"}，完成状态${same("status") ? "一致" : "有差异"}。各轮结果正文${same("answer") ? "一致" : "有差异，请对照各轮明细"}。`;
         }
+      } else if (repeat && status === "failed" && !projectionFailed) {
+        finalText += `\n\n第 ${repeat.runs.length + 1}/${repeat.count} 次运行失败，已停止比较。此前返回结果的轮次：${repeat.runs.length}。`;
       }
       if (projectionFailed) {
         // Delivery failure does not rewrite the scientific workflow result.

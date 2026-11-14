@@ -190,6 +190,20 @@ async function run() {
     assert.equal(h.input.value, "草稿");
     assert(h.chat.querySelectorAll(".message-box").some(box => box.getAttribute("data-content")?.includes("3 次运行")));
   });
+  await test("a failed repeat reports how far the comparison ran and stops dispatch", () => {
+    const h = loadHome(); h.ready("pi");
+    h.input.value = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
+    h.send();
+    const count = h.socket.sent.length;
+    for (const [i, status] of ["partial", "failed"].entries()) {
+      const t = String(i + 1).repeat(32), tr = String(i + 4).repeat(32);
+      h.socket.emit(accepted(t, tr));
+      h.socket.emit(result(status, t, tr)); h.socket.emit(complete(status, t, tr));
+    }
+    assert.equal(h.socket.sent.length, count + 1);
+    assert(h.chat.querySelectorAll(".message-box").some(box =>
+      box.getAttribute("data-content")?.includes("第 2/3 次运行失败，已停止比较")));
+  });
   await test("missing structure restores the original task for editing without sending it", () => {
     const h = loadHome(); h.ready("pi");
     h.input.value = "帮我分析一下分子性质"; h.send(); h.socket.emit(accepted(turn, trace));
@@ -1086,7 +1100,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261114-repeat-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261114-repeat-v2"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
