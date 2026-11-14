@@ -5,6 +5,7 @@ import pytest
 from src.agent.contracts import AgentContext
 from src.agent.contracts import target_request
 from src.agent.planning.task_planner import TaskPlanner
+from src.agent.planning.request_parsing import wants_activity
 from src.agent.routing import HybridSkillRouter
 
 
@@ -13,7 +14,14 @@ def test_design_role_accepts_scoring_and_model_instructions_without_hiding_other
              '分子生成必须使用本地 Ollama gmm-llama:latest，后续用真实性质/ADMET/RG-MPNN 结果评分；'
              '没有真实 docking 参数时不要给 docking energy。')
     assert HybridSkillRouter().decide(query).selected_skill == 'target_driven_design'
+    plan = TaskPlanner().plan(AgentContext(query=query, active_skill='target_driven_design',
+                                          trace_id='ranking-evidence'))
+    ranking = next(step for step in plan.steps if step.tool_name == 'candidate_ranker')
+    assert ranking.metadata['required_evidence'] == ('properties', 'admet', 'activity')
     assert target_request.analyze_target_request(query + '改用 UNKNOWN').needs_clarification
+    assert wants_activity('用RG-MPNN评分')
+    assert not wants_activity('不要使用 RG-MPNN')
+    assert not wants_activity('RG-MPNN 不需要')
 
 
 @pytest.mark.parametrize('target, canonical', [

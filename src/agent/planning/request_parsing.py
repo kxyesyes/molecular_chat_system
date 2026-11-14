@@ -268,7 +268,7 @@ def positive_intent_text(query: str) -> str:
             clause = restart['positive']
         # Also cover the ordinary object-before-prohibition order.
         clause = re.sub(
-            r"(?:admet|adme|毒性|活性|对接|docking|类药性)\s*" + _NEGATION + r".*$",
+            r"(?:admet|adme|毒性|活性|RG-MPNN|对接|docking|类药性)\s*" + _NEGATION + r".*$",
             "", clause, flags=re.I,
         )
         output.append(re.split(_NEGATION, clause, maxsplit=1, flags=re.I)[0])
@@ -284,7 +284,7 @@ def wants_activity(query: str) -> bool:
     """Return true only for a positive activity request, not a negation."""
     if not isinstance(query, str):
         return False
-    return bool(re.search(r"活性|\b(?:potency|activity|inhibition)\b",
+    return bool(re.search(r"活性|\b(?:potency|activity|inhibition)\b|(?<![A-Za-z0-9_-])RG-MPNN(?![A-Za-z0-9_-])",
                           positive_intent_text(query), re.I))
 
 

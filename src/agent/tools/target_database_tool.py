@@ -199,6 +199,7 @@ class TargetDatabaseTool(BaseMolecularTool):
         try:
             service = self._get_service(organism) if organism == 'Mus musculus' else self._get_service()
             targets: list[Any] = []
+            seen_target_ids = set()
             searched: list[str] = []
             lookup_path: list[str] = []
             evidence: list[dict[str, Any]] = []
@@ -256,6 +257,10 @@ class TargetDatabaseTool(BaseMolecularTool):
                     if isinstance(target, dict):
                         target = {**target, "source_query": search_query}
                         target_id = target.get("target_id", target.get("id"))
+                        if target_id not in (None, ""):
+                            if target_id in seen_target_ids:
+                                continue
+                            seen_target_ids.add(target_id)
                         recommended_structures = [
                             dict(structure)
                             for structure in target.get("recommended_structures", [])
