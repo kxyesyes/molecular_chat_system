@@ -116,7 +116,8 @@ window.HomeFormatters = (function () {
         const body = rows.map(function (row) {
           return '<tr>' + row.map(function (cell, column) {
             const structure = scientific && header[column] === 'SMILES';
-            return (structure ? '<td class="home-structure-cell">' : '<td>') + (structure ? cell : renderCell(cell)) + '</td>';
+            if (structure) return '<td class="home-structure-cell">' + cell.replace(/^`([^`]+)`$/, '$1') + '</td>';
+            return '<td>' + renderCell(cell) + '</td>';
           }).join("") + '</tr>';
         }).join("");
         output.push('<div class="home-comparison-table-scroll" tabindex="0" role="region" aria-label="比较结果表格" style="overflow-x: auto; margin: 12px 0;"><table style="border-collapse: collapse; width: 100%;"><thead><tr>' + heading + '</tr></thead><tbody>' + body + '</tbody></table></div>');

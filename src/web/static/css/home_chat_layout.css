@@ -47,6 +47,30 @@
   margin-top: 0;
 }
 
+.agent-task-panel > summary.agent-task-header {
+  cursor: pointer;
+  min-height: 44px;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.agent-task-panel > summary.agent-task-header::before {
+  content: "▸";
+}
+
+.agent-task-panel[open] > summary.agent-task-header::before {
+  content: "▾";
+}
+
+.agent-task-panel > summary .agent-task-progress {
+  margin-inline-start: auto;
+}
+
+.agent-task-panel > summary:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+
 .home-comparison-table-scroll th,
 .home-comparison-table-scroll td {
   min-width: 5rem;

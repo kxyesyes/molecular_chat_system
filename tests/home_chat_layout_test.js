@@ -7,7 +7,7 @@ const fs = require("fs");
 const path = require("path");
 const root = path.join(__dirname, "../src/web");
 const template = fs.readFileSync(path.join(root, "templates/index.html"), "utf8");
-const href = '/static/css/home_chat_layout.css?v=20261114-result-reading-v1';
+const href = '/static/css/home_chat_layout.css?v=20261114-progress-v2';
 assert(template.includes(href), "home must load the scoped responsive layout stylesheet");
 assert(template.indexOf(href) > template.lastIndexOf("</style>"), "layout overrides must follow existing inline styles");
 const css = fs.readFileSync(path.join(root, "static/css/home_chat_layout.css"), "utf8");
