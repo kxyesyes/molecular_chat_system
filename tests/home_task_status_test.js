@@ -102,3 +102,7 @@ assert.strictEqual(status.message({event:'validation_warning', tool:'candidate_r
     'Activity evidence was absent, demo, fallback, or unusable for 2 ranked candidate(s)']}}),
   '2 个候选缺少可用的 ADMET 证据。；2 个候选缺少可用的活性证据。');
 console.log("Home task status checks passed");
+assert.strictEqual(status.message({event:'validation_warning', tool:'candidate_ranker',
+  message:'Tool result has validation warnings', payload:{warnings:[
+    'Required evidence was missing for 2 candidate(s); those candidates are not assessment-complete']}}),
+  '2 个候选尚未满足本次排序的全部证据要求，请结合已完成的预测复核。');

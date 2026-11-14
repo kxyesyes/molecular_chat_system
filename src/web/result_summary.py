@@ -217,7 +217,22 @@ def prepare_summary(handler, result, *, business_view=None):
             return f'{rank_warning.group(1)} 个候选缺少可用的 ADMET 证据。'
         rank_warning = re.fullmatch(r'Activity evidence was absent, demo, fallback, or unusable for (\d+) ranked candidate\(s\)', text)
         if rank_warning:
-            return f'{rank_warning.group(1)} 个候选缺少可用的活性证据。'
+            count = int(rank_warning.group(1))
+            # Read only the published projection. Rejected rankings carry no data.
+            rankings = [item['data'] for item in details.get('tool_result_sequence', [])
+                        if item['tool_name'] == 'candidate_ranker' and isinstance(item.get('data'), dict)]
+            if len(rankings) == 1:
+                excluded = [row['ranking_evidence']['activity'] for row in rankings[0].get('ranked_candidates', [])
+                            if row.get('ranking_evidence', {}).get('activity', {}).get('used') is False]
+                conflicts = sum(row.get('exclusion_reason') == 'classification_regression_conflict' for row in excluded)
+                if conflicts and len(excluded) == count:
+                    return (f'{count} 个候选的活性预测未计入排序。其中 {conflicts} 个的分类与回归预测不一致，'
+                            '请对照两项预测值及各自阈值复核。')
+            return f'{count} 个候选缺少可用的活性证据。'
+        rank_warning = re.fullmatch(r'Required evidence was missing for (\d+) candidate\(s\); '
+                                    r'those candidates are not assessment-complete', text)
+        if rank_warning:
+            return f'{rank_warning.group(1)} 个候选尚未满足本次排序的全部证据要求，请结合已完成的预测复核。'
         # This exact executor wrapper is bound to a verified observation. Keep
         # its concrete reason and the original warning in the detail snapshot.
         for prefix, label in optional_failure_prefixes:

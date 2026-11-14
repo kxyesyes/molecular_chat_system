@@ -112,7 +112,9 @@ window.HomeTaskStatus = (() => {
     let match = /^ADMET evidence was absent or unusable for (\d+) ranked candidate\(s\)$/.exec(text);
     if (match) return `${match[1]} 个候选缺少可用的 ADMET 证据。`;
     match = /^Activity evidence was absent, demo, fallback, or unusable for (\d+) ranked candidate\(s\)$/.exec(text);
-    return match ? `${match[1]} 个候选缺少可用的活性证据。` : text;
+    if (match) return `${match[1]} 个候选缺少可用的活性证据。`;
+    match = /^Required evidence was missing for (\d+) candidate\(s\); those candidates are not assessment-complete$/.exec(text);
+    return match ? `${match[1]} 个候选尚未满足本次排序的全部证据要求，请结合已完成的预测复核。` : text;
   }
 
   const targetWarnings = new Map([
