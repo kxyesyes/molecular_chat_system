@@ -966,6 +966,6 @@ test("send readiness does not overwrite a draft typed before config load", async
 
 test("homepage loads the updated settings script instead of the stale cached version", () => {
   const activeHtml = html.replace(/<!--[\s\S]*?-->/g, "");
-  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261113-agent-delivery-v2"></script>'));
+  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261114-repeat-v1"></script>'));
   assert.match(activeHtml, /<button[^>]*class="btn"[^>]*aria-label="发送消息"/);
 });

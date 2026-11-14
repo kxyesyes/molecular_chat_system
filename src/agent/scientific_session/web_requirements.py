@@ -184,6 +184,8 @@ def _coverage(query, steps, workflow):
         raise ValueError('uncovered_web_obligation')
     for name, pattern in _PATTERNS.items():
         intent = _property_intent_text(positive) if name == 'property_calculator' else positive
+        if name == 'rag_search':
+            intent = re.sub(r'(?:若|如果)(?:模型或)?数据库不可用', '', intent)
         if not re.search(pattern, intent, re.I) or name in tools:
             continue
         if name == 'candidate_ranker' and (
@@ -344,6 +346,24 @@ def compile_web_requirements(context, *, allowed_tools):
             plan.steps.insert(1, molecular_design_steps(plan.steps[0].input_data, include_properties=True)[1])
             plan.metadata['atomic'] = False
         plan.steps = [s for s in plan.steps if s.tool_name not in forbidden]
+        if (plan.workflow_name == 'target_driven_design' and any(s.tool_name == 'activity_predictor' for s in plan.steps)
+                and not re.search(_PATTERNS['activity_predictor'], positive, re.I)):
+            from src.activity.family_contract import resolve_activity_family
+            target = plan.metadata['target_hint']
+            try:
+                resolve_activity_family(target)
+            except ValueError:
+                plan.metadata['unsupported_activity_target'] = target
+                plan.steps = [s for s in plan.steps if s.tool_name != 'activity_predictor']
+                rank = plan.steps[-1]
+                if rank.tool_name == 'candidate_ranker':
+                    metadata = dict(rank.metadata)
+                    for key in ('workflow_output_keys', 'workflow_optional_output_keys'):
+                        metadata[key] = tuple(output for output in metadata[key] if output != 'activity')
+                    if not metadata.get('required_evidence'):
+                        metadata['required_evidence'] = ['properties']
+                        metadata['workflow_metadata_keys'] += ('required_evidence',)
+                    plan.steps[-1] = replace(rank, metadata=metadata)
         if plan.workflow_name == 'hit_to_lead_optimization':
             if not context.active_skill and not re.search(_PATTERNS['activity_predictor'], positive, re.I):
                 plan.steps = [s for s in plan.steps if s.tool_name != 'activity_predictor']

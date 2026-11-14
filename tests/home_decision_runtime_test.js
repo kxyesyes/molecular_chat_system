@@ -172,6 +172,24 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
+  await test("explicit repeated evaluation submits three serial turns and preserves composer draft", () => {
+    const h = loadHome(); h.ready("pi");
+    const q = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
+    h.input.value = q; h.send();
+    const firstCount = h.socket.sent.length;
+    h.input.value = "草稿";
+    for (let i = 0; i < 3; i++) {
+      const t = String(i + 1).repeat(32), tr = String(i + 4).repeat(32);
+      h.socket.emit(accepted(t, tr));
+      h.socket.emit({type: "agent_event", turn_id: t, event: {trace_id: tr, event: "tool_started", tool: "reverse_target_predictor"}});
+      h.socket.emit(result("partial", t, tr));
+      assert.equal(h.socket.sent.length, firstCount + i);
+      h.socket.emit(complete("partial", t, tr));
+      assert.equal(h.socket.sent.length, firstCount + Math.min(i + 1, 2));
+    }
+    assert.equal(h.input.value, "草稿");
+    assert(h.chat.querySelectorAll(".message-box").some(box => box.getAttribute("data-content")?.includes("3 次运行")));
+  });
   await test("missing structure restores the original task for editing without sending it", () => {
     const h = loadHome(); h.ready("pi");
     h.input.value = "帮我分析一下分子性质"; h.send(); h.socket.emit(accepted(turn, trace));
@@ -1068,7 +1086,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261113-agent-delivery-v2"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261114-repeat-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");

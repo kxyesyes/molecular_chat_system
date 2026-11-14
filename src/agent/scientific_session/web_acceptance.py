@@ -427,7 +427,7 @@ def render_web_scientific_answer(resolver, *, required_tools=(), evidence_ids, i
     # A transport-budget/dependency stop is not a model finish or successful task. The
     # server may still display already authenticated work without inventing a
     # model citation or dropping evidence to squeeze in another model request.
-    interrupted = interruption_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable',
+    interrupted = interruption_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable', 'reverse_target_no_matches',
                                          'activity_target_conflict_or_unknown')
     if ((interruption_reason is not None and not interrupted)
             or (interrupted and evidence_ids is not None)

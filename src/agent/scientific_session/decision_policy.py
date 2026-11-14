@@ -400,7 +400,7 @@ def model_observation(result, task_acceptance, *, record_references=None):
                     {'data_row_provenance_ref': next(i for i, original in enumerate(originals) if original == value)}
                     if value in originals else value for value in model_provenance]
     ranking_plan = (isinstance(task_acceptance, dict) and task_acceptance.get('profile') == 'medchat-web-v1'
-                    and any(check.get('tool_name') == 'candidate_ranker'
+                    and any(check.get('tool_name') in ('candidate_ranker', 'lead_optimization_verifier')
                             for check in task_acceptance.get('checks', [])))
     if ranking_plan and isinstance(data, list) and result.tool_name in ('activity_predictor', 'admet_predictor'):
         # Pi chooses a step reference. The ranker independently receives the

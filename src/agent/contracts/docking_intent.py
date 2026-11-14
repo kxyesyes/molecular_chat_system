@@ -81,6 +81,8 @@ def explicit_docking_action(query: str) -> bool:
         return False
     clauses = _CLAUSES.split(without_docking_energy_prohibition(query))
     for index, clause in enumerate(clauses):
+        clause = re.sub(r'是否建议\s*(?:docking\b|(?:分子)?对接)|'
+                        r'(?:最)?适合后续\s*(?:docking\b|(?:分子)?对接)\s*的', '', clause, flags=re.I)
         clause = _SUITABILITY.sub('', clause)
         clause = _QUESTION.sub('', clause)
         clause = _REFERENCE_QUESTION.sub('', clause)

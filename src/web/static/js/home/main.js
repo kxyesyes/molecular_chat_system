@@ -312,9 +312,9 @@
     catch (_) {closeProtocolSocket(ws, 1011, "request send failed"); return false;}
   }
 
-  function sendDecisionMessage(resume = false) {
+  function sendDecisionMessage(resume = false, repeat = null) {
     if (typeof dockingUI !== "undefined" && dockingUI?.blocked()) return;
-    const message = elements.input.value;
+    const message = repeat ? repeat.query : elements.input.value;
     if (!message.trim() || decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
     if (agentConfigInputVersion !== (agentConfigSavedInputVersion ?? 0)) {
       HomeChatRenderer.showNotification("模型配置有未保存的修改，请先保存。", "warning");
@@ -328,15 +328,19 @@
         ...(scientificReferences?.outgoing() || {})};
     if (decisionResultFormat) payload.result_format = decisionResultFormat;
     if (!sendDecisionControl(payload)) return;
+    if (!resume && !repeat && !payload.reference && !payload.selection) {
+      const request = /^\s*请?重复执行\s*([23])\s*次\s+[A-Za-z0-9@+\-\[\]()=#\\/.:%]+\s*的综合评价[，,]\s*比较每次调用的工具顺序[、，,]事件流和最终结论是否一致[。.!！]?\s*$/.exec(message);
+      if (request) repeat = {query: message, count: Number(request[1]), runs: []};
+    }
     decisionTurn = {socket: ws, phase: "pending", turnId: null, traceId: null, requestText: message,
-      resume: resume ? decisionWaiting : null, cancelSent: false, result: null};
+      resume: resume ? decisionWaiting : null, cancelSent: false, result: null, repeat, events: []};
     scientificReferences?.startRequest();
     moleculeCandidateLifecycle.startRequest();
     evidenceReportLifecycle?.startRequest();
     if (!chatMode) enterChatMode();
-    addUserMessage(message);
+    addUserMessage(repeat && repeat.runs.length ? `第 ${repeat.runs.length + 1} 次综合评价` : message);
     decisionTurn.userMessage = elements.chatContainer.lastChild;
-    elements.input.value = "";
+    if (!repeat || !repeat.runs.length) elements.input.value = "";
     showTypingIndicator();
     updateDecisionControls();
     HomeChatRenderer.scrollToBottom();
@@ -394,6 +398,7 @@
     if (strict) return !turn.result; // existing strict DTOs never receive a turn_id
     if (message.type === "agent_event") {
       if (turn.result || message.event?.trace_id !== turn.traceId) return true;
+      if (turn.repeat) turn.events.push([message.event.event, message.event.tool || ""]);
       removeTypingIndicator();
       return false;
     }
@@ -490,6 +495,17 @@
       if (turn.statusElement) turn.statusElement.hidden = status === "completed" && !projectionFailed &&
         !turn.result.retrievalNotice;
       let finalText = text;
+      const repeat = turn.repeat;
+      const continueRepeat = repeat && !projectionFailed && !turn.cancelSent && ["partial", "completed"].includes(status);
+      if (continueRepeat) {
+        repeat.runs.push({events: turn.events, tools: turn.events.filter(e => e[0] === "tool_started").map(e => e[1]),
+          answer: text, status});
+        if (repeat.runs.length === repeat.count) {
+          const same = key => repeat.runs.every(run => JSON.stringify(run[key]) === JSON.stringify(repeat.runs[0][key]));
+          finalText = text.replace("本轮只执行了一次工作流，尚未完成多轮一致性比较。", "").trim();
+          finalText += `\n\n${repeat.count} 次运行的工具顺序${same("tools") ? "一致" : "有差异"}，事件流${same("events") ? "一致" : "有差异"}，完成状态${same("status") ? "一致" : "有差异"}。各轮结果正文${same("answer") ? "一致" : "有差异，请对照各轮明细"}。`;
+        }
+      }
       if (projectionFailed) {
         // Delivery failure does not rewrite the scientific workflow result.
         const notice = typeof message.content === "string" && message.content.trim()
@@ -547,7 +563,9 @@
       } else {
         setDecisionWaiting(metadata.stop_reason === "continuation_rejected" ? turn.resume : null);
       }
-      updateDecisionControls(); return true;
+      updateDecisionControls();
+      if (continueRepeat && repeat.runs.length < repeat.count) sendDecisionMessage(false, repeat);
+      return true;
     }
     return true; // decision mode does not accept legacy stream/message authority
   }

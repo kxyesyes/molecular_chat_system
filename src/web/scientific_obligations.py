@@ -1087,6 +1087,13 @@ class ScientificObligationCompiler:
             return False
         positive = positive_intent_text(query)
         from src.agent.utils.validators import InputValidator
+        if (re.search(r'综合评价|全面评价', positive)
+                and (re.search(r'反向寻靶|潜在靶点', positive)
+                     or re.search(r'重复执行\s*\d+\s*次', positive))
+                and not (set(_unreviewed_metric_capabilities(
+                    re.sub(r'比较每次调用的工具顺序、事件流和最终结论是否一致', '', positive)))
+                    - {'metric:activity', 'metric:pic50'})):
+            return False
         if (_explicit_admet_request(positive)
                 and not _PROPERTY_REQUEST.search(positive)
                 and not _DRUG_LIKENESS_REQUEST.search(positive)

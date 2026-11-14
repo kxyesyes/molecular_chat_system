@@ -311,6 +311,10 @@ class WebBindingResolver:
                 raise DecisionBoundaryError('web_dependency_not_ready')
             identity, source = completed[dependency]
             output_key = steps[dependency].output_key
+            if (name == 'target_database_search' and step.input_from == output_key
+                    and source.tool_name == 'reverse_target_predictor' and usable(source)
+                    and source.data == [] and source.quality.get('prediction_status') == 'verified_empty'):
+                raise DecisionBoundaryError('reverse_target_no_matches')
             if output_key not in outputs and output_key not in optional:
                 raise DecisionBoundaryError('web_dependency_unusable')
             roles.append({'role': 'dependency', 'step_ref': dependency,

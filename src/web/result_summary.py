@@ -277,8 +277,19 @@ def prepare_summary(handler, result, *, business_view=None):
          if item not in _ADMET_INFORMATIONAL_WARNINGS and item not in internal_view_warnings],
         reject_claims=terminal_failure)]
     issues = []
+    plan = result.metadata.get('task_requirements') or {}
+    uncovered_target = (plan.get('metadata') or {}).get('unsupported_activity_target')
+    if uncovered_target and has_observations:
+        issues.append(f'当前活性模型仅覆盖 PDE 和 BuChE，无法预测 {uncovered_target} 活性。本轮排序未计入活性。')
     generic_partial_issue = False
     if status == 'partial':
+        if (any(item.tool_name == 'reverse_target_predictor' and item.success and item.data == []
+                and item.quality.get('prediction_status') == 'verified_empty' for item in result.tool_results)
+                and plan.get('workflow_name') == 'comprehensive_evaluation'
+                and not any(item.tool_name == 'target_database_search' for item in result.tool_results)):
+            issues.append('当前相似度阈值下没有匹配靶点，已跳过后续结构检索。')
+        if re.search(r'重复执行\s*\d+\s*次', str(plan.get('request', {}).get('query', ''))):
+            issues.append('本轮只执行了一次工作流，尚未完成多轮一致性比较。')
         if result.metadata.get('stop_reason') == 'activity_target_conflict_or_unknown':
             issues.append('活性预测的靶点或物种不受支持、存在冲突或不明确；本次未进行活性预测。')
         for step in diagnostic['failed_steps']:
