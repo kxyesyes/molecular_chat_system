@@ -150,6 +150,8 @@ class TargetDatabaseTool(BaseMolecularTool):
             return result
         target_query = target_text_without_pdb(query) if pdb_id is not None else query
         search_queries = self._search_queries(target_query)
+        named_comparison = (isinstance(query, (list, tuple)) and len(query) > 1
+                            and all(canonical_target_identifier(item) for item in query))
         # Preserve names when prose was reduced to accession lookup keys, but
         # leave unconstrained name/family and multi-target searches unchanged.
         named_targets = target_mentions(target_query) if type(target_query) is str and (
@@ -280,6 +282,17 @@ class TargetDatabaseTool(BaseMolecularTool):
                                 if resolution_limit is not None:
                                     target['searched_structure_count'] = len(structures)
                                     structures, target['comparable_structure_count'] = resolution_preview(structures, resolution_limit)
+                                elif named_comparison and len(structures) > 20:
+                                    # For an identity comparison retain an actual example of each
+                                    # structure type, even when all predicted rows follow the PDBs.
+                                    examples = {}
+                                    for structure in structures:
+                                        if isinstance(structure, dict):
+                                            examples.setdefault(structure.get("structure_type"), structure)
+                                    structures = list(examples.values())
+                                    result["warnings"].append(
+                                        f"{target.get('gene_symbol', search_query)} 共 {len(structure_payload['structures'])} "
+                                        "条结构记录，比较结果中每种结构类型展示一条。")
                                 elif len(structures) > 20:
                                     result.setdefault("warnings", []).append("structure_list_truncated")
                                 recommended_structures = [
@@ -371,7 +384,7 @@ class TargetDatabaseTool(BaseMolecularTool):
                 return result
 
             partial = any(
-                status in {"ambiguous", "unavailable", "partial"}
+                status in {"ambiguous", "unavailable", "partial", "not_found"}
                 for status in service_statuses
             ) or any(
                 isinstance(target, dict) and bool(target.get("stale"))
@@ -446,7 +459,7 @@ class TargetDatabaseTool(BaseMolecularTool):
                 )
                 lines.append(f"- Match source: {match_reason}")
                 if recommended_structures:
-                    lines.append("- Recommended structures:")
+                    lines.append("- Structure examples:" if named_comparison else "- Recommended structures:")
                     for structure in recommended_structures:
                         structure_id = structure.get("structure_id", "N/A")
                         source = structure.get("source", "N/A")

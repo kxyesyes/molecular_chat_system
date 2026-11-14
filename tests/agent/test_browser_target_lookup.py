@@ -234,6 +234,32 @@ def test_long_structure_list_reports_truncation(monkeypatch):
     assert 'structure_list_truncated' in identity['warnings']
 
 
+def test_named_target_comparison_keeps_structure_examples_for_each_identity(monkeypatch):
+    class Service:
+        def search_targets(self, query, **kwargs):
+            target_id = 1 if query in ('PDE5A', 'PDE5') else 2
+            return {'status': 'resolved', 'results': [{'target_id': target_id,
+                'gene_symbol': ('PDE5A', 'EGFR')[target_id - 1], 'structure_count': 30,
+                'has_experimental_structure': True, 'has_alphafold_structure': True}]}
+
+        def get_target_structures(self, target_id):
+            return {'structures': [{'structure_id': f'{target_id}{i:03d}',
+                'title': 'x' * 1200, 'source': 'AlphaFold' if i == 29 else 'RCSB_PDB',
+                'structure_type': 'predicted' if i == 29 else 'experimental'} for i in range(30)]}
+
+    tool = TargetDatabaseTool()
+    monkeypatch.setattr(tool, '_get_service', lambda: Service())
+    for query, expected_count in [(['PDE5A', 'EGFR'], 2), (['PDE5A', 'PDE5'], 1)]:
+        result = tool.execute(query)
+        assert result['status'] == 'resolved'
+        assert len(result['data']) == expected_count
+        for target in result['data']:
+            assert target['structure_count'] == 30
+            assert {row['source'] for row in target['recommended_structures']} == {'RCSB_PDB', 'AlphaFold'}
+            assert all(row['structure_id'] in result['formatted'] for row in target['recommended_structures'])
+        assert len(json.dumps(result).encode()) < 48 * 1024
+
+
 @pytest.mark.parametrize('query', [
     'Lookup BuChE and UNKNOWN target information',
     'Lookup BuChE target information except EGFR',
