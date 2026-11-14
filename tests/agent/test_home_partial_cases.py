@@ -9,6 +9,7 @@ from src.agent.contracts.docking_intent import explicit_docking_action
 from src.agent.scientific_session.web_requirements import WEB_TOOLS, compile_web_requirements
 from src.agent.tools.activity_input import activity_target
 from src.web.scientific_obligations import ScientificObligationCompiler
+from tests.agent.test_reverse_receipt_consumption import strict_source_factory
 
 CASES = {row['case_id']: row['prompt'] for dataset in ('golden', 'diverse')
          for line in (Path(__file__).resolve().parents[2] / 'data' / 'agent_evals'
@@ -75,6 +76,47 @@ def test_optimization_model_observation_preserves_full_admet_for_verifier():
         {'tool_name': 'lead_optimization_verifier'}]})
     assert 'endpoints' not in view['data'][0]['admet']
     assert result.data[0]['admet']['endpoints'] == {'one': 0.5}
+
+
+@pytest.mark.parametrize('bad_calls', [1, 2])
+def test_repeat_rejects_unknown_tool_for_valid_step_before_dispatch(tmp_path, strict_source_factory, bad_calls):
+    from dataclasses import replace
+    from pi_web_support import PlannedWebModel, make_web_handler, run_web_turn
+    from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
+    from src.agent.tools.property_calculator import PropertyCalculator
+    from src.agent.tools.reverse_target_tool import ReverseTargetTool
+    from tests.agent.test_target_driven_design_workflow import FakeTool
+
+    class MismatchedName(PlannedWebModel):
+        async def decide(self, messages, **kwargs):
+            response = await super().decide(messages, **kwargs)
+            if len(self.messages) <= bad_calls:
+                assert response.decision.arguments == {'step_ref': 'properties'}
+                return replace(response, decision=response.decision.model_copy(
+                    update={'tool_name': 'unknown_property_tool'}))
+            return response
+
+    plan = compile_web_requirements(AgentContext(CASES['DIVERSE-020'], 'test'), allowed_tools=WEB_TOOLS)
+    tools = {step.tool_name: FakeTool(step.tool_name) for step in plan.steps}
+    tools.update(property_calculator=PropertyCalculator(),
+                 reverse_target_predictor=ReverseTargetTool(strict_source_factory(('[Na+]',))))
+    model = MismatchedName()
+    handler = make_web_handler(tools, SQLiteAgentStateStore(tmp_path / 'repeat.sqlite'), model=model)
+    try:
+        complete, frames = run_web_turn(handler, CASES['DIVERSE-020'])
+        events = [f['event'] for f in frames if f['type'] == 'agent_event']
+        started = [e['tool'] for e in events if e['event'] == 'tool_started']
+        assert len(model.messages) >= 2
+        assert sum((e.get('payload') or {}).get('accepted') is False for e in events) == 1
+        if bad_calls == 1:
+            assert complete['status'] == 'partial'
+            assert started == [s.tool_name for s in plan.steps if s.tool_name != 'target_database_search']
+            assert handler.web_results[-1].tool_results[-1].quality['prediction_status'] == 'verified_empty'
+        else:
+            assert len(model.messages) == 2 and not started and complete['status'] == 'failed'
+        assert not tools['target_database_search'].inputs
+    finally:
+        handler.agent_system.tool_registry.close()
 
 def test_supplied_target_dispatches_pending_activity_even_if_model_asks_again(tmp_path):
     import asyncio

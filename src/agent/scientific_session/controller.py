@@ -589,6 +589,9 @@ class ScientificSession:
         if model_query is not None:
             model_requirements = {**requirement_payload, 'request': {
                 **requirement_payload['request'], 'query': model_query, 'memory': []}}
+        repeat_evaluation = (binding and policy.is_web and requirements.workflow_name == 'comprehensive_evaluation'
+                             and re.search(r'重复执行\s*\d+\s*次', requirements.request['query'])
+                             and has_valid_molecular_input(requirements.request['query'], required_tools))
         system_message = decision_system_message(request_kind, required_tools, catalog, model_requirements,
             ordinary_capabilities=ordinary_capabilities if request_kind == 'chat' else None,
             binding_profile=self.runtime.binding_profile)
@@ -596,6 +599,13 @@ class ScientificSession:
             system_message['content'] += (' B1: reverse observations expose record_references. '
                 'For target lookup from reverse use input_ref=evidence_id and record_ref from those descriptors. '
                 'ADMET/activity consume the whole molecular evidence batch. Never invent record handles.')
+        model_system_message = system_message
+        if repeat_evaluation:
+            # Preserve the Pi preamble used to authenticate existing checkpoints.
+            model_system_message = {**system_message, 'content': system_message['content'] + (
+                ' This conversation executes one run of the repeated evaluation. For each tool decision, '
+                'copy tool_name and arguments together from a single Tool catalog entry: its name is '
+                'decision.tool_name, and its arguments.step_ref identifies the compiled step.')}
         # B has already bounded the complete raw context and UTF-8 query content.
         # Preserve legacy history semantics without reapplying its JSON-string
         # query ceiling to the independently admitted B content.
@@ -864,7 +874,7 @@ class ScientificSession:
                 response = await asyncio.wait_for(
                     ModelProviderAdapter(self.runtime.model, self.runtime.mode).request(
                         payload['messages'], timeout_seconds=min(60, remaining),
-                        system_message=system_message,
+                        system_message=model_system_message,
                         **({'review_draft': review_draft, 'review_in_three_sentences': sentence_range is not None}
                            if review_draft is not None else {}),
                         **({'temperature': context.temperature,
@@ -877,6 +887,19 @@ class ScientificSession:
                            if self.runtime.binding_profile == 'medchat-web-v1' else {})),
                     timeout=min(60, remaining))
             await boundary()
+            # The wire schema accepts a syntactically valid identifier. A known step
+            # with an unknown tool still needs a fresh, catalog-valid model decision.
+            # Reject it before Pi acknowledges a proposal or reserves a tool attempt.
+            proposed = response.decision
+            wrong_repeat_tool = (repeat_evaluation and response.success and type(proposed) is ToolDecision
+                                 and proposed.tool_name not in adapters
+                                 and proposed.tool_name not in requirements.forbidden_tools
+                                 and any(entry['arguments'] == proposed.arguments for entry in catalog))
+            if wrong_repeat_tool:
+                response = DecisionResponse(None, AgentExecutionError(AgentErrorCode.INVALID_OUTPUT,
+                    'Tool name does not match the compiled action catalog', {'reason': 'invalid_decision_schema',
+                    'schema_issues': [{'path': 'decision.tool.tool_name', 'type': 'literal_error'}]}),
+                    None, response.metadata)
             state.model_calls.append({**model_call_metadata(response),
                                       'decision_id': state.decision_id, 'round': state.model_requests})
             persist('decision_received')
@@ -894,6 +917,8 @@ class ScientificSession:
                         and details.get('reason') == 'decision_input_budget_exceeded'):
                     raise DecisionBoundaryError('decision_input_budget_exceeded')
                 feedback = schema_correction(response)
+                if wrong_repeat_tool and state.protocol_repairs:
+                    raise DecisionBoundaryError('tool_not_authorized')
                 if feedback is None or state.protocol_repairs:
                     raise DecisionBoundaryError('model_decision_unavailable')
                 return schedule_correction(feedback, response.error.details['reason'])
@@ -1041,9 +1066,6 @@ class ScientificSession:
                             arguments={'input_ref': 'user'},
                             purpose='satisfy the pending workflow requirement',
                         )
-            repeat_evaluation = (binding and policy.is_web and requirements.workflow_name == 'comprehensive_evaluation'
-                                 and re.search(r'重复执行\s*\d+\s*次', requirements.request['query'])
-                                 and has_valid_molecular_input(requirements.request['query'], required_tools))
             supplied_target = (binding and policy.is_web and restored is not None
                                and isinstance(decision, (ClarifyDecision, FinishDecision))
                                and restored['proposals'][-1]['decision'].get('missing_fields') == ['target']
