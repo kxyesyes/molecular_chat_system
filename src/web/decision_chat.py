@@ -342,8 +342,8 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False, requested_en
     return '\n'.join(lines)
 
 
-def _activity_display_answer(data, *, concise=False):
-    """Render allowlisted activity observations for the result summary."""
+def activity_display_rows(data):
+    """Keep only activity rows that appear in the user-facing result."""
     rows = []
     for row in data or ():
         if not isinstance(row, dict):
@@ -356,6 +356,12 @@ def _activity_display_answer(data, *, concise=False):
                 'predicted_pIC50', 'activity_probability', 'value', 'probability')):
             continue
         rows.append(row)
+    return rows
+
+
+def _activity_display_answer(data, *, concise=False):
+    """Render allowlisted activity observations for the result summary."""
+    rows = activity_display_rows(data)
     if not rows:
         return ''
     lines = ['## 活性预测结果', '']
@@ -1277,6 +1283,16 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
             raise asyncio.CancelledError()
         frames = await _prepare_result_frames(handler, result, display_changed,
             websocket=websocket, store=decision_loop.store, business_view=business_view)
+        if web_projection and (activity := web_projection.entry.get('activity_evidence')):
+            # Only this rendered list establishes ordinal authority. A ranked,
+            # truncated or replaced summary can have a different row order.
+            rows = activity['observations'][0]['data']
+            block = _activity_display_answer(rows, concise=True)
+            frame = json.loads(frames[0])
+            if (activity['trace_id'] == result.trace_id and block
+                    and frame.get('status') in {'completed', 'partial'}
+                    and block in (frame.get('display_answer') or '')):
+                web_projection.entry['activity_display_order'] = [r['smiles'] for r in activity_display_rows(rows)]
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError()
     except Exception:
