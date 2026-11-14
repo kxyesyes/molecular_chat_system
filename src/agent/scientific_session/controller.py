@@ -46,7 +46,7 @@ from .decision_policy import (
 from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, settle_owned_call, retry_persistence
 from .decision_inputs import (
     resolve_decision_input, active_results, verify_observation_integrity, decision_input_digest, seal_observation,
-    effective_molecule, has_explicit_molecule, MOLECULAR_INPUT_TOOLS, require_current_reference,
+    activity_input_target, effective_molecule, has_explicit_molecule, MOLECULAR_INPUT_TOOLS, require_current_reference,
 )
 from .decision_clarification import scientific_clarification, has_valid_molecular_input
 from .decision_bounds import context_value, configuration_generation, validate_json
@@ -1044,9 +1044,13 @@ class ScientificSession:
             repeat_evaluation = (binding and policy.is_web and requirements.workflow_name == 'comprehensive_evaluation'
                                  and re.search(r'重复执行\s*\d+\s*次', requirements.request['query'])
                                  and has_valid_molecular_input(requirements.request['query'], required_tools))
+            supplied_target = (binding and policy.is_web and restored is not None
+                               and isinstance(decision, (ClarifyDecision, FinishDecision))
+                               and restored['proposals'][-1]['decision'].get('missing_fields') == ['target']
+                               and activity_input_target(session) is not None)
             if (binding and policy.is_web and request_kind == 'scientific'
                     and (isinstance(decision, FinishDecision)
-                         or (repeat_evaluation and isinstance(decision, ClarifyDecision)))):
+                         or supplied_target or (repeat_evaluation and isinstance(decision, ClarifyDecision)))):
                 # A Web workflow is compiled into an exact dependency graph.
                 # If the model attempts to finish before the graph is closed,
                 # recover the next ready required step instead of invalidating
@@ -1063,7 +1067,7 @@ class ScientificSession:
                 next_step = next_required_web_step(
                     workflow_steps(requirements), requirements.dependencies,
                     completed=completed_refs)
-                if repeat_evaluation:
+                if repeat_evaluation or supplied_target:
                     next_step = next((s for s in requirements.steps if s.name not in completed_refs
                                      and set(requirements.dependencies[s.name]) <= completed_refs), next_step)
                 if next_step is not None:
@@ -1078,7 +1082,6 @@ class ScientificSession:
                     and (requirements.workflow_name == 'activity_prediction'
                          or re.search(r'活性预测|预测活性|activity prediction', requirements.request['query'], re.I))
                     and has_explicit_molecule(requirements.request['query'])):
-                from .decision_inputs import activity_input_target
                 if activity_input_target(session) is None:
                     decision = ClarifyDecision(version='1', action='clarify',
                         question='请补充活性预测靶点（PDE 或 BuChE），以继续本次任务。', missing_fields=['target'])

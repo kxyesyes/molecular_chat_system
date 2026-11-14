@@ -75,3 +75,42 @@ def test_optimization_model_observation_preserves_full_admet_for_verifier():
         {'tool_name': 'lead_optimization_verifier'}]})
     assert 'endpoints' not in view['data'][0]['admet']
     assert result.data[0]['admet']['endpoints'] == {'one': 0.5}
+
+def test_supplied_target_dispatches_pending_activity_even_if_model_asks_again(tmp_path):
+    import asyncio
+    from dataclasses import replace
+    from pi_web_support import PlannedWebModel, WebSocket, make_web_handler
+    from src.agent.contracts.decision import ClarifyDecision
+    from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
+    from src.web.decision_runtime import _Sender, _Turn
+    from tests.agent.test_target_driven_design_workflow import FakeTool
+
+    class RedundantClarification(PlannedWebModel):
+        async def decide(self, messages, **kwargs):
+            response = await super().decide(messages, **kwargs)
+            if len(self.messages) == 2:
+                return replace(response, decision=ClarifyDecision(version='1', action='clarify',
+                    question='请提供结构', missing_fields=['SMILES']))
+            return response
+
+    activity = FakeTool('activity_predictor')
+    handler = make_web_handler([activity], SQLiteAgentStateStore(tmp_path / 'resume.sqlite'),
+                               model=RedundantClarification())
+
+    async def drive():
+        runtime = handler.decision_runtime
+        sender = _Sender(WebSocket('resume-target'))
+        sender._runtime = runtime
+        for query in (CASES['DIVERSE-003'], 'BuChE'):
+            turn = _Turn(dict(message=query, enable_tools=True, enable_rag=False),
+                         **({'trace_id': sender.waiting.context.trace_id, 'waiting': sender.waiting}
+                            if sender.waiting else {}))
+            runtime.active_owners.add(turn)
+            await runtime._execute(handler, sender, turn)
+        assert len(activity.inputs) == 1
+        assert 'BuChE' in str(activity.inputs[0]) and 'CCO' in str(activity.inputs[0])
+
+    try:
+        asyncio.run(drive())
+    finally:
+        handler.agent_system.tool_registry.close()

@@ -14,7 +14,7 @@ from src.agent.orchestrators.base import WorkflowStep
 from src.agent.planning.compiler import PlanCompiler
 from src.agent.planning.task_planner import TaskPlanner, WorkflowPlan
 from src.agent.planning.request_parsing import (
-    positive_intent_text, property_calculation_forbidden,
+    extract_top_n, positive_intent_text, property_calculation_forbidden,
     target_lookup_result_annotation,
 )
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
@@ -346,7 +346,8 @@ def compile_web_requirements(context, *, allowed_tools):
             plan.steps.insert(1, molecular_design_steps(plan.steps[0].input_data, include_properties=True)[1])
             plan.metadata['atomic'] = False
         plan.steps = [s for s in plan.steps if s.tool_name not in forbidden]
-        if (plan.workflow_name == 'target_driven_design' and any(s.tool_name == 'activity_predictor' for s in plan.steps)
+        if (plan.workflow_name == 'target_driven_design' and extract_top_n(positive, default=0)
+                and any(s.tool_name == 'activity_predictor' for s in plan.steps)
                 and not re.search(_PATTERNS['activity_predictor'], positive, re.I)):
             from src.activity.family_contract import resolve_activity_family
             target = plan.metadata['target_hint']
