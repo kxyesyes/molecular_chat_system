@@ -33,6 +33,8 @@ class Element {
   setAttribute(k, v) {this.attributes[k] = String(v); if (k === "class") this.className = String(v);}
   getAttribute(k) {return k === "class" ? this.className : this.attributes[k] ?? null;}
   addEventListener(k, fn) {(this.listeners[k] ||= []).push(fn);}
+  removeEventListener(k, fn) {this.listeners[k] = (this.listeners[k] || []).filter(listener => listener !== fn);}
+  async expand() {this.open = true; await Promise.all((this.listeners.toggle || []).map(fn => fn({target: this})));}
   click() {if (!this.disabled) (this.listeners.click || []).forEach(fn => fn({target: this, preventDefault() {}}));}
   focus() {}
   get isConnected() {return this.root === true || Boolean(this.parentNode?.isConnected);}
@@ -70,7 +72,7 @@ class Element {
   closest(selector) {return this.matches(selector) ? this : this.parentNode?.closest(selector) || null;}
 }
 
-function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
+function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = null} = {}) {
   const body = new Element("body"); body.root = true;
   const composer = body.appendChild(new Element("div")); composer.className = "chat-composer";
   const fill = composer.appendChild(new Element("div")); fill.className = "fill";
@@ -89,7 +91,8 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
     emit(message) {this.onmessage({data: typeof message === "string" ? message : JSON.stringify(message)});}
     close(code = 1000, reason = "") {this.readyState = 3; this.onclose?.({code, reason, wasClean: true});}
   }
-  const document = {readyState: "loading", addEventListener() {}, createElement: tag => new Element(tag),
+  const document = {readyState: "loading", addEventListener() {},
+    createElement(tag) {return Object.assign(new Element(tag), {ownerDocument: document});},
     querySelector: s => body.querySelector(s), querySelectorAll: s => body.querySelectorAll(s),
     getElementById: id => body.querySelector("#" + id)};
   const renderer = {getCurrentTime: () => "12:00", updateConnectionStatus() {}, showNotification() {}};
@@ -122,6 +125,11 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
   context.HomeChatRenderer = window.HomeChatRenderer = Object.assign(window.HomeChatRenderer, renderer);
   context.HomeState.elements = {chatContainer: chat};
   context.HomeConfig = window.HomeConfig;
+  if (fetchDetails) {
+    window.fetch = fetchDetails;
+    Object.assign(context, {TextDecoder, Uint8Array});
+    vm.runInContext(fs.readFileSync(path.join(home, "result_details.js"), "utf8"), context, {filename: "result_details.js"});
+  }
   let source = fs.readFileSync(path.join(home, "main.js"), "utf8");
   // Expose lexical entry points only in this VM; run the complete real script.
   source = source.replace(/\}\)\(\);\s*$/, `window.testHome = {connectWebSocket, sendMessage, elements, scientificReferences,
@@ -1282,5 +1290,66 @@ async function runFrameContracts(frames) {
   console.log(`${passed} same-frame passed, ${failed} failed`);
   if (failed) process.exitCode = 1;
 }
-(process.argv.includes("--frames-stdin") ? runFrameContracts(JSON.parse(fs.readFileSync(0, "utf8"))) : run())
-  .catch(error => {console.error(error); process.exitCode = 1;});
+async function replayRepeat({query, ready, rounds, details}) {
+  const reads = [];
+  const h = loadHome({fetchDetails: async (url, options) => {
+    reads.push(url);
+    assert.equal(options.method, "GET");
+    return new Response(details[url], {status: Object.hasOwn(details, url) ? 200 : 404});
+  }});
+  h.socket.emit(ready);
+  h.input.value = query;
+  h.send();
+  const chats = () => h.socket.sent.filter(frame => frame.type === "chat");
+  const results = [];
+  for (const [i, frames] of rounds.entries()) {
+    assert.equal(chats().length, i + 1, "exactly one request for this round");
+    assert.equal(chats()[i].message, query);
+    assert.equal(chats()[i].result_format, "summary_details_v1");
+    for (const frame of frames) {
+      assert.equal(chats().length, i + 1, "wait for the terminal frame before dispatching");
+      h.socket.emit(frame);
+      if (frame.type === "agent_result") results.push(frame);
+    }
+  }
+  await tick();
+  h.flushTimers();
+  await tick();
+  assert.equal(chats().length, rounds.length, "no additional round after stop");
+  assert.equal(results.length, rounds.length);
+  const boxes = h.chat.querySelectorAll(".assistant-wrapper .message-box");
+  assert.equal(boxes.length, rounds.length);
+  const finalText = boxes.at(-1).getAttribute("data-content");
+  if (results.at(-1).status === "failed") {
+    assert(finalText.includes(`第 ${rounds.length}/3 次运行失败，已停止比较。此前返回结果的轮次：${rounds.length - 1}。`));
+  } else {
+    assert(finalText.includes("3 次运行的工具顺序一致"));
+  }
+
+  assert.deepEqual(reads, [], "details are read on demand");
+  for (const [i, result] of results.entries()) {
+    if (result.status === "failed") continue;
+    const box = boxes[i];
+    const answer = result.display_answer;
+    const visible = box.querySelector(".message-content").textContent;
+    assert(answer && visible.includes(i < results.length - 1 ? answer : answer.split("\n")[0]));
+    const root = box.querySelector(".home-result-details");
+    assert(root?.isConnected);
+    await root.expand();
+    const ref = result.details;
+    assert.equal(reads.at(-1), `/api/agent/runs/${result.trace_id}/result-details/${ref.view_id}?revision=${ref.revision}`);
+    const steps = root.querySelectorAll("details").find(node => node.children[0]?.textContent === "计算步骤（5）");
+    assert(steps, "render the stored steps for this round");
+    await steps.expand();
+    assert.deepEqual(steps.querySelectorAll("summary").map(node => node.textContent),
+      ["计算步骤（5）", "分子性质计算", "类药性评估", "ADMET 预测", "活性预测", "反向寻靶"]);
+  }
+  assert.equal(reads.length, Object.keys(details).length);
+  assert.equal(chats().length, rounds.length, "opening historical details does not submit another turn");
+}
+
+const mode = process.argv[2];
+const replay = {"--frames-stdin": runFrameContracts, "--repeat-stdin": replayRepeat}[mode];
+(replay ? replay(JSON.parse(fs.readFileSync(0, "utf8"))) : run()).catch(error => {
+  console.error(error); process.exitCode = 1;
+});
