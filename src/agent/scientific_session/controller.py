@@ -838,8 +838,10 @@ class ScientificSession:
             return {'toolCall': {'id': 'repair-' + state.decision_id,
                 'name': 'protocol_feedback', 'arguments': {'feedback': feedback}}}
 
+        next_system_message = model_system_message
+
         async def request_model(payload):
-            nonlocal review_draft
+            nonlocal review_draft, next_system_message
             await boundary()
             if binding:
                 state.task_acceptance = await acceptance()
@@ -879,7 +881,7 @@ class ScientificSession:
                 response = await asyncio.wait_for(
                     ModelProviderAdapter(self.runtime.model, self.runtime.mode).request(
                         payload['messages'], timeout_seconds=min(60, remaining),
-                        system_message=model_system_message,
+                        system_message=next_system_message,
                         **({'review_draft': review_draft, 'review_in_three_sentences': sentence_range is not None}
                            if review_draft is not None else {}),
                         **({'temperature': context.temperature,
@@ -895,12 +897,13 @@ class ScientificSession:
             # The wire schema accepts a syntactically valid identifier. A known step
             # with an unknown tool still needs a fresh, catalog-valid model decision.
             # Reject it before Pi acknowledges a proposal or reserves a tool attempt.
+            next_system_message = model_system_message
             proposed = response.decision
-            wrong_repeat_tool = (repeat_evaluation and response.success and type(proposed) is ToolDecision
-                                 and proposed.tool_name not in adapters
-                                 and proposed.tool_name not in requirements.forbidden_tools
-                                 and any(entry['arguments'] == proposed.arguments for entry in catalog))
-            if wrong_repeat_tool:
+            matched_step = None
+            if (repeat_evaluation and response.success and type(proposed) is ToolDecision
+                    and proposed.tool_name not in adapters and proposed.tool_name not in requirements.forbidden_tools):
+                matched_step = next((entry for entry in catalog if entry['arguments'] == proposed.arguments), None)
+            if matched_step is not None:
                 response = DecisionResponse(None, AgentExecutionError(AgentErrorCode.INVALID_OUTPUT,
                     'Tool name does not match the compiled action catalog', {'reason': 'invalid_decision_schema',
                     'schema_issues': [{'path': 'decision.tool.tool_name', 'type': 'literal_error'}]}),
@@ -922,10 +925,17 @@ class ScientificSession:
                         and details.get('reason') == 'decision_input_budget_exceeded'):
                     raise DecisionBoundaryError('decision_input_budget_exceeded')
                 feedback = schema_correction(response)
-                if wrong_repeat_tool and state.protocol_repairs:
+                if matched_step is not None and state.protocol_repairs:
                     raise DecisionBoundaryError('tool_not_authorized')
                 if feedback is None or state.protocol_repairs:
                     raise DecisionBoundaryError('model_decision_unavailable')
+                if matched_step is not None:
+                    # Give only the retry the exact server-owned pairing. Its
+                    # new proposal still goes through the usual dispatch checks.
+                    selection = {'tool_name': matched_step['name'], 'arguments': matched_step['arguments']}
+                    next_system_message = {**model_system_message, 'content': model_system_message['content']
+                        + ' Use this catalog pairing in the new decision. Corrected catalog selection: '
+                        + encode_observation(selection)}
                 return schedule_correction(feedback, response.error.details['reason'])
             if binding:
                 if type(response.decision) not in (ToolDecision, ClarifyDecision, FinishDecision):

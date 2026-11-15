@@ -74,6 +74,7 @@ def test_home_repeat_correction_matrix(faults, actual_app, strict_source_factory
                 for count in faults:
                     remaining = count
                     before = calculate.call_count
+                    first_request = len(model.messages)
                     frames = await socket.turn(dict(type='chat', message=query, enable_tools=True,
                         enable_rag=False, result_format='summary_details_v1'))
                     result = result_of(frames)
@@ -84,6 +85,14 @@ def test_home_repeat_correction_matrix(faults, actual_app, strict_source_factory
                     assert remaining == 0 and not model.errors
                     assert loop['protocol_repairs'] == min(count, 1)
                     calls = loop['model_calls']
+                    for index, messages in enumerate(model.messages[first_request:]):
+                        prompt = messages[0]['content']
+                        _, marker, hint = prompt.partition('Corrected catalog selection: ')
+                        assert bool(marker) == (count > 0 and index == 1)
+                        if marker:
+                            assert json.loads(hint) == {
+                                'tool_name': 'property_calculator', 'arguments': {'step_ref': 'properties'}}
+                            assert 'unknown_property_tool' not in str(messages)
                     wrong_name = [{'path': 'decision.tool.tool_name', 'type': 'literal_error'}]
                     assert [c for c in calls if c.get('schema_issues') == wrong_name] == calls[:count]
                     first_start = next((i for i, e in enumerate(events) if e['event'] == 'tool_started'), len(events))
