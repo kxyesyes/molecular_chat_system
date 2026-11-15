@@ -33,7 +33,9 @@ def test_home_repeat_correction_matrix(faults, actual_app, strict_source_factory
     properties = PropertyCalculator()
     calculate = Mock(wraps=properties.execute)
     monkeypatch.setattr(properties, 'execute', calculate)
-    tools = [properties, FakeTool('drug_likeness_assessment'), FakeTool('admet_predictor'),
+    admet = FakeTool('admet_predictor')
+    admet.version = '2'  # The real tool's version differs from the decision protocol.
+    tools = [properties, FakeTool('drug_likeness_assessment'), admet,
              FakeTool('activity_predictor'), ReverseTargetTool(strict_source_factory(('[Na+]',)))]
     expected_tools = [tool.name for tool in tools]
     tools.append(FakeTool('target_database_search'))
@@ -114,6 +116,14 @@ def test_home_repeat_correction_matrix(faults, actual_app, strict_source_factory
                     assert payload['trace_id'] == trace
                     assert [r['tool_name'] for r in payload['tool_result_sequence']] == expected_tools
                     details[url] = response.text
+        # Check the catalog actually sent to the model, including on decisions
+        # after the first two observations when ADMET is the next compiled step.
+        for messages in model.messages:
+            prompt = messages[0]['content']
+            catalog, _ = json.JSONDecoder().raw_decode(prompt.split('Tool catalog: ', 1)[1])
+            assert any(entry['name'] == 'admet_predictor' for entry in catalog)
+            assert all('version' not in entry for entry in catalog)
+            assert 'decision.version is always the string "1"' in prompt
         return dict(query=query, ready=ready, rounds=rounds, details=details)
 
     fixture = asyncio.run(exercise())

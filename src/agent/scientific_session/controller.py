@@ -601,11 +601,16 @@ class ScientificSession:
                 'ADMET/activity consume the whole molecular evidence batch. Never invent record handles.')
         model_system_message = system_message
         if repeat_evaluation:
-            # Preserve the Pi preamble used to authenticate existing checkpoints.
-            model_system_message = {**system_message, 'content': system_message['content'] + (
-                ' This conversation executes one run of the repeated evaluation. For each tool decision, '
+            # Tool implementation versions belong to the checkpoint catalog. The
+            # model only emits the decision protocol version, including for ADMET v2.
+            model_catalog = [{k: v for k, v in entry.items() if k != 'version'} for entry in catalog]
+            model_system_message = decision_system_message(request_kind, required_tools, model_catalog,
+                model_requirements, binding_profile=self.runtime.binding_profile)
+            model_system_message['content'] += (
+                ' This conversation executes one run of the repeated evaluation. '
+                'decision.version is always the string "1". For each tool decision, '
                 'copy tool_name and arguments together from a single Tool catalog entry: its name is '
-                'decision.tool_name, and its arguments.step_ref identifies the compiled step.')}
+                'decision.tool_name, and its arguments.step_ref identifies the compiled step.')
         # B has already bounded the complete raw context and UTF-8 query content.
         # Preserve legacy history semantics without reapplying its JSON-string
         # query ceiling to the independently admitted B content.
