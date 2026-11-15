@@ -20,9 +20,13 @@ from src.agent.tools.reverse_target_tool import ReverseTargetTool
 
 
 @pytest.mark.parametrize('faults', [
-    (1, 0, 0), (0, 1, 0), (0, 0, 1),
-    (2,), (0, 2), (0, 0, 2),
-    (1, 1, 1), (1, 2), (1, 1, 2),
+    # All three rounds return a result, with zero or one mismatch per round.
+    (0, 0, 0), (0, 0, 1), (0, 1, 0), (0, 1, 1),
+    (1, 0, 0), (1, 0, 1), (1, 1, 0), (1, 1, 1),
+    # Two mismatches end the comparison in the first, second or third round.
+    (2,),
+    (0, 2), (1, 2),
+    (0, 0, 2), (0, 1, 2), (1, 0, 2), (1, 1, 2),
 ], ids=lambda counts: 'mismatches-' + '-'.join(map(str, counts)))
 def test_home_repeat_correction_matrix(faults, actual_app, strict_source_factory, monkeypatch):
     query = CASES['DIVERSE-020']
