@@ -601,16 +601,21 @@ class ScientificSession:
                 'ADMET/activity consume the whole molecular evidence batch. Never invent record handles.')
         model_system_message = system_message
         if repeat_evaluation:
-            # Tool implementation versions belong to the checkpoint catalog. The
-            # model only emits the decision protocol version, including for ADMET v2.
-            model_catalog = [{k: v for k, v in entry.items() if k != 'version'} for entry in catalog]
+            # Keep adapter versions in the checkpoint catalog. Give the provider
+            # complete protocol arguments even before it has seen a tool call.
+            def tool_envelope(entry):
+                decision = ToolDecision(version='1', action='tool', tool_name=entry['name'],
+                                        arguments=entry['arguments'], purpose='execute the selected compiled step')
+                return {'decision': decision.model_dump()}
+
+            model_catalog = [{'available': entry['available'], 'description': entry['description'],
+                              'function_arguments': tool_envelope(entry)} for entry in catalog]
             model_system_message = decision_system_message(request_kind, required_tools, model_catalog,
                 model_requirements, binding_profile=self.runtime.binding_profile)
             model_system_message['content'] += (
                 ' This conversation executes one run of the repeated evaluation. '
                 'decision.version is always the string "1". For each tool decision, '
-                'copy tool_name and arguments together from a single Tool catalog entry: its name is '
-                'decision.tool_name, and its arguments.step_ref identifies the compiled step.')
+                'choose the appropriate compiled step and return its complete function_arguments object.')
         # B has already bounded the complete raw context and UTF-8 query content.
         # Preserve legacy history semantics without reapplying its JSON-string
         # query ceiling to the independently admitted B content.
@@ -932,10 +937,9 @@ class ScientificSession:
                 if matched_step is not None:
                     # Give only the retry the exact server-owned pairing. Its
                     # new proposal still goes through the usual dispatch checks.
-                    selection = {'tool_name': matched_step['name'], 'arguments': matched_step['arguments']}
                     next_system_message = {**model_system_message, 'content': model_system_message['content']
-                        + ' Use this catalog pairing in the new decision. Corrected catalog selection: '
-                        + encode_observation(selection)}
+                        + ' Use these complete function arguments for the corrected step. Corrected catalog selection: '
+                        + encode_observation(tool_envelope(matched_step))}
                 return schedule_correction(feedback, response.error.details['reason'])
             if binding:
                 if type(response.decision) not in (ToolDecision, ClarifyDecision, FinishDecision):

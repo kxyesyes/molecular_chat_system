@@ -14,6 +14,7 @@ from test_home_partial_cases import CASES
 from test_reverse_receipt_consumption import strict_source_factory
 from test_target_driven_design_workflow import FakeTool
 from test_web_decision_runtime import ActualSocket, actual_app, cookie_for, result_of
+from src.agent.contracts.decision import parse_decision_json
 from src.agent.tools import get_core_tools
 from src.agent.tools.property_calculator import PropertyCalculator
 from src.agent.tools.reverse_target_tool import ReverseTargetTool
@@ -90,8 +91,9 @@ def test_home_repeat_correction_matrix(faults, actual_app, strict_source_factory
                         _, marker, hint = prompt.partition('Corrected catalog selection: ')
                         assert bool(marker) == (count > 0 and index == 1)
                         if marker:
-                            assert json.loads(hint) == {
-                                'tool_name': 'property_calculator', 'arguments': {'step_ref': 'properties'}}
+                            corrected = parse_decision_json(hint)
+                            assert corrected.tool_name == 'property_calculator'
+                            assert corrected.arguments == {'step_ref': 'properties'}
                             assert 'unknown_property_tool' not in str(messages)
                     wrong_name = [{'path': 'decision.tool.tool_name', 'type': 'literal_error'}]
                     assert [c for c in calls if c.get('schema_issues') == wrong_name] == calls[:count]
@@ -130,7 +132,12 @@ def test_home_repeat_correction_matrix(faults, actual_app, strict_source_factory
         for messages in model.messages:
             prompt = messages[0]['content']
             catalog, _ = json.JSONDecoder().raw_decode(prompt.split('Tool catalog: ', 1)[1])
-            assert any(entry['name'] == 'admet_predictor' for entry in catalog)
+            # Even the first request of a fresh round must have copyable function
+            # arguments: the provider has no prior tool decision to imitate.
+            decisions = [parse_decision_json(json.dumps(entry['function_arguments'])) for entry in catalog]
+            assert any(d.tool_name == 'admet_predictor' and d.version == '1' for d in decisions)
+            assert any(d.tool_name == 'property_calculator' and d.arguments == {'step_ref': 'properties'}
+                       for d in decisions)
             assert all('version' not in entry for entry in catalog)
             assert 'decision.version is always the string "1"' in prompt
         return dict(query=query, ready=ready, rounds=rounds, details=details)
