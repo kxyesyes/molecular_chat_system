@@ -1425,8 +1425,14 @@ def test_model_generation_precondition_stops_before_model_or_tool_dispatch(actua
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('smiles', ['CCO', pytest.param('C' + '[CH2]' * 60 + 'O', id='long-redundant-clarification')])
-def test_missing_logp_value_resumes_with_supplied_smiles_over_websocket(actual_app, smiles):
+@pytest.mark.parametrize(('label', 'smiles'), [
+    ('SMILES 是', 'CCO'),
+    pytest.param('SMILES 是', 'C' + '[CH2]' * 60 + 'O', id='long-redundant-clarification'),
+    ('SMILES 是', 'CO'), ('SMILES:', 'CO'),
+    pytest.param('SMILES 是', 'O' + 'C' * 256, id='long-natural-label'),
+    pytest.param('SMILES:', 'O' + 'C' * 256, id='long-colon-label'),
+])
+def test_missing_logp_value_resumes_with_supplied_smiles_over_websocket(actual_app, label, smiles):
     from test_pi_web_input_budget import compiled_decision
 
     async def respond(payload):
@@ -1448,7 +1454,7 @@ def test_missing_logp_value_resumes_with_supplied_smiles_over_websocket(actual_a
                 frames = await socket.turn({'type': 'resume', 'trace_id': waiting['trace_id'],
                                             'continuation_id': first[-1]['continuation_id'],
                                             'result_format': 'summary_details_v1',
-                                            'message': f'SMILES 是 {smiles}。'})
+                                            'message': f'{label} {smiles}。'})
                 resumed = result_of(frames)
                 assert resumed['status'] == 'completed'
                 assert resumed['trace_id'] == waiting['trace_id']

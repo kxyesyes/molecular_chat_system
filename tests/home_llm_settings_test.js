@@ -823,6 +823,17 @@ test("only a verified model call can prove the saved model ready", () => {
   assert.equal(elements.agentModelReadiness.textContent, "待测试");
 });
 
+test("a 503 marks a ready model unavailable until a subsequent successful call", () => {
+  const { context, elements } = harness();
+  context.applyAgentModelLabel("deepseek-v4-pro");
+  context.updateAgentReadinessFromTurn({model_call_succeeded: true});
+  assert.equal(elements.agentModelReadiness.textContent, "已就绪");
+  context.updateAgentReadinessFromTurn({stop_reason: "model_service_unavailable"});
+  assert.equal(elements.agentModelReadiness.textContent, "不可用");
+  context.updateAgentReadinessFromTurn({model_call_succeeded: true});
+  assert.equal(elements.agentModelReadiness.textContent, "已就绪");
+});
+
 test("failed Agent readiness test reports Agent unavailable", async () => {
   const { context, elements, requests } = harness([
     { success: false, message: "模型探测失败" },
@@ -966,6 +977,6 @@ test("send readiness does not overwrite a draft typed before config load", async
 
 test("homepage loads the updated settings script instead of the stale cached version", () => {
   const activeHtml = html.replace(/<!--[\s\S]*?-->/g, "");
-  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261116-repeat-v5"></script>'));
+  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261116-repeat-v6"></script>'));
   assert.match(activeHtml, /<button[^>]*class="btn"[^>]*aria-label="发送消息"/);
 });

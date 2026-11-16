@@ -986,12 +986,13 @@ class ScientificSession:
                 # Compiler-admitted missing-input requests retain their frozen
                 # Web obligations. Model preference cannot dispatch without a
                 # structure, nor ignore a valid subject supplied on resume.
-                if not has_explicit_molecule(context.query) and effective_molecule(context) is None:
+                subject = (await owned(lambda: resolver._context(journal.head_turn))
+                           if restored is not None else context)
+                if not has_explicit_molecule(subject.query) and effective_molecule(subject) is None:
                     decision = ClarifyDecision(version='1', action='clarify',
                         question=scientific_clarification(context.query, required_tools),
                         missing_fields=['SMILES'])
-                elif (restored is not None and isinstance(decision, (ClarifyDecision, FinishDecision))
-                      and await owned(lambda: has_valid_molecular_input(context.query, required_tools, max_bytes=None))):
+                elif restored is not None and isinstance(decision, (ClarifyDecision, FinishDecision)):
                     pending = state.task_acceptance.get('missing_required_steps', [])
                     step = next((step for step in requirements.steps if step.name in pending), None)
                     if step is not None and all(usable(result) for result in session.results):

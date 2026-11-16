@@ -182,16 +182,19 @@ async function test(name, fn) {
 }
 async function run() {
   const repeatQuery = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
-  for (const punctuation of ["?", "？"]) await test("three repeat turns with " + punctuation, () => {
-    const h = loadHome(); h.ready("pi", false, true);
-    h.input.value = repeatQuery.slice(0, -1) + punctuation; h.send();
-    for (let i = 0; i < 3; i++) {
-      const t = String(i + 1).repeat(32), tr = String(i + 4).repeat(32);
-      assert.equal(h.socket.sent.filter(f => f.type === "chat").length, i + 1);
-      h.socket.emit(accepted(t, tr)); h.socket.emit(result("completed", t, tr)); h.socket.emit(complete("completed", t, tr));
-    }
-    assert.equal(h.socket.sent.filter(f => f.type === "chat").length, 3);
-  });
+  for (const [subject, punctuation] of [["次 CCO", "?"], ["次 CCO", "？"], ["次CCO", "?"], ["次CCO", "？"]]) {
+    await test("three repeat turns with " + subject + " and " + punctuation, () => {
+      const h = loadHome(); h.ready("pi", false, true);
+      h.input.value = repeatQuery.replace("次 CCO", subject).replace("。", punctuation); h.send();
+      for (let i = 0; i < 3; i++) {
+        const t = String(i + 1).repeat(32), tr = String(i + 4).repeat(32);
+        assert.equal(h.socket.sent.filter(f => f.type === "chat").length, i + 1);
+        h.socket.emit(accepted(t, tr)); h.socket.emit(result("completed", t, tr)); h.socket.emit(complete("completed", t, tr));
+      }
+      assert.equal(h.socket.sent.filter(f => f.type === "chat").length, 3);
+      assert(h.chat.textContent.includes("3 次运行的工具顺序"));
+    });
+  }
   await test("repeat pins the first executed model generation and stops on a configuration change", () => {
     const h = loadHome(); h.ready("pi", false, true);
     h.input.value = repeatQuery; h.send(); h.socket.emit(accepted());
@@ -1205,7 +1208,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261116-repeat-v5"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261116-repeat-v6"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
