@@ -128,6 +128,7 @@ def _decision_failure_message(reason: str) -> str:
             '模型未能完成 Agent 决策；请先在模型设置中运行连接测试，并确认模型支持工具调用或结构化输出。'
         ),
         'model_authentication_failed': '模型服务返回 HTTP 401。请在模型设置中核对凭据并运行连接测试。',
+        'model_service_unavailable': '模型服务返回 HTTP 503，暂时不可用，请稍后重试。',
         'invalid_decision_schema': (
             '模型返回的决策格式不符合 MedChat 协议；请更换支持工具调用或结构化输出的模型。'
         ),
@@ -926,9 +927,11 @@ class ScientificSession:
                 error = response.error
                 details = (error.details or {}) if error else {}
                 if (error and error.code == AgentErrorCode.PROVIDER_ERROR
-                        and details.get('reason') == 'decision_http_error'
-                        and details.get('http_status') == 401):
-                    raise DecisionBoundaryError('model_authentication_failed')
+                        and details.get('reason') == 'decision_http_error'):
+                    if details.get('http_status') == 401:
+                        raise DecisionBoundaryError('model_authentication_failed')
+                    if details.get('http_status') == 503:
+                        raise DecisionBoundaryError('model_service_unavailable')
                 if (self.runtime.binding_profile == 'medchat-web-v1' and error
                         and error.code == AgentErrorCode.INVALID_INPUT
                         and details.get('reason') == 'decision_input_budget_exceeded'):
@@ -987,8 +990,8 @@ class ScientificSession:
                     decision = ClarifyDecision(version='1', action='clarify',
                         question=scientific_clarification(context.query, required_tools),
                         missing_fields=['SMILES'])
-                elif (restored is not None and has_valid_molecular_input(context.query, required_tools)
-                      and isinstance(decision, (ClarifyDecision, FinishDecision))):
+                elif (restored is not None and isinstance(decision, (ClarifyDecision, FinishDecision))
+                      and await owned(lambda: has_valid_molecular_input(context.query, required_tools, max_bytes=None))):
                     pending = state.task_acceptance.get('missing_required_steps', [])
                     step = next((step for step in requirements.steps if step.name in pending), None)
                     if step is not None and all(usable(result) for result in session.results):
@@ -1504,7 +1507,8 @@ class ScientificSession:
                     and (state.stop_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable',
                                                'reverse_target_no_matches', 'activity_target_conflict_or_unknown')
                          or (state.outcome == RunOutcome.PARTIAL
-                             and state.stop_reason in ('tool_not_authorized', 'model_authentication_failed')))):
+                             and state.stop_reason in ('tool_not_authorized', 'model_authentication_failed',
+                                                       'model_service_unavailable')))):
                 state.answer = await owned(lambda: render_bound(resolver,
                     required_tools=required_tools, evidence_ids=None,
                     interruption_reason=state.stop_reason))

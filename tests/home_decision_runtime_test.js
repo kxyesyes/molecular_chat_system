@@ -182,13 +182,41 @@ async function test(name, fn) {
 }
 async function run() {
   const repeatQuery = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
-  await test("a provider authentication failure after a property result ends the repeat", () => {
+  for (const punctuation of ["?", "？"]) await test("three repeat turns with " + punctuation, () => {
+    const h = loadHome(); h.ready("pi", false, true);
+    h.input.value = repeatQuery.slice(0, -1) + punctuation; h.send();
+    for (let i = 0; i < 3; i++) {
+      const t = String(i + 1).repeat(32), tr = String(i + 4).repeat(32);
+      assert.equal(h.socket.sent.filter(f => f.type === "chat").length, i + 1);
+      h.socket.emit(accepted(t, tr)); h.socket.emit(result("completed", t, tr)); h.socket.emit(complete("completed", t, tr));
+    }
+    assert.equal(h.socket.sent.filter(f => f.type === "chat").length, 3);
+  });
+  await test("repeat pins the first executed model generation and stops on a configuration change", () => {
+    const h = loadHome(); h.ready("pi", false, true);
+    h.input.value = repeatQuery; h.send(); h.socket.emit(accepted());
+    h.socket.emit(result("completed")); h.socket.emit({...complete("completed"), model_generation: "gen-A"});
+    const chats = () => h.socket.sent.filter(f => f.type === "chat");
+    assert.equal(chats()[1].expected_model_generation, "gen-A");
+    const t = "3".repeat(32), tr = "4".repeat(32);
+    h.socket.emit(accepted(t, tr));
+    const frame = result("rejected", t, tr);
+    frame.metadata.stop_reason = "repeat_model_changed";
+    frame.final_answer = "模型配置已变更，已停止比较。";
+    h.socket.emit(frame); h.socket.emit(complete("rejected", t, tr));
+    assert.equal(chats().length, 2);
+    assert(h.chat.textContent.includes("模型配置已变更，已停止比较"));
+    h.input.value = repeatQuery; h.send();
+    assert(!("expected_model_generation" in chats()[2]));
+  });
+  for (const [reason, statusCode] of [["model_authentication_failed", 401], ["model_service_unavailable", 503]])
+    await test("a provider HTTP " + statusCode + " after a property result ends the repeat", () => {
     const h = loadHome(); h.ready("pi", false, true);
     h.input.value = repeatQuery; h.send(); h.socket.emit(accepted());
     const frame = result("partial");
-    frame.metadata.stop_reason = "model_authentication_failed";
+    frame.metadata.stop_reason = reason;
     frame.final_answer = "分子量 46.07 Da。";
-    frame.error = {code: "validation_error", message: "模型服务返回 HTTP 401。"};
+    frame.error = {code: "validation_error", message: "模型服务返回 HTTP " + statusCode + "。"};
     frame.result_format = "summary_details_v1"; frame.details_state = "available";
     frame.details = {view_id: "00000000000040008000000000000001", revision: "a".repeat(64), byte_length: 100};
     h.socket.emit(frame); h.socket.emit(complete("partial"));
@@ -1177,7 +1205,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261116-repeat-v4"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261116-repeat-v5"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");

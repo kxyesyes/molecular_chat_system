@@ -427,7 +427,7 @@ def render_web_scientific_answer(resolver, *, required_tools=(), evidence_ids, i
     # After an interruption, publish only the observations authenticated by the resolver.
     interrupted = interruption_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable', 'reverse_target_no_matches',
                                          'activity_target_conflict_or_unknown', 'tool_not_authorized',
-                                         'model_authentication_failed')
+                                         'model_authentication_failed', 'model_service_unavailable')
     if ((interruption_reason is not None and not interrupted)
             or (interrupted and evidence_ids is not None)
             or (evidence_ids is None and not interrupted)):

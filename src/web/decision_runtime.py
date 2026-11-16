@@ -4,6 +4,7 @@ One receiver per socket and one retained owner per accepted turn. The model
 gate covers physical worker settlement, not just an asyncio wrapper lifetime.
 """
 import asyncio
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 import html
@@ -115,6 +116,8 @@ def _resumable_scientific_clarification(plan):
 
 def terminal_message_for_reason(reason):
     """Return a user-facing terminal message without exposing internal codes."""
+    if reason == 'repeat_model_changed':
+        return '模型配置已变更，已停止比较。请重新提交以使用当前配置。'
     if reason == 'cancelled':
         return '本次请求已取消。'
     if reason == 'consultation_requires_clarification':
@@ -279,6 +282,8 @@ class _Turn:
     docking_result: dict | None = None
     scientific_projection: object = None
     scientific_plan: ScientificPlan | None = None
+    expected_model_generation: str | None = None
+    model_generation: str | None = None
     tool_free_consultation: bool = False
     scientific_update: list | None = None
     reference_claim: dict | None = None
@@ -569,6 +574,8 @@ class _TurnSender:
             if self.turn.waiting is not None:
                 flag = self.turn.waiting.context.metadata['capabilities']['rag']
             frame['metadata']['rag_requested'] = flag if type(flag) is bool else None
+        if frame['type'] == 'complete' and self.turn.model_generation is not None:
+            frame['model_generation'] = self.turn.model_generation
         # The browser's frame limit applies after these correlation fields are
         # added. Retain every result/index; do not spend it on JSON whitespace.
         text = json.dumps(frame, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
@@ -1489,6 +1496,15 @@ class WebDecisionRuntime:
                 history_pairs(history_memory), "history_pair_sensitive"
             )
 
+    @asynccontextmanager
+    async def _model_request(self, turn):
+        async with self.application.model_request_gate.request():
+            generation = self.application.model_generation
+            if turn.expected_model_generation is not None and turn.expected_model_generation != generation:
+                raise DecisionAdmissionError('repeat_model_changed')
+            turn.model_generation = generation
+            yield
+
     async def _execute_segment(self, handler, sender, turn, *, allocation_sender=None):
         """The lease and all physical settlement stay inside the supervised child."""
         self._credit(turn)
@@ -1532,7 +1548,7 @@ class WebDecisionRuntime:
                     self._credit(turn)
                     search_query = None
                     try:
-                        async with self.application.model_request_gate.request():
+                        async with self._model_request(turn):
                             self._credit(turn)
                             if turn.cancel_event.is_set():
                                 raise asyncio.CancelledError()
@@ -1581,7 +1597,7 @@ class WebDecisionRuntime:
                                              'sources': deepcopy(sources), 'candidates': candidates})
                             if sources:
                                 try:
-                                    async with self.application.model_request_gate.request():
+                                    async with self._model_request(turn):
                                         self._credit(turn)
                                         if turn.cancel_event.is_set():
                                             raise asyncio.CancelledError()
@@ -1718,7 +1734,7 @@ class WebDecisionRuntime:
                                 self._credit(turn)
                                 interpretation = None
                                 try:
-                                    async with self.application.model_request_gate.request():
+                                    async with self._model_request(turn):
                                         self._credit(turn)
                                         if turn.cancel_event.is_set():
                                             raise asyncio.CancelledError()
@@ -1788,7 +1804,7 @@ class WebDecisionRuntime:
                     self._credit(turn)
                     interpretation = None
                     try:
-                        async with self.application.model_request_gate.request():
+                        async with self._model_request(turn):
                             self._credit(turn)
                             if turn.cancel_event.is_set():
                                 raise asyncio.CancelledError()
@@ -1811,7 +1827,7 @@ class WebDecisionRuntime:
                     await self.application._refresh_llm_config_from_env()
                     self._credit(turn)
                     try:
-                        async with self.application.model_request_gate.request():
+                        async with self._model_request(turn):
                             self._credit(turn)
                             if turn.cancel_event.is_set():
                                 raise asyncio.CancelledError()
@@ -1902,13 +1918,13 @@ class WebDecisionRuntime:
                 and turn.scientific_plan is None else projection.execution_query())}
         await self.application._refresh_llm_config_from_env()
         self._credit(turn)
-        async with self.application.model_request_gate.request():
+        async with self._model_request(turn):
             try:
                 self._credit(turn)
                 if turn.cancel_event.is_set():
                     raise asyncio.CancelledError()
                 model = self.application.model
-                generation = self.application.model_generation
+                generation = turn.model_generation
                 projection = turn.scientific_projection
                 if turn.tool_free_consultation:
                     await self._classify_tool_free_consultation(sender, turn, model, generation, handler._input_limit())
@@ -2356,6 +2372,12 @@ class WebDecisionRuntime:
                     if any(name in payload and type(payload[name]) is not bool
                            for name in ('enable_tools', 'enable_rag')):
                         raise DecisionProtocolError('invalid_frame')
+                    expected_generation = None
+                    if 'expected_model_generation' in payload:
+                        expected_generation = payload.pop('expected_model_generation')
+                        if (payload.get('type', 'chat') != 'chat' or type(expected_generation) is not str
+                                or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', expected_generation)):
+                            raise DecisionProtocolError('invalid_frame')
                     result_format = None
                     if 'result_format' in payload:
                         if (not self.full_web or payload.get('type', 'chat') not in ('chat', 'resume')
@@ -2461,6 +2483,7 @@ class WebDecisionRuntime:
                 turn = (_Turn(payload, trace_id=waiting.context.trace_id, waiting=waiting)
                         if waiting is not None else _Turn(payload))
                 turn.result_format = result_format
+                turn.expected_model_generation = expected_generation
                 await sender.send({'type': 'request_accepted', 'turn_id': turn.turn_id,
                                    'trace_id': turn.trace_id})
                 if self.closing:

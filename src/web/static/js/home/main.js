@@ -327,7 +327,7 @@
     } else if (resume) {
       payload = {type: "resume", trace_id: decisionWaiting.traceId, continuation_id: decisionWaiting.nonce, message, ...format};
     } else {
-      const request = /^\s*请?重复执行\s*([23])\s*次\s+[A-Za-z0-9@+\-\[\]()=#\\/.:%]+\s*的综合评价[，,]\s*比较每次调用的工具顺序[、，,]事件流和最终结论是否一致[。.!！]?\s*$/.exec(message);
+      const request = /^\s*请?重复执行\s*([23])\s*次\s+[A-Za-z0-9@+\-\[\]()=#\\/.:%]+\s*的综合评价[，,]\s*比较每次调用的工具顺序[、，,]事件流和最终结论是否一致[。.!！?？]?\s*$/.exec(message);
       const config = HomeAdvancedOptions.getConfig();
       payload = {type: "chat", message, enable_rag: ragEnabled, enable_tools: toolsEnabled,
         rag_count: config.ragCount, temperature: config.temperature, mol_count: config.molCount, ...format};
@@ -439,7 +439,7 @@
         if (structuredReason === diagnostic) structuredReason = explanation;
       }
       const showFailureReason = window.MedChatStatus.isNonSuccess(message.status) ||
-        (message.status === "partial" && message.metadata?.stop_reason === "model_authentication_failed");
+        (message.status === "partial" && ["model_authentication_failed", "model_service_unavailable"].includes(message.metadata?.stop_reason));
       const text = showFailureReason && structuredReason &&
         !baseText.includes(structuredReason)
         ? `${baseText}\n\n失败原因：${structuredReason}` : baseText;
@@ -581,7 +581,12 @@
         setDecisionWaiting(metadata.stop_reason === "continuation_rejected" ? turn.resume : null);
       }
       updateDecisionControls();
-      if (continueRepeat && repeat.runs.length < repeat.count) sendDecisionMessage(false, repeat);
+      if (continueRepeat && repeat.runs.length < repeat.count) {
+        if (repeat.runs.length === 1 && message.model_generation) {
+          repeat.payload.expected_model_generation = message.model_generation;
+        }
+        sendDecisionMessage(false, repeat);
+      }
       return true;
     }
     return true; // decision mode does not accept legacy stream/message authority

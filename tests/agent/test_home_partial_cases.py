@@ -141,7 +141,10 @@ def test_repeat_rejects_mismatched_tool_for_valid_step_before_dispatch(
         handler.agent_system.tool_registry.close()
 
 
-def test_auth_failure_after_properties_publishes_verified_row_and_stop_reason(tmp_path):
+@pytest.mark.parametrize(('http_status', 'reason'), [
+    (401, 'model_authentication_failed'), (503, 'model_service_unavailable'),
+])
+def test_provider_failure_after_properties_publishes_verified_row_and_stop_reason(tmp_path, http_status, reason):
     from pi_web_support import PlannedWebModel, make_web_handler, run_web_turn
     from src.agent.contracts import AgentErrorCode, AgentExecutionError
     from src.agent.decision_transport import DecisionResponse
@@ -150,11 +153,11 @@ def test_auth_failure_after_properties_publishes_verified_row_and_stop_reason(tm
     from src.agent.tools.property_calculator import PropertyCalculator
     from tests.agent.test_target_driven_design_workflow import FakeTool
 
-    class AuthFailureAfterProperties(PlannedWebModel):
+    class ProviderFailureAfterProperties(PlannedWebModel):
         async def decide(self, messages, **kwargs):
             if self.messages:
                 return DecisionResponse(None, AgentExecutionError(AgentErrorCode.PROVIDER_ERROR,
-                    'Authentication failed', {'reason': 'decision_http_error', 'http_status': 401}),
+                    'Provider request failed', {'reason': 'decision_http_error', 'http_status': http_status}),
                     None, {'request_attempts': 1})
             return await super().decide(messages, **kwargs)
 
@@ -163,13 +166,13 @@ def test_auth_failure_after_properties_publishes_verified_row_and_stop_reason(tm
     tools = {step.tool_name: FakeTool(step.tool_name) for step in plan.steps}
     tools['property_calculator'] = PropertyCalculator()
     store = SQLiteAgentStateStore(tmp_path / 'auth-stop.sqlite')
-    handler = make_web_handler(tools, store, model=AuthFailureAfterProperties())
+    handler = make_web_handler(tools, store, model=ProviderFailureAfterProperties())
     try:
         complete, frames = run_web_turn(handler, query, session='auth-stop', result_format='summary_details_v1')
         frame = next(f for f in frames if f['type'] == 'agent_result')
         assert complete['status'] == frame['status'] == 'partial'
-        assert frame['metadata']['stop_reason'] == 'model_authentication_failed'
-        assert '401' in frame['error']['message']
+        assert frame['metadata']['stop_reason'] == reason
+        assert str(http_status) in frame['error']['message']
         assert frame['details_state'] == 'available'
         step, = store.get_tool_executions(frame['trace_id'])
         assert step['tool_name'] == 'property_calculator'

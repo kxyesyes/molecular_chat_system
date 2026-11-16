@@ -1395,11 +1395,47 @@ def test_missing_smiles_waits_for_input_without_scientific_tool(web_handler, que
                    for frame in frames)
 
 
-def test_missing_logp_value_resumes_with_supplied_smiles_over_websocket(actual_app):
+def test_model_generation_precondition_stops_before_model_or_tool_dispatch(actual_app):
     from test_pi_web_input_budget import compiled_decision
 
     async def run():
         async with actual_app(ordinary_policy='medchat-web-v1', respond=compiled_decision) as bundle:
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                query = dict(message='计算 CCO 的 LogP。', enable_tools=True)
+                await socket.send(dict(query, expected_model_generation=None))
+                assert (await socket.receive())['code'] == 'invalid_frame'
+                first = await socket.turn(query)
+                assert result_of(first)['status'] == 'completed'
+                generation = first[-1].get('model_generation')
+                assert generation == bundle.app.model_generation
+                pinned = dict(query, expected_model_generation=generation)
+                assert result_of(await socket.turn(pinned))['status'] == 'completed'
+                async with bundle.app.model_request_gate.exclusive():
+                    bundle.app.model_generation = 'replacement-generation'
+                before = len(bundle.calls)
+                stopped = result_of(await socket.turn(pinned))
+                assert stopped['status'] == 'rejected'
+                assert stopped['metadata']['stop_reason'] == 'repeat_model_changed'
+                assert '已停止比较' in stopped['final_answer']
+                assert len(bundle.calls) == before
+                assert bundle.app.agent_state_store.get_tool_executions(stopped['trace_id']) == []
+                assert result_of(await socket.turn(query))['status'] == 'completed'
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('smiles', ['CCO', pytest.param('C' + '[CH2]' * 60 + 'O', id='long-redundant-clarification')])
+def test_missing_logp_value_resumes_with_supplied_smiles_over_websocket(actual_app, smiles):
+    from test_pi_web_input_budget import compiled_decision
+
+    async def respond(payload):
+        if smiles != 'CCO' and not any(m.get('role') == 'tool' for m in payload['messages']):
+            return {'version': '1', 'action': 'clarify', 'question': '请提供 SMILES', 'missing_fields': ['SMILES']}
+        return await compiled_decision(payload)
+
+    async def run():
+        async with actual_app(ordinary_policy='medchat-web-v1', respond=respond) as bundle:
             async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
                 await socket.ready()
                 first = await socket.turn({'message': '请计算一下这个分子的 LogP 值。',
@@ -1412,16 +1448,18 @@ def test_missing_logp_value_resumes_with_supplied_smiles_over_websocket(actual_a
                 frames = await socket.turn({'type': 'resume', 'trace_id': waiting['trace_id'],
                                             'continuation_id': first[-1]['continuation_id'],
                                             'result_format': 'summary_details_v1',
-                                            'message': 'SMILES 是 CCO。'})
+                                            'message': f'SMILES 是 {smiles}。'})
                 resumed = result_of(frames)
                 assert resumed['status'] == 'completed'
                 assert resumed['trace_id'] == waiting['trace_id']
                 step, = store.get_tool_executions(resumed['trace_id'])
                 assert step['tool_name'] == 'property_calculator' and step['status'] == 'succeeded'
                 record, = step['output']['data']
-                assert record['smiles'] == 'CCO'
-                assert record['properties']['logp'] == pytest.approx(-0.0014, abs=0.0005)
-                assert 'logp' in frames[-1]['content'].lower() and '-0.001' in frames[-1]['content']
+                assert record['smiles'] == smiles
+                assert 'logp' in frames[-1]['content'].lower()
+                assert str(record['properties']['logp']) in frames[-1]['content']
+                if smiles == 'CCO':
+                    assert record['properties']['logp'] == pytest.approx(-0.0014, abs=0.0005)
 
     asyncio.run(run())
 
