@@ -49,6 +49,7 @@ class TargetSearchInput(_View):
     query: TargetQuery
     include_function: bool = False
     organism: Literal['Homo sapiens', 'Mus musculus'] | None = None
+    resolution_limit: Annotated[int, Field(ge=1, le=20)] | None = None
 
 
 class ReverseTargetInput(_View):
@@ -115,6 +116,8 @@ class TargetRecord(TargetRecordInput, SourceFields):
     match_reason: str | None = None
     source_query: str | None = None
     structure_count: Count | None = None
+    searched_structure_count: Count | None = None
+    comparable_structure_count: Count | None = None
     downloaded_structure_count: Count | None = None
     experimental_structure_count: Count | None = None
     alphafold_structure_count: Count | None = None
@@ -290,8 +293,9 @@ class TargetToolAdapter(LegacyPythonToolAdapter):
         view = input_data if wrapped else {"query": input_data}
         self.spec.input_schema.model_validate(view)
         if wrapped and self.spec.name == 'target_database_search' and (
-                input_data.get('include_function') is True or input_data.get('organism') is not None):
-            return {key: input_data[key] for key in ('query', 'include_function', 'organism') if key in input_data}
+                input_data.get('include_function') is True or input_data.get('organism') is not None
+                or input_data.get('resolution_limit') is not None):
+            return {key: input_data[key] for key in ('query', 'include_function', 'organism', 'resolution_limit') if key in input_data}
         return input_data["query"] if wrapped else input_data
 
     def _input_validation_error(self, exc: ValidationError) -> ToolResult:

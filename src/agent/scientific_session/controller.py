@@ -46,7 +46,7 @@ from .decision_policy import (
 from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, settle_owned_call, retry_persistence
 from .decision_inputs import (
     resolve_decision_input, active_results, verify_observation_integrity, decision_input_digest, seal_observation,
-    effective_molecule, has_explicit_molecule, MOLECULAR_INPUT_TOOLS, require_current_reference,
+    activity_input_target, effective_molecule, has_explicit_molecule, MOLECULAR_INPUT_TOOLS, require_current_reference,
 )
 from .decision_clarification import scientific_clarification, has_valid_molecular_input
 from .decision_bounds import context_value, configuration_generation, validate_json
@@ -128,6 +128,7 @@ def _decision_failure_message(reason: str) -> str:
             '模型未能完成 Agent 决策；请先在模型设置中运行连接测试，并确认模型支持工具调用或结构化输出。'
         ),
         'model_authentication_failed': '模型服务返回 HTTP 401。请在模型设置中核对凭据并运行连接测试。',
+        'model_service_unavailable': '模型服务返回 HTTP 503，暂时不可用，请稍后重试。',
         'invalid_decision_schema': (
             '模型返回的决策格式不符合 MedChat 协议；请更换支持工具调用或结构化输出的模型。'
         ),
@@ -573,10 +574,17 @@ class ScientificSession:
         session.input_queries = [context.query]
         session._decision_observation_seals = MappingProxyType({})
         resolver = None
+        repeat_evaluation = False
         if binding:
             try:
                 resolver = await owned(lambda: policy.resolver(session=session, requirements=requirements,
                     original_context=journal.context(0), adapters=adapters, input_journal=journal))
+                if policy.is_web and requirements.workflow_name == 'comprehensive_evaluation':
+                    query = requirements.request['query']
+                    if re.search(r'重复执行\s*\d+\s*次', query):
+                        # Admission already bounded this request. Validate its full molecule on the worker.
+                        repeat_evaluation = await owned(lambda: has_valid_molecular_input(
+                            query, required_tools, max_bytes=None))
             except DecisionBoundaryError as exc:
                 return AgentResult(context.trace_id, False, 'Binding admission rejected',
                     error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Binding admission rejected'),
@@ -596,6 +604,23 @@ class ScientificSession:
             system_message['content'] += (' B1: reverse observations expose record_references. '
                 'For target lookup from reverse use input_ref=evidence_id and record_ref from those descriptors. '
                 'ADMET/activity consume the whole molecular evidence batch. Never invent record handles.')
+        model_system_message = system_message
+        if repeat_evaluation:
+            # Keep adapter versions in the checkpoint catalog. Give the provider
+            # complete protocol arguments even before it has seen a tool call.
+            def tool_envelope(entry):
+                decision = ToolDecision(version='1', action='tool', tool_name=entry['name'],
+                                        arguments=entry['arguments'], purpose='execute the selected compiled step')
+                return {'decision': decision.model_dump()}
+
+            model_catalog = [{'available': entry['available'], 'description': entry['description'],
+                              'function_arguments': tool_envelope(entry)} for entry in catalog]
+            model_system_message = decision_system_message(request_kind, required_tools, model_catalog,
+                model_requirements, binding_profile=self.runtime.binding_profile)
+            model_system_message['content'] += (
+                ' This conversation executes one run of the repeated evaluation. '
+                'decision.version is always the string "1". For each tool decision, '
+                'choose the appropriate compiled step and return its complete function_arguments object.')
         # B has already bounded the complete raw context and UTF-8 query content.
         # Preserve legacy history semantics without reapplying its JSON-string
         # query ceiling to the independently admitted B content.
@@ -823,8 +848,10 @@ class ScientificSession:
             return {'toolCall': {'id': 'repair-' + state.decision_id,
                 'name': 'protocol_feedback', 'arguments': {'feedback': feedback}}}
 
+        next_system_message = model_system_message
+
         async def request_model(payload):
-            nonlocal review_draft
+            nonlocal review_draft, next_system_message
             await boundary()
             if binding:
                 state.task_acceptance = await acceptance()
@@ -864,7 +891,7 @@ class ScientificSession:
                 response = await asyncio.wait_for(
                     ModelProviderAdapter(self.runtime.model, self.runtime.mode).request(
                         payload['messages'], timeout_seconds=min(60, remaining),
-                        system_message=system_message,
+                        system_message=next_system_message,
                         **({'review_draft': review_draft, 'review_in_three_sentences': sentence_range is not None}
                            if review_draft is not None else {}),
                         **({'temperature': context.temperature,
@@ -877,6 +904,20 @@ class ScientificSession:
                            if self.runtime.binding_profile == 'medchat-web-v1' else {})),
                     timeout=min(60, remaining))
             await boundary()
+            # A known step paired with the wrong tool needs a fresh decision
+            # before Pi acknowledges a proposal or reserves a tool attempt.
+            next_system_message = model_system_message
+            proposed = response.decision
+            matched_step = None
+            if (repeat_evaluation and response.success and type(proposed) is ToolDecision
+                    and proposed.tool_name not in requirements.forbidden_tools):
+                matched_step = next((entry for entry in catalog if entry['arguments'] == proposed.arguments
+                                     and entry['name'] != proposed.tool_name), None)
+            if matched_step is not None:
+                response = DecisionResponse(None, AgentExecutionError(AgentErrorCode.INVALID_OUTPUT,
+                    'Tool name does not match the compiled action catalog', {'reason': 'invalid_decision_schema',
+                    'schema_issues': [{'path': 'decision.tool.tool_name', 'type': 'literal_error'}]}),
+                    None, response.metadata)
             state.model_calls.append({**model_call_metadata(response),
                                       'decision_id': state.decision_id, 'round': state.model_requests})
             persist('decision_received')
@@ -886,16 +927,26 @@ class ScientificSession:
                 error = response.error
                 details = (error.details or {}) if error else {}
                 if (error and error.code == AgentErrorCode.PROVIDER_ERROR
-                        and details.get('reason') == 'decision_http_error'
-                        and details.get('http_status') == 401):
-                    raise DecisionBoundaryError('model_authentication_failed')
+                        and details.get('reason') == 'decision_http_error'):
+                    if details.get('http_status') == 401:
+                        raise DecisionBoundaryError('model_authentication_failed')
+                    if details.get('http_status') == 503 and binding and any(map(usable, session.results)):
+                        raise DecisionBoundaryError('model_service_unavailable')
                 if (self.runtime.binding_profile == 'medchat-web-v1' and error
                         and error.code == AgentErrorCode.INVALID_INPUT
                         and details.get('reason') == 'decision_input_budget_exceeded'):
                     raise DecisionBoundaryError('decision_input_budget_exceeded')
                 feedback = schema_correction(response)
+                if matched_step is not None and state.protocol_repairs:
+                    raise DecisionBoundaryError('tool_not_authorized')
                 if feedback is None or state.protocol_repairs:
                     raise DecisionBoundaryError('model_decision_unavailable')
+                if matched_step is not None:
+                    # Give only the retry the exact server-owned pairing. Its
+                    # new proposal still goes through the usual dispatch checks.
+                    next_system_message = {**model_system_message, 'content': model_system_message['content']
+                        + ' Use these complete function arguments for the corrected step. Corrected catalog selection: '
+                        + encode_observation(tool_envelope(matched_step))}
                 return schedule_correction(feedback, response.error.details['reason'])
             if binding:
                 if type(response.decision) not in (ToolDecision, ClarifyDecision, FinishDecision):
@@ -935,12 +986,13 @@ class ScientificSession:
                 # Compiler-admitted missing-input requests retain their frozen
                 # Web obligations. Model preference cannot dispatch without a
                 # structure, nor ignore a valid subject supplied on resume.
-                if not has_explicit_molecule(context.query) and effective_molecule(context) is None:
+                subject = (await owned(lambda: resolver._context(journal.head_turn))
+                           if restored is not None else context)
+                if not has_explicit_molecule(subject.query) and effective_molecule(subject) is None:
                     decision = ClarifyDecision(version='1', action='clarify',
                         question=scientific_clarification(context.query, required_tools),
                         missing_fields=['SMILES'])
-                elif (restored is not None and has_valid_molecular_input(context.query, required_tools)
-                      and isinstance(decision, (ClarifyDecision, FinishDecision))):
+                elif restored is not None and isinstance(decision, (ClarifyDecision, FinishDecision)):
                     pending = state.task_acceptance.get('missing_required_steps', [])
                     step = next((step for step in requirements.steps if step.name in pending), None)
                     if step is not None and all(usable(result) for result in session.results):
@@ -1041,7 +1093,13 @@ class ScientificSession:
                             arguments={'input_ref': 'user'},
                             purpose='satisfy the pending workflow requirement',
                         )
-            if binding and policy.is_web and request_kind == 'scientific' and isinstance(decision, FinishDecision):
+            supplied_target = (binding and policy.is_web and restored is not None
+                               and isinstance(decision, (ClarifyDecision, FinishDecision))
+                               and restored['proposals'][-1]['decision'].get('missing_fields') == ['target']
+                               and activity_input_target(session) is not None)
+            if (binding and policy.is_web and request_kind == 'scientific'
+                    and (isinstance(decision, FinishDecision)
+                         or supplied_target or (repeat_evaluation and isinstance(decision, ClarifyDecision)))):
                 # A Web workflow is compiled into an exact dependency graph.
                 # If the model attempts to finish before the graph is closed,
                 # recover the next ready required step instead of invalidating
@@ -1058,12 +1116,24 @@ class ScientificSession:
                 next_step = next_required_web_step(
                     workflow_steps(requirements), requirements.dependencies,
                     completed=completed_refs)
+                if repeat_evaluation or supplied_target:
+                    next_step = next((s for s in requirements.steps if s.name not in completed_refs
+                                     and set(requirements.dependencies[s.name]) <= completed_refs), next_step)
                 if next_step is not None:
                     decision = ToolDecision(
                         version='1', action='tool', tool_name=next_step.tool_name,
                         arguments={'step_ref': next_step.name},
                         purpose='complete the next required step in the compiled scientific plan',
                     )
+            if (binding and policy.is_web and isinstance(decision, ToolDecision)
+                    and decision.tool_name == 'activity_predictor'
+                    and requirements.workflow_name in ('activity_prediction', 'comprehensive_evaluation')
+                    and (requirements.workflow_name == 'activity_prediction'
+                         or re.search(r'活性预测|预测活性|activity prediction', requirements.request['query'], re.I))
+                    and has_explicit_molecule(requirements.request['query'])):
+                if activity_input_target(session) is None:
+                    decision = ClarifyDecision(version='1', action='clarify',
+                        question='请补充活性预测靶点（PDE 或 BuChE），以继续本次任务。', missing_fields=['target'])
             if self.runtime.mode == 'native':
                 call_id = response.tool_call_id
                 if (type(call_id) is not str or re.fullmatch(r'[A-Za-z0-9_-]{1,128}', call_id) is None
@@ -1099,6 +1169,9 @@ class ScientificSession:
                 # Free scientific prose must not smuggle fabricated results into clarify.
                 state.answer = (decision.question if request_kind == 'chat'
                                 else scientific_clarification(context.query, required_tools))
+                if (binding and policy.is_web and decision.missing_fields == ['target']
+                        and 'activity_predictor' in required_tools):
+                    state.answer = '请补充活性预测靶点（PDE 或 BuChE），以继续本次任务。'
                 state.outcome = RunOutcome.PARTIAL if any(map(usable, session.results if binding else active_results(session))) else RunOutcome.REJECTED
                 state.stop_reason = 'clarification_required'
             elif binding:
@@ -1144,7 +1217,7 @@ class ScientificSession:
                         return resolver.resolve(decision), None
                     except DecisionBoundaryError as exc:
                         reason = str(exc)
-                        expected = reason == 'web_dependency_unusable' or (
+                        expected = reason in ('web_dependency_unusable', 'reverse_target_no_matches') or (
                             reason == 'activity_target_conflict_or_unknown'
                             and decision.tool_name == 'activity_predictor')
                         if not policy.is_web or not expected:
@@ -1432,8 +1505,11 @@ class ScientificSession:
                 and request_kind == 'scientific' else None)
             if (self.runtime.binding_profile == 'medchat-web-v1' and request_kind == 'scientific'
                     and state.outcome in (RunOutcome.PARTIAL, RunOutcome.FAILED)
-                    and state.stop_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable',
-                                              'activity_target_conflict_or_unknown')):
+                    and (state.stop_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable',
+                                               'reverse_target_no_matches', 'activity_target_conflict_or_unknown')
+                         or (state.outcome == RunOutcome.PARTIAL
+                             and state.stop_reason in ('tool_not_authorized', 'model_authentication_failed',
+                                                       'model_service_unavailable')))):
                 state.answer = await owned(lambda: render_bound(resolver,
                     required_tools=required_tools, evidence_ids=None,
                     interruption_reason=state.stop_reason))

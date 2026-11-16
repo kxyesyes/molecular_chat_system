@@ -46,7 +46,8 @@ window.HomeFormatters = (function () {
   }
 
   // Input is already escaped; only complete, rectangular pipe tables are promoted.
-  function renderComparisonTables(escaped, rankedSummary) {
+  function renderComparisonTables(escaped, displayKind) {
+    const scientific = displayKind === 'scientific_summary';
     const lines = escaped.split(/\r?\n/);
     function cells(line) {
       const value = line.trim();
@@ -57,7 +58,10 @@ window.HomeFormatters = (function () {
     let plain = [];
     let inFence = false;
     function flushPlain() {
-      if (plain.length) output.push(renderEscapedMarkdown(plain.join("\n")));
+      const paragraph = plain.join("\n");
+      if (scientific ? paragraph.trim() : plain.length) {
+        output.push(renderEscapedMarkdown(scientific ? paragraph.replace(/^\n+|\n+$/g, '') : paragraph));
+      }
       plain = [];
     }
     for (let i = 0; i < lines.length; i++) {
@@ -68,6 +72,12 @@ window.HomeFormatters = (function () {
       }
       if (inFence) {
         plain.push(lines[i]);
+        continue;
+      }
+      const section = scientific && /^##\s+(.+)$/.exec(lines[i]);
+      if (section) {
+        flushPlain();
+        output.push('<h3 class="home-result-heading">' + renderEscapedMarkdown(section[1]) + '</h3>');
         continue;
       }
       const header = cells(lines[i]);
@@ -91,11 +101,10 @@ window.HomeFormatters = (function () {
         plain.push(...lines.slice(i, end));
       } else {
         flushPlain();
-        const cellStyle = ' style="padding: 8px 12px; border: 1px solid #e2e8f0; text-align: left;"';
         // Server-produced ranking cells escape markup before entering Markdown.
         // Undo only the extra ampersand introduced by the page-wide escape;
         // the resulting entity is still HTML-escaped, including < and quotes.
-        const isRankedTable = rankedSummary && header.join('|') ===
+        const isRankedTable = displayKind === 'reverse_target_rank_v1' && header.join('|') ===
           '排名|靶点|物种|综合相似度|Morgan|MACCS|匹配分子数';
         function renderCell(cell) {
           const once = isRankedTable
@@ -103,20 +112,24 @@ window.HomeFormatters = (function () {
             : cell;
           return renderEscapedMarkdown(once);
         }
-        const heading = header.map(function (cell) { return '<th scope="col"' + cellStyle + '>' + renderCell(cell) + '</th>'; }).join("");
+        const heading = header.map(function (cell) { return '<th scope="col">' + renderCell(cell) + '</th>'; }).join("");
         const body = rows.map(function (row) {
-          return '<tr>' + row.map(function (cell) { return '<td' + cellStyle + '>' + renderCell(cell) + '</td>'; }).join("") + '</tr>';
+          return '<tr>' + row.map(function (cell, column) {
+            const structure = scientific && header[column] === 'SMILES';
+            if (structure) return '<td class="home-structure-cell">' + cell.replace(/^`([^`]+)`$/, '$1') + '</td>';
+            return '<td>' + renderCell(cell) + '</td>';
+          }).join("") + '</tr>';
         }).join("");
         output.push('<div class="home-comparison-table-scroll" tabindex="0" role="region" aria-label="比较结果表格" style="overflow-x: auto; margin: 12px 0;"><table style="border-collapse: collapse; width: 100%;"><thead><tr>' + heading + '</tr></thead><tbody>' + body + '</tbody></table></div>');
       }
       i = end - 1;
     }
     flushPlain();
-    return output.join("<br>");
+    return output.join(scientific ? "" : "<br>");
   }
 
   function renderMarkdownLike(content, options) {
-    return renderComparisonTables(escapeHtml(content), options?.displayKind === 'reverse_target_rank_v1');
+    return renderComparisonTables(escapeHtml(content), options?.displayKind);
   }
 
   // Display-only typography. Protect literal code and complete Markdown links
@@ -447,6 +460,7 @@ window.HomeFormatters = (function () {
   }
 
   function formatContent(content, options) {
+    if (options?.displayKind === 'scientific_summary') return renderMarkdownLike(content, options);
     if (typeof content === "string" && content) {
       content = content.split(/(```[^\n]*(?:\n[\s\S]*?(?:```|$)|$)|`[^`\n]*(?:`|$))/g)
         .map(function (part, index, parts) {
@@ -458,7 +472,7 @@ window.HomeFormatters = (function () {
         }).join("");
     }
 
-    if (['reverse_target_rank_v1', 'scientific_summary'].includes(options?.displayKind)) {
+    if (options?.displayKind === 'reverse_target_rank_v1') {
       return renderMarkdownLike(content, options);
     }
     if (

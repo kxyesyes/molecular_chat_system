@@ -223,6 +223,8 @@ def activity_target(text, validate_smiles):
         flags=re.I,
     )
     text = _prose_sentence_periods(text, validate_smiles)
+    text = re.sub(r'对(?=[\u4e00-\u9fff]{2,12}做(?:综合|全面)评价)|'
+                  r'(?:潜在靶点(?=和|[、，。])|靶点结构证据)', '语境', text)
     if _TARGET_ROLE.search(text):
         request = analyze_target_request(text)
         if request.needs_clarification:

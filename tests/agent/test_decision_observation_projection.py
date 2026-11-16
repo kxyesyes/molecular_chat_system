@@ -197,3 +197,26 @@ def test_activity_projection_deduplicates_only_identical_provenance_losslessly()
     assert result.to_legacy_dict() == before
     assert len(json.dumps(view['data']) + json.dumps(view['quality'])) < len(json.dumps(before['data']) + json.dumps(before['quality'])) / 2
     assert model_observation(result, {})['data'] == before['data']
+
+
+def test_prediction_batch_fits_server_boundary_and_keeps_model_view_small():
+    from src.agent.scientific_session.decision_bounds import observation_value
+    for tool in ('admet_predictor', 'activity_predictor'):
+        rows = [{'smiles': 'C' * n, 'candidate_id': str(n),
+                 'provenance': {'source': 'x' * 7000}} for n in range(1, 11)]
+        result = ToolResult.success_result(tool, data=rows)
+        assert observation_value(result)['data'] == rows
+        plan = {'profile': 'medchat-web-v1', 'checks': [{'tool_name': 'candidate_ranker'}]}
+        view = model_observation(result, plan)
+        assert [r['candidate_id'] for r in view['data']] == [str(n) for n in range(1, 11)]
+        assert len(json.dumps(view)) < 5000
+
+
+def test_prediction_batch_still_rejects_oversize_and_nonfinite_evidence():
+    import pytest
+    from src.agent.scientific_session.decision_bounds import validate_raw_observation
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
+    for bad_value in ('x' * (512 * 1024), float('nan')):
+        raw = {'success': True, 'data': [{'smiles': 'CCO'}] * 9 + [{'invalid': bad_value}]}
+        with pytest.raises(DecisionBoundaryError, match='observation_too_large'):
+            validate_raw_observation(raw, tool_name='admet_predictor')

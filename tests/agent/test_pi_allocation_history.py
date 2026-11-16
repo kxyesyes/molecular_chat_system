@@ -13,6 +13,15 @@ from tests.agent.test_chat_reverse_rank_followup import FIRST, make_handler, tur
 from tests.agent.test_reverse_target_rank_followup import ranked
 
 
+def test_allocation_heartbeat_identifies_the_current_turn_and_trace():
+    sender = _Sender(WebSocket('owner'))
+    current = _Turn({'message': '计算分子性质'})
+    frame = {'type': 'agent_status', 'stage': 'allocation', 'message': '正在分配任务'}
+    asyncio.run(_TurnSender(sender, current).send_text(json.dumps(frame)))
+    assert sender.websocket.messages == [
+        {**frame, 'turn_id': current.turn_id, 'trace_id': current.trace_id}]
+
+
 @pytest.mark.parametrize('full_web,status,error,revoke', [
     (True, 'rejected', {'code': 'allocation_busy'}, True),
     (True, 'completed', {'code': 'allocation_busy'}, False),

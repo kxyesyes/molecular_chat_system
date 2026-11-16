@@ -33,6 +33,8 @@ def calculator(request):
     ('SMILES: [13CH3]CO', ['[13CH3]CO']),
     ('SMILES: C；SMILES: CO', ['C', 'CO']),
     ('SMILES: CCN。输出 LogP、QED。', ['CCN']),
+    ('SMILES: [Na+].[Cl-]. 每个靶点都需要证据。', ['[Na+].[Cl-]']),
+    ('SMILES: CCO. 再和 CCN 比较。', ['CCO', 'CCN']),
 ])
 def test_full_batch_is_computed(calculator, query, expected):
     result = calculator.execute(query)

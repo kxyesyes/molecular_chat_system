@@ -486,6 +486,12 @@ def followup_answer(query, history, session_id):
                     return None
                 return inspection_answer(evidence, {'selectors': (), 'all': True})
             if inspection is not None:
+                if inspection.get('positions'):
+                    order = history[-1].get('activity_display_order', ())
+                    if any(not 1 <= pos <= len(order) for pos in inspection['positions']):
+                        return {'final_answer': '无法将该序号对应到上一轮展示的活性结果；请指定分子 SMILES。',
+                                'status': 'not_calculated', 'success': False}
+                    inspection['selectors'] += tuple(order[pos - 1] for pos in inspection['positions'])
                 return inspection_answer(evidence, inspection)
             view = _render(evidence["smiles"], evidence["observations"], evidence["trace_id"],
                            ("activity_predictor",), reused=True)

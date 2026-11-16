@@ -175,8 +175,16 @@ def target_design_steps(
     ]
 
 
+def _lipinski_step(source: str) -> WorkflowStep:
+    return WorkflowStep(
+        "drug_likeness", "drug_likeness_assessment", input_from=source,
+        input_binding=f"$.outputs.{source}", input_transform="smiles_text", output_key="drug_likeness",
+        metadata={"candidate_source": source, "require_lipinski_compliance": True},
+    )
+
+
 def molecular_design_steps(
-    generation_request: dict[str, Any], *, include_properties: bool = False,
+    generation_request: dict[str, Any], *, include_properties: bool = False, check_lipinski: bool = False,
 ) -> list[WorkflowStep]:
     steps = [
         WorkflowStep(
@@ -202,11 +210,13 @@ def molecular_design_steps(
                 output_contract="PropertyAssessmentSet@1",
             )
         )
+    if check_lipinski:
+        steps.append(_lipinski_step("result"))
     return steps
 
 
 def lead_optimization_steps(
-    query: str, *, generation_request: dict[str, Any],
+    query: str, *, generation_request: dict[str, Any], check_lipinski: bool = False,
 ) -> list[WorkflowStep]:
     return [
         WorkflowStep(
@@ -245,6 +255,7 @@ def lead_optimization_steps(
             capability="molecule.generate",
             output_contract="CandidateSet@1",
         ),
+        *([_lipinski_step("candidates")] if check_lipinski else []),
         WorkflowStep(
             "candidate_properties",
             "property_calculator",

@@ -11,7 +11,7 @@ from src.target_identifiers import canonical_target_identifier, target_mentions
 from src.target_search.exact_pdb import requested_pdb_id, target_text_without_pdb
 
 from .base_tool import BaseMolecularTool
-from .target_observation import target_planning_data
+from .target_observation import resolution_preview, target_planning_data
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,7 @@ class TargetDatabaseTool(BaseMolecularTool):
     def execute(self, query: Any) -> Dict[str, Any]:
         result = self._create_base_result(query)
         include_function = isinstance(query, dict) and query.get('include_function') is True
+        resolution_limit = query.get('resolution_limit') if isinstance(query, dict) else None
         organism = query.get('organism') if isinstance(query, dict) else None
         if organism not in (None, 'Homo sapiens', 'Mus musculus'):
             result.update(status='invalid_input', message='Unsupported target organism.',
@@ -149,6 +150,8 @@ class TargetDatabaseTool(BaseMolecularTool):
             return result
         target_query = target_text_without_pdb(query) if pdb_id is not None else query
         search_queries = self._search_queries(target_query)
+        named_comparison = (isinstance(query, (list, tuple)) and len(query) > 1
+                            and all(canonical_target_identifier(item) for item in query))
         # Preserve names when prose was reduced to accession lookup keys, but
         # leave unconstrained name/family and multi-target searches unchanged.
         named_targets = target_mentions(target_query) if type(target_query) is str and (
@@ -198,6 +201,7 @@ class TargetDatabaseTool(BaseMolecularTool):
         try:
             service = self._get_service(organism) if organism == 'Mus musculus' else self._get_service()
             targets: list[Any] = []
+            seen_target_ids = set()
             searched: list[str] = []
             lookup_path: list[str] = []
             evidence: list[dict[str, Any]] = []
@@ -255,18 +259,41 @@ class TargetDatabaseTool(BaseMolecularTool):
                     if isinstance(target, dict):
                         target = {**target, "source_query": search_query}
                         target_id = target.get("target_id", target.get("id"))
+                        if target_id not in (None, ""):
+                            if target_id in seen_target_ids:
+                                continue
+                            seen_target_ids.add(target_id)
                         recommended_structures = [
                             dict(structure)
                             for structure in target.get("recommended_structures", [])
                             if isinstance(structure, dict)
                         ]
+                        if resolution_limit is not None and target_id in (None, ""):
+                            recommended_structures = []
+                            result["warnings"].append("未取得靶点记录标识，无法核对结构列表和分辨率排序。")
                         if target_id not in (None, ""):
                             try:
                                 structure_payload = service.get_target_structures(
                                     int(target_id)
                                 )
-                                structures = structure_payload.get("structures", [])
-                                if len(structures) > 20:
+                                structures = structure_payload["structures"]
+                                if not isinstance(structures, list):
+                                    raise ValueError("Invalid structure list")
+                                if resolution_limit is not None:
+                                    target['searched_structure_count'] = len(structures)
+                                    structures, target['comparable_structure_count'] = resolution_preview(structures, resolution_limit)
+                                elif named_comparison and len(structures) > 20:
+                                    # For an identity comparison retain an actual example of each
+                                    # structure type, even when all predicted rows follow the PDBs.
+                                    examples = {}
+                                    for structure in structures:
+                                        if isinstance(structure, dict):
+                                            examples.setdefault(structure.get("structure_type"), structure)
+                                    structures = list(examples.values())
+                                    result["warnings"].append(
+                                        f"{target.get('gene_symbol', search_query)} 共 {len(structure_payload['structures'])} "
+                                        "条结构记录，比较结果中每种结构类型展示一条。")
+                                elif len(structures) > 20:
                                     result.setdefault("warnings", []).append("structure_list_truncated")
                                 recommended_structures = [
                                     dict(structure)
@@ -274,10 +301,12 @@ class TargetDatabaseTool(BaseMolecularTool):
                                     if isinstance(structure, dict)
                                 ]
                             except Exception:
-                                result.setdefault("warnings", []).append(
-                                    "Could not load structures for target "
-                                    f"{target_id}."
-                                )
+                                if resolution_limit is not None:
+                                    recommended_structures = []
+                                    result["warnings"].append("读取结构列表失败，无法核对分辨率排序。")
+                                else:
+                                    result.setdefault("warnings", []).append(
+                                        f"Could not load structures for target {target_id}.")
                         target["recommended_structures"] = self._guard_structure_freshness(
                             target,
                             recommended_structures,
@@ -355,12 +384,14 @@ class TargetDatabaseTool(BaseMolecularTool):
                 return result
 
             partial = any(
-                status in {"ambiguous", "unavailable", "partial"}
+                status in {"ambiguous", "unavailable", "partial", "not_found"}
                 for status in service_statuses
             ) or any(
                 isinstance(target, dict) and bool(target.get("stale"))
                 for target in targets
-            ) or "structure_list_truncated" in result["warnings"]
+            ) or ("structure_list_truncated" in result["warnings"]
+                  and not canonical_target_identifier(query)) or (
+                resolution_limit is not None and any('searched_structure_count' not in t for t in targets))
             if isinstance(query, str) and re.search(r'分辨率|\bresolution\b', query, re.I):
                 if any(structure.get('structure_type') == 'experimental' and structure.get('resolution') is None
                        for target in targets if isinstance(target, dict)
@@ -428,7 +459,7 @@ class TargetDatabaseTool(BaseMolecularTool):
                 )
                 lines.append(f"- Match source: {match_reason}")
                 if recommended_structures:
-                    lines.append("- Recommended structures:")
+                    lines.append("- Structure examples:" if named_comparison else "- Recommended structures:")
                     for structure in recommended_structures:
                         structure_id = structure.get("structure_id", "N/A")
                         source = structure.get("source", "N/A")

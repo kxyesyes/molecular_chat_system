@@ -326,6 +326,8 @@ class ReverseTargetTool(BaseMolecularTool):
             status = self.source_status()
             message = ('反向寻靶来源正在进行全量科学校验，请在校验完成后重新发起请求；未返回预测结果。'
                        if status['state'] == 'loading' else '反向寻靶暂不可用，未返回预测结果。')
+            if status['state'] == 'failed' and status.get('reason') == 'source_validation_failed':
+                message = '反向寻靶参考库未通过校验，本次无法列出候选靶点。请联系管理员恢复参考库后重试。'
             return self._failure(result, 'tool_unavailable', message,
                                  details={'stage': phase, 'reason': 'source_unavailable'})
         except ValueError as error:

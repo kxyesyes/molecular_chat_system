@@ -33,6 +33,8 @@ class Element {
   setAttribute(k, v) {this.attributes[k] = String(v); if (k === "class") this.className = String(v);}
   getAttribute(k) {return k === "class" ? this.className : this.attributes[k] ?? null;}
   addEventListener(k, fn) {(this.listeners[k] ||= []).push(fn);}
+  removeEventListener(k, fn) {this.listeners[k] = (this.listeners[k] || []).filter(listener => listener !== fn);}
+  async expand() {this.open = true; await Promise.all((this.listeners.toggle || []).map(fn => fn({target: this})));}
   click() {if (!this.disabled) (this.listeners.click || []).forEach(fn => fn({target: this, preventDefault() {}}));}
   focus() {}
   get isConnected() {return this.root === true || Boolean(this.parentNode?.isConnected);}
@@ -70,7 +72,8 @@ class Element {
   closest(selector) {return this.matches(selector) ? this : this.parentNode?.closest(selector) || null;}
 }
 
-function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
+function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = null,
+                   advancedConfig = {ragCount: 3, temperature: 0.7, molCount: 1}} = {}) {
   const body = new Element("body"); body.root = true;
   const composer = body.appendChild(new Element("div")); composer.className = "chat-composer";
   const fill = composer.appendChild(new Element("div")); fill.className = "fill";
@@ -89,10 +92,11 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
     emit(message) {this.onmessage({data: typeof message === "string" ? message : JSON.stringify(message)});}
     close(code = 1000, reason = "") {this.readyState = 3; this.onclose?.({code, reason, wasClean: true});}
   }
-  const document = {readyState: "loading", addEventListener() {}, createElement: tag => new Element(tag),
+  const document = {readyState: "loading", addEventListener() {},
+    createElement(tag) {return Object.assign(new Element(tag), {ownerDocument: document});},
     querySelector: s => body.querySelector(s), querySelectorAll: s => body.querySelectorAll(s),
     getElementById: id => body.querySelector("#" + id)};
-  const renderer = {scrollToBottom() {}, getCurrentTime: () => "12:00", updateConnectionStatus() {}, showNotification() {}};
+  const renderer = {getCurrentTime: () => "12:00", updateConnectionStatus() {}, showNotification() {}};
   const window = {location: {host: "example.invalid", protocol: "http:"}, addEventListener() {},
     sessionStorage: {
       getItem: key => key === "medchat.decision.waiting.v1" ? storage.get(key) || null : stored,
@@ -110,22 +114,29 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
   const context = vm.createContext({window, document, WebSocket: Socket, TextEncoder, AbortController, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
     HomeChatRenderer: renderer, HomeState: {}, HomeFormatters: {formatContent: (s, options) => {formatCalls.push(options); return String(s);}},
-    HomeAdvancedOptions: {getConfig: () => ({ragCount: 3, temperature: 0.7, molCount: 1})},
+    HomeAdvancedOptions: {getConfig: () => ({...advancedConfig})},
     setTimeout: (fn, ms) => {timers.set(++timer, {fn, ms}); return timer;}, clearTimeout: id => timers.delete(id),
     fetch: async (url, options) => {requests.push([url, JSON.parse(options.body)]);
       return {ok: true, json: async () => vm.runInContext("JSON.parse", context)(JSON.stringify({success: true,
         data: request ? await request(url, JSON.parse(options.body)) : {confirmed: true}}))};},
   });
-  for (const file of ["config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js", "docking_consent.js"]) {
+  for (const file of ["chat_renderer.js", "config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js", "docking_consent.js"]) {
     vm.runInContext(fs.readFileSync(path.join(home, file), "utf8"), context, {filename: file});
   }
+  context.HomeChatRenderer = window.HomeChatRenderer = Object.assign(window.HomeChatRenderer, renderer);
+  context.HomeState.elements = {chatContainer: chat};
   context.HomeConfig = window.HomeConfig;
+  if (fetchDetails) {
+    window.fetch = fetchDetails;
+    Object.assign(context, {TextDecoder, Uint8Array});
+    vm.runInContext(fs.readFileSync(path.join(home, "result_details.js"), "utf8"), context, {filename: "result_details.js"});
+  }
   let source = fs.readFileSync(path.join(home, "main.js"), "utf8");
   // Expose lexical entry points only in this VM; run the complete real script.
   source = source.replace(/\}\)\(\);\s*$/, `window.testHome = {connectWebSocket, sendMessage, elements, scientificReferences,
-    addUserMessage, addAssistantMessage, appendToLastMessage, displayRAGInfo,
+    addUserMessage, addAssistantMessage, appendToLastMessage, displayRAGInfo, handleQuickAction, toggleRAG,
     prepare() {chatMode = true; elements.input = window.testInput; elements.sendBtn = window.testSend;
-      elements.chatContainer = window.testChat;}};})();`);
+      elements.chatContainer = window.testChat; bindEvents();}};})();`);
   Object.assign(window, {testInput: input, testSend: send, testChat: chat});
   vm.runInContext(source, context, {filename: "main.js"});
   window.testHome.prepare(); window.testHome.connectWebSocket(); sockets[0].open();
@@ -170,6 +181,137 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
+  const repeatQuery = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
+  for (const [subject, punctuation] of [["次 CCO", "?"], ["次 CCO", "？"], ["次CCO", "?"], ["次CCO", "？"]]) {
+    await test("three repeat turns with " + subject + " and " + punctuation, () => {
+      const h = loadHome(); h.ready("pi", false, true);
+      h.input.value = repeatQuery.replace("次 CCO", subject).replace("。", punctuation); h.send();
+      for (let i = 0; i < 3; i++) {
+        const t = String(i + 1).repeat(32), tr = String(i + 4).repeat(32);
+        assert.equal(h.socket.sent.filter(f => f.type === "chat").length, i + 1);
+        h.socket.emit(accepted(t, tr)); h.socket.emit(result("completed", t, tr)); h.socket.emit(complete("completed", t, tr));
+      }
+      assert.equal(h.socket.sent.filter(f => f.type === "chat").length, 3);
+      assert(h.chat.textContent.includes("3 次运行的工具顺序"));
+    });
+  }
+  await test("repeat pins the first executed model generation and stops on a configuration change", () => {
+    const h = loadHome(); h.ready("pi", false, true);
+    h.input.value = repeatQuery; h.send(); h.socket.emit(accepted());
+    h.socket.emit(result("completed")); h.socket.emit({...complete("completed"), model_generation: "gen-A"});
+    const chats = () => h.socket.sent.filter(f => f.type === "chat");
+    assert.equal(chats()[1].expected_model_generation, "gen-A");
+    const t = "3".repeat(32), tr = "4".repeat(32);
+    h.socket.emit(accepted(t, tr));
+    const frame = result("rejected", t, tr);
+    frame.metadata.stop_reason = "repeat_model_changed";
+    frame.final_answer = "模型配置已变更，已停止比较。";
+    h.socket.emit(frame); h.socket.emit(complete("rejected", t, tr));
+    assert.equal(chats().length, 2);
+    assert(h.chat.textContent.includes("模型配置已变更，已停止比较"));
+    h.input.value = repeatQuery; h.send();
+    assert(!("expected_model_generation" in chats()[2]));
+  });
+  for (const [reason, statusCode] of [["model_authentication_failed", 401], ["model_service_unavailable", 503]])
+    await test("a provider HTTP " + statusCode + " after a property result ends the repeat", () => {
+    const h = loadHome(); h.ready("pi", false, true);
+    h.input.value = repeatQuery; h.send(); h.socket.emit(accepted());
+    const frame = result("partial");
+    frame.metadata.stop_reason = reason;
+    frame.final_answer = "分子量 46.07 Da。";
+    frame.error = {code: "validation_error", message: "模型服务返回 HTTP " + statusCode + "。"};
+    frame.result_format = "summary_details_v1"; frame.details_state = "available";
+    frame.details = {view_id: "00000000000040008000000000000001", revision: "a".repeat(64), byte_length: 100};
+    h.socket.emit(frame); h.socket.emit(complete("partial"));
+    assert.equal(h.socket.sent.filter(f => f.type === "chat").length, 1);
+    assert(h.chat.textContent.includes(frame.final_answer) && h.chat.textContent.includes("已停止比较"));
+    assert(h.chat.textContent.includes(frame.error.message));
+    assert.equal(h.detailsMounts.length, 1);
+    assert.deepEqual(h.detailsMounts[0].options.reference, frame.details);
+    assert.equal(h.detailsMounts[0].options.traceId, trace);
+  });
+  await test("all repeat requests retain the originally submitted settings", () => {
+    const advancedConfig = {ragCount: 3, temperature: 0.7, molCount: 1};
+    const h = loadHome({advancedConfig}); h.ready("pi", false, true);
+    h.input.value = repeatQuery; h.send();
+    const first = h.socket.sent.at(-1);
+    for (let i = 0; i < 3; i++) {
+      const t = String(i + 1).repeat(32), tr = String(i + 4).repeat(32);
+      h.socket.emit(accepted(t, tr));
+      if (i === 0) {
+        h.render.toggleRAG();
+        Object.assign(advancedConfig, {ragCount: 8, temperature: 0.2, molCount: 4});
+      }
+      h.socket.emit(result("completed", t, tr)); h.socket.emit(complete("completed", t, tr));
+    }
+    assert.deepEqual(h.socket.sent.filter(f => f.type === "chat"), [first, first, first]);
+    h.input.value = "另一个请求"; h.send();
+    assert.equal(h.socket.sent.at(-1).temperature, 0.2);
+    assert.equal(h.socket.sent.at(-1).enable_rag, true);
+  });
+  for (const selected of [false, true]) await test(`an explicit SMILES repeat supersedes a prior ${selected ? "selection" : "collection"}`, async () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    h.socket.emit(result("partial")); h.socket.emit(candidateEvent()); h.socket.emit(complete("partial"));
+    await tick();
+    assert(h.refs.outgoing().reference && !h.refs.outgoing().selection);
+    if (selected) h.body.querySelectorAll(".molecule-selection-button")[1].click();
+    const previous = h.refs.outgoing();
+    assert.equal(Boolean(previous.selection), selected);
+    h.input.value = repeatQuery; h.send();
+    for (let i = 0; i < 3; i++) {
+      const t = String(i + 3).repeat(32), tr = String(i + 6).repeat(32);
+      h.socket.emit(accepted(t, tr)); h.socket.emit(result("completed", t, tr)); h.socket.emit(complete("completed", t, tr));
+    }
+    const requests = h.socket.sent.filter(f => f.message === repeatQuery);
+    assert.equal(requests.length, 3);
+    assert(requests.every(f => !f.reference && !f.selection));
+    h.input.value = "计算上次候选的 logP"; h.send();
+    assert.deepEqual(h.socket.sent.at(-1).reference, previous.reference);
+    assert.deepEqual(h.socket.sent.at(-1).selection, previous.selection);
+  });
+  await test("explicit repeated evaluation submits three serial turns and preserves composer draft", () => {
+    const h = loadHome(); h.ready("pi");
+    const q = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
+    h.input.value = q; h.send();
+    const firstCount = h.socket.sent.length;
+    h.input.value = "草稿";
+    for (let i = 0; i < 3; i++) {
+      const t = String(i + 1).repeat(32), tr = String(i + 4).repeat(32);
+      h.socket.emit(accepted(t, tr));
+      h.socket.emit({type: "agent_event", turn_id: t, event: {trace_id: tr, event: "tool_started", tool: "reverse_target_predictor"}});
+      h.socket.emit(result("partial", t, tr));
+      assert.equal(h.socket.sent.length, firstCount + i);
+      h.socket.emit(complete("partial", t, tr));
+      assert.equal(h.socket.sent.length, firstCount + Math.min(i + 1, 2));
+    }
+    assert.equal(h.input.value, "草稿");
+    assert(h.chat.querySelectorAll(".message-box").some(box => box.getAttribute("data-content")?.includes("3 次运行")));
+  });
+  await test("a failed repeat reports how far the comparison ran and stops dispatch", () => {
+    const h = loadHome(); h.ready("pi");
+    h.input.value = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
+    h.send();
+    const count = h.socket.sent.length;
+    for (const [i, status] of ["partial", "failed"].entries()) {
+      const t = String(i + 1).repeat(32), tr = String(i + 4).repeat(32);
+      h.socket.emit(accepted(t, tr));
+      h.socket.emit(result(status, t, tr)); h.socket.emit(complete(status, t, tr));
+    }
+    assert.equal(h.socket.sent.length, count + 1);
+    assert(h.chat.querySelectorAll(".message-box").some(box =>
+      box.getAttribute("data-content")?.includes("第 2/3 次运行失败，已停止比较")));
+  });
+  await test("an authorization stop retains partial results and ends the repeat", () => {
+    const h = loadHome(); h.ready("pi");
+    h.input.value = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
+    h.send(); h.socket.emit(accepted());
+    const frame = result("partial");
+    frame.metadata.stop_reason = "tool_not_authorized";
+    h.socket.emit(frame); h.socket.emit(complete("partial"));
+    assert.equal(h.socket.sent.filter(f => f.type === "chat").length, 1);
+    const body = h.chat.querySelectorAll(".message-box").at(-1).getAttribute("data-content");
+    assert(body.includes(frame.final_answer) && body.includes("已停止比较"));
+  });
   await test("missing structure restores the original task for editing without sending it", () => {
     const h = loadHome(); h.ready("pi");
     h.input.value = "帮我分析一下分子性质"; h.send(); h.socket.emit(accepted(turn, trace));
@@ -198,6 +340,51 @@ async function run() {
   const lifecycle = (h, event, t = turn, tr = trace, message = event) => h.sockets.at(-1).emit({
     type: "agent_event", turn_id: t, event: {trace_id: tr, event, message},
   });
+  await test("allocation heartbeats belong to the pending calculation and clear on execution", () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    const heartbeat = {type: "agent_status", stage: "allocation", turn_id: turn, trace_id: trace,
+      message: "正在分配任务，尚未启动科学工具…"};
+    h.socket.emit({...heartbeat, turn_id: nonce}); h.socket.emit({...heartbeat, trace_id: nonce});
+    assert(!h.chat.textContent.includes(heartbeat.message));
+    h.socket.emit(heartbeat); h.socket.emit(heartbeat);
+    assert.equal(h.chat.textContent.split(heartbeat.message).length, 2);
+    lifecycle(h, "tool_started");
+    assert(!h.chat.textContent.includes(heartbeat.message));
+    h.socket.emit(result("partial")); h.socket.emit(heartbeat);
+    assert(!h.chat.textContent.includes(heartbeat.message));
+    h.socket.emit(complete("partial"));
+  });
+  await test("long calculations follow the bottom until the reader scrolls up; a new send follows again", () => {
+    const h = loadHome();
+    const chat = h.chat;
+    let top = 0;
+    Object.defineProperties(chat, {
+      clientHeight: {value: 400},
+      scrollHeight: {get: () => 800 + chat.textContent.length},
+      scrollTop: {get: () => top, set: y => {top = Math.min(y, chat.scrollHeight - chat.clientHeight);}},
+    });
+    chat.scrollTop = chat.scrollHeight;
+    h.ready("pi"); start(h);
+    lifecycle(h, "tool_started");
+    chat.scrollTop = 70;
+    lifecycle(h, "tool_completed");
+    h.flushTimers();
+    assert.equal(top, 70, "progress or a queued scroll displaced the reader");
+    const frame = result("completed");
+    frame.final_answer = "a ".repeat(3000);
+    h.socket.emit(frame);
+    assert.equal(top, 70, "the whole result displaced the reader");
+    chat.scrollTop = chat.scrollHeight;
+    h.socket.emit(complete("completed"));
+    assert.equal(top, chat.scrollHeight - chat.clientHeight, "returning to the bottom resumes following");
+    chat.scrollTop = 70;
+    h.input.value = "继续解释这两组数值"; h.send();
+    assert.equal(top, chat.scrollHeight - chat.clientHeight, "active submission should reveal the new turn");
+    const next = "4".repeat(32), nextTrace = "5".repeat(32);
+    h.socket.emit(accepted(next, nextTrace));
+    h.socket.emit({...frame, turn_id: next, trace_id: nextTrace});
+    assert.equal(top, chat.scrollHeight - chat.clientHeight, "a large result should follow a reader at the bottom");
+  });
   await test("a terminal result settles the panel if the last event was still running", () => {
     const h = loadHome(); h.ready("pi"); start(h); lifecycle(h, "tool_started");
     h.socket.emit(result("cancelled")); h.socket.emit(complete("cancelled"));
@@ -221,8 +408,8 @@ async function run() {
     h.socket.emit(result(status, turn, "5".repeat(32)));
     assert.equal(progress.textContent, "等待结果验证");
     h.socket.emit(result(status));
-    assert.equal(progress.textContent, label);
-    assert.equal(latest().querySelector("strong").textContent, label);
+    assert.equal(progress.textContent, status === "completed" ? "正在交付结果" : label);
+    assert.equal(latest().querySelector("strong").textContent, status === "completed" ? "结果校验完成" : label);
     h.socket.emit(complete(status));
     assert.equal(progress.textContent, label);
   });
@@ -239,10 +426,10 @@ async function run() {
     assert.equal(panel.querySelector(".agent-task-progress").textContent, "等待结果验证");
     h.socket.emit(result("completed", t2, confirmed ? tr2 : trace));
     h.socket.close();
-    const expected = confirmed ? "已完成" : "连接已断开，结果未确认";
+    const expected = confirmed ? "连接已断开，交付未确认" : "连接已断开，结果未确认";
     const item = panel.querySelector(".agent-task-list").lastChild;
     assert.equal(panel.querySelector(".agent-task-progress").textContent, expected);
-    assert.equal(item.querySelector("strong").textContent, expected);
+    assert.equal(item.querySelector("strong").textContent, confirmed ? "结果校验完成" : expected);
     assert(item.classList.contains(confirmed ? "is-complete" : "is-warning"));
     assert.equal(history.textContent, before);
   });
@@ -284,10 +471,35 @@ async function run() {
     assert.equal(first.textContent, before);
     assert.equal(first.querySelector(".agent-task-progress").textContent, "等待补充输入");
   });
+  await test("textarea Enter continues a delivered clarification once with the original pointer", () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    h.socket.emit(result("waiting_for_input"));
+    const sent = h.socket.sent.length;
+    const enter = (extra = {}) => {
+      let prevented = false;
+      h.input.listeners.keydown[0]({key: "Enter", preventDefault() {prevented = true;}, ...extra});
+      return prevented;
+    };
+    h.input.value = "CCO"; enter();
+    assert.equal(h.socket.sent.length, sent, "delivery has not finished");
+    h.socket.emit(complete("waiting_for_input"));
+    h.render.handleQuickAction({currentTarget: {dataset: {action: "analyze-ethanol"}}});
+    h.input.value = "CCO"; h.send();
+    for (const key of [{shiftKey: true}, {isComposing: true}, {keyCode: 229}]) assert(!enter(key));
+    assert.equal(h.socket.sent.length, sent);
+    assert(enter());
+    assert.deepEqual(h.socket.sent.at(-1), {type: "resume", trace_id: trace, continuation_id: nonce, message: "CCO"});
+    assert.equal(h.input.value, "");
+    h.input.value = "CCN"; enter(); h.button("继续").click();
+    assert.equal(h.socket.sent.length, sent + 1, "a pending resume cannot be repeated");
+  });
   await test("a reconnected request cannot mutate the disconnected turn panel", () => {
     const h = loadHome(); h.ready("pi"); start(h); lifecycle(h, "task_started");
-    const first = h.chat.querySelector(".agent-task-panel"), before = first.textContent;
-    h.socket.close(); h.reconnect(); const current = h.sockets.at(-1); current.open(); h.ready("pi");
+    const first = h.chat.querySelector(".agent-task-panel");
+    h.socket.close();
+    assert.equal(first.querySelector(".agent-task-progress").textContent, "连接已断开，结果未确认");
+    const before = first.textContent;
+    h.reconnect(); const current = h.sockets.at(-1); current.open(); h.ready("pi");
     h.input.value = "CCN"; h.send();
     const t2 = "4".repeat(32), tr2 = "5".repeat(32);
     current.emit(accepted(t2, tr2)); lifecycle(h, "task_started", t2, tr2);
@@ -702,6 +914,67 @@ async function run() {
       assert(h.chat.querySelector('.decision-runtime-status').hidden);
     }
   });
+  for (const status of ['partial', 'completed']) await test(`attach only this turn's retrieved molecules to its ${status} answer`, async () => {
+    const h = loadHome(); h.ready('pi'); start(h);
+    const cards = {type: 'rag_info', turn_id: turn, trace_id: trace, molecules: [{smiles: 'CCCl'}]};
+    h.socket.emit({...cards, molecules: [{smiles: 'early'}]});
+    const frame = result(status);
+    frame.metadata.retrieval_performed = true;
+    h.socket.emit(frame); h.socket.emit(candidateEvent());
+    h.socket.emit({...cards, trace_id: '9'.repeat(32), molecules: [{smiles: 'wrong trace'}]});
+    h.socket.emit({...cards, turn_id: '9'.repeat(32), molecules: [{smiles: 'wrong turn'}]});
+    h.socket.emit(cards);
+    const warning = {type: 'status', stage: 'retrieval_cards', turn_id: turn, trace_id: trace,
+      message: '部分检索卡片格式无效，无法展示。'};
+    h.socket.emit({...warning, turn_id: '9'.repeat(32), message: 'wrong turn'});
+    h.socket.emit(warning);
+    h.socket.emit(complete(status)); await tick();
+    h.socket.emit(cards);
+    const box = h.chat.querySelector('.assistant-wrapper .message-box');
+    assert(box.classList.contains('complete'));
+    const notice = box.querySelector('.decision-runtime-status');
+    assert(!notice.hidden && notice.textContent.includes(warning.message) && !notice.textContent.includes('wrong turn'));
+    assert.equal(h.chat.querySelectorAll('.rag-info-container').length, 1);
+    assert.equal(box.querySelector('.rag-info-container details').textContent, '显示 SMILESCCCl');
+    assert(box.querySelector('[data-candidate-id="' + candidateEvent().candidate_set.candidates[0].candidate_id + '"]'));
+    assert.equal(h.requests.length, 1, 'the confirmed selection must still belong to the generated collection');
+  });
+  await test('a retrieval card render failure retains the accepted answer and releases the turn', () => {
+    const h = loadHome(); h.ready('pi'); start(h);
+    const frame = result('completed');
+    frame.metadata.retrieval_performed = true;
+    h.socket.emit(frame);
+    h.socket.emit({type: 'rag_info', turn_id: turn, trace_id: trace, molecules: [{smiles: 'CCO'}]});
+    const box = h.chat.querySelector('.assistant-wrapper .message-box');
+    const append = box.appendChild;
+    box.appendChild = function(child) {
+      if (child.className === 'rag-info-container') throw new Error('injected render failure');
+      return append.call(this, child);
+    };
+    h.socket.emit(complete('completed'));
+    assert(box.classList.contains('complete') && box.textContent.includes(frame.final_answer));
+    assert(box.textContent.includes('分子卡片暂时无法显示'));
+    assert.equal(h.chat.querySelector('.typing-indicator-wrapper'), null);
+    h.input.value = 'Explain the result'; h.send();
+    const chats = h.socket.sent.filter(row => row.type === 'chat');
+    assert.deepEqual(chats.map(row => row.message), ['Explain logP', 'Explain the result']);
+  });
+  await test('retrieval cards distinguish raw scores from missing or invalid measurements', () => {
+    const h = loadHome();
+    h.render.displayRAGInfo([
+      {smiles: 'CCO', similarity: -2, properties: {qed: '0.5invalid', logp: '1.5e-3', hba: '0x10'}},
+      {smiles: 'CCN', similarity: 0, properties: {logp: false}},
+      {smiles: 'CCCl', similarity: 3.5}, {smiles: 'CCC'}, {smiles: 'CCF', similarity: '0.9oops'},
+    ]);
+    const cards = h.chat.querySelectorAll('.molecule-card');
+    for (const [index, value] of ['-2', '0', '3.5', '未提供', '无效'].entries()) {
+      assert(cards[index].textContent.includes('检索得分：' + value), value);
+      assert(!cards[index].textContent.includes('% 相似'));
+    }
+    assert(cards[0].textContent.includes('1.5e-3') && !cards[0].textContent.includes('0.50'));
+    assert.equal(cards[0].textContent.split('无效').length - 1, 2, 'both malformed numeric fields remain unavailable');
+    assert(cards[1].textContent.includes('无效'), 'a boolean is not a measured property');
+  });
   await test('unrequested RAG does not imply target retrieval was skipped', () => {
     const h = loadHome(); h.ready('pi'); start(h);
     const frame = result('failed'); frame.metadata.rag_requested = false;
@@ -753,6 +1026,7 @@ async function run() {
     assert(h.button("继续").disabled && h.button("开始新请求").disabled);
     assert(h.fill.querySelector("button").disabled);
     h.button("继续").click(); h.button("开始新请求").click();
+    h.input.listeners.keydown[0]({key: "Enter", preventDefault() {}});
     assert.equal(h.socket.sent.length, sent, "no repeat abandon or queued resume");
     h.socket.emit({type: "continuation_abandoned", trace_id: "9".repeat(32)});
     h.send(); assert.equal(h.socket.sent.length, sent, "wrong trace cannot resolve abandon");
@@ -934,7 +1208,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261113-chat-rag-status-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261116-repeat-v6"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
@@ -1037,7 +1311,7 @@ async function run() {
   });
   for (const [status, label] of Object.entries({completed: "已完成", partial: "部分完成", waiting_for_input: "等待补充输入"})) {
     await test(`projection failure after ${status} is visible without rewriting scientific status`, async () => {
-      const h = loadHome(); h.ready("pi"); start(h); h.socket.emit(result(status));
+      const h = loadHome(); h.ready("pi"); start(h); lifecycle(h, "task_completed"); h.socket.emit(result(status));
       h.socket.emit(candidateEvent());
       const failedCompletion = {...complete("failed"),
         content: "结果展示未完成，请稍后重试。已完成的计算记录仍保留。",
@@ -1049,6 +1323,7 @@ async function run() {
       const state = h.chat.querySelector(".decision-runtime-status");
       assert(state.textContent.includes(label), "retain the earlier scientific status");
       assert(state.textContent.includes("结果展示失败"), "delivery failure must remain visible");
+      assert.equal(h.chat.querySelector(".agent-task-progress").textContent, "结果展示失败");
       assert(h.chat.textContent.includes(failedCompletion.content));
       assert(h.chat.textContent.includes("Measured value 0; unavailable is not zero."));
       assert.equal(h.requests.length, 0, "discard incomplete candidate projection without ACK");
@@ -1115,5 +1390,66 @@ async function runFrameContracts(frames) {
   console.log(`${passed} same-frame passed, ${failed} failed`);
   if (failed) process.exitCode = 1;
 }
-(process.argv.includes("--frames-stdin") ? runFrameContracts(JSON.parse(fs.readFileSync(0, "utf8"))) : run())
-  .catch(error => {console.error(error); process.exitCode = 1;});
+async function replayRepeat({query, ready, rounds, details}) {
+  const reads = [];
+  const h = loadHome({fetchDetails: async (url, options) => {
+    reads.push(url);
+    assert.equal(options.method, "GET");
+    return new Response(details[url], {status: Object.hasOwn(details, url) ? 200 : 404});
+  }});
+  h.socket.emit(ready);
+  h.input.value = query;
+  h.send();
+  const chats = () => h.socket.sent.filter(frame => frame.type === "chat");
+  const results = [];
+  for (const [i, frames] of rounds.entries()) {
+    assert.equal(chats().length, i + 1, "exactly one request for this round");
+    assert.equal(chats()[i].message, query);
+    assert.equal(chats()[i].result_format, "summary_details_v1");
+    for (const frame of frames) {
+      assert.equal(chats().length, i + 1, "wait for the terminal frame before dispatching");
+      h.socket.emit(frame);
+      if (frame.type === "agent_result") results.push(frame);
+    }
+  }
+  await tick();
+  h.flushTimers();
+  await tick();
+  assert.equal(chats().length, rounds.length, "no additional round after stop");
+  assert.equal(results.length, rounds.length);
+  const boxes = h.chat.querySelectorAll(".assistant-wrapper .message-box");
+  assert.equal(boxes.length, rounds.length);
+  const finalText = boxes.at(-1).getAttribute("data-content");
+  if (results.at(-1).status === "failed") {
+    assert(finalText.includes(`第 ${rounds.length}/3 次运行失败，已停止比较。此前返回结果的轮次：${rounds.length - 1}。`));
+  } else {
+    assert(finalText.includes("3 次运行的工具顺序一致"));
+  }
+
+  assert.deepEqual(reads, [], "details are read on demand");
+  for (const [i, result] of results.entries()) {
+    if (result.status === "failed") continue;
+    const box = boxes[i];
+    const answer = result.display_answer;
+    const visible = box.querySelector(".message-content").textContent;
+    assert(answer && visible.includes(i < results.length - 1 ? answer : answer.split("\n")[0]));
+    const root = box.querySelector(".home-result-details");
+    assert(root?.isConnected);
+    await root.expand();
+    const ref = result.details;
+    assert.equal(reads.at(-1), `/api/agent/runs/${result.trace_id}/result-details/${ref.view_id}?revision=${ref.revision}`);
+    const steps = root.querySelectorAll("details").find(node => node.children[0]?.textContent === "计算步骤（5）");
+    assert(steps, "render the stored steps for this round");
+    await steps.expand();
+    assert.deepEqual(steps.querySelectorAll("summary").map(node => node.textContent),
+      ["计算步骤（5）", "分子性质计算", "类药性评估", "ADMET 预测", "活性预测", "反向寻靶"]);
+  }
+  assert.equal(reads.length, Object.keys(details).length);
+  assert.equal(chats().length, rounds.length, "opening historical details does not submit another turn");
+}
+
+const mode = process.argv[2];
+const replay = {"--frames-stdin": runFrameContracts, "--repeat-stdin": replayRepeat}[mode];
+(replay ? replay(JSON.parse(fs.readFileSync(0, "utf8"))) : run()).catch(error => {
+  console.error(error); process.exitCode = 1;
+});

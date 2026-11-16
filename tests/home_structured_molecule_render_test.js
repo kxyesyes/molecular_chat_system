@@ -929,6 +929,7 @@ const behaviorMainSource = mainSource
       lifecycle: moleculeCandidateLifecycle,
       sendMessage,
       renderMoleculeCandidatesOriginal,
+      displayRAGInfo,
       getSocket: () => ws,
       setElements: (value) => Object.assign(elements, value),
       setSocket: (value) => { ws = value; isConnected = true; },
@@ -963,6 +964,7 @@ const behaviorSandbox = {
   HomeFormatters: { formatContent: (value) => String(value ?? "") },
   HomeChatRenderer: {
     getCurrentTime: () => "12:00",
+    isNearBottom() { return false; },
     scrollToBottom() {},
     showNotification: (...args) => behaviorNotifications.push(args),
     updateConnectionStatus() {},
@@ -1175,4 +1177,38 @@ assert(
   "Template must load safety dependencies before candidate helper and main after it",
 );
 
+require("node:test")("copying from generated and retrieved molecule cards", async (t) => {
+  behaviorChat.replaceChildren();
+  behaviorHooks.displayRAGInfo([{ smiles: "CCN" }]);
+  const cards = [
+    [metadataTrustContainer, metadataTrustPayload.candidates[0].canonical_smiles],
+    [behaviorChat, "CCN"],
+  ];
+  for (const [container, expected] of cards) {
+    const button = container._descendants().find(node => node.tagName === "BUTTON" && node.textContent.includes("复制"));
+    const details = container._descendants().find(node => node.tagName === "DETAILS" && node.textContent.includes(expected));
+    assert(button && details, "copy action and SMILES details must belong to the rendered card");
+    for (const mode of ["unavailable", "denied", "success"]) {
+      await t.test(`${expected} / ${mode}`, async () => {
+        let copied;
+        behaviorNotifications.length = 0;
+        details.open = false;
+        behaviorSandbox.navigator = mode === "unavailable" ? {} : { clipboard: {
+          writeText: async (value) => {
+            if (mode === "denied") throw new Error("permission denied");
+            copied = value;
+          },
+        } };
+        await button.onclick();
+        const [message, type] = behaviorNotifications.at(-1) || [];
+        if (mode === "success") {
+          assert(copied === expected && type === "success", "confirm a successful write of the exact card SMILES");
+        } else {
+          assert(type === "error" && message.includes("手动复制"), "offer a manual copy when clipboard access fails");
+          assert(details.open, "show the full structure for manual copying");
+        }
+      });
+    }
+  }
+});
 console.log("Structured molecule candidate frontend checks passed");

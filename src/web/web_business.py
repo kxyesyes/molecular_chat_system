@@ -2107,14 +2107,11 @@ class WebTurnProjection:
             answer = '本次为通用实验规划，未分析所提供的结构；名称和具体药理信息尚未核验。\n\n' + answer
             view = {'final_answer': answer, 'summary_answer': answer,
                     'suppress_raw_answer': True, 'status': 'partial' if intro_only else 'completed', 'warnings': []}
-        from src.agent.planning.request_parsing import positive_intent_text
-        if (re.search(r'分辨率\s*(?:最高|最好|最优)|(?:最高|最好|最优)\s*(?:的)?\s*分辨率|'
-                      r'\b(?:highest|best)\s+resolution\b', positive_intent_text(self.query), re.I)
-                and any(item.tool_name == 'target_database_search' and item.success
-                        and item.quality.get('validated') is True for item in result.tool_results)):
+        from src.agent.tools.target_observation import target_resolution_limit
+        if (any(item.tool_name == 'target_database_search' and item.success
+                and item.quality.get('validated') is True for item in result.tool_results)
+                and target_resolution_limit(self.query) is not None):
             view = view or {'warnings': []}
-            notice = '当前检索结果不保证覆盖全部 PDB 记录，无法确认全库分辨率最高的结构；以下为已检索记录。'
-            view['prefix'] = '\n\n'.join(filter(None, (view.get('prefix'), notice)))
             view.update(status='partial', success=False, partial=True)
         from src.agent.contracts.docking_intent import docking_readiness_requested
         if (docking_readiness_requested(self.query)

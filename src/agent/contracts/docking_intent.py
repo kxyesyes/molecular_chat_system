@@ -24,6 +24,17 @@ _STRONG_ACTION = re.compile(r'(?:把|将|让)\s*[^，,。；;!?！？\n]{1,100}?
                             r'对接\s*[A-Za-z][A-Za-z0-9@+\-\[\]()=#\\/%.]{1,}', re.I)
 
 
+_ENERGY_PROHIBITION = re.compile(
+    r'(?:(?:没有|缺少|未提供|没有提供)\s*(?:真实|有效|完整)?\s*(?:docking|对接)\s*参数时?\s*[,，]?\s*)?'
+    r'(?:不要|无需|不需要|禁止|别)\s*(?:给出?|报告|提供|展示|输出|编造)\s*'
+    r'(?:docking\s+energ(?:y|ies)\b|对接(?:结合)?能)|'
+    r"\b(?:do\s+not|don't|never)\s+(?:report|provide|give|invent)\s+(?:a\s+)?docking\s+energ(?:y|ies)\b", re.I)
+
+
+def without_docking_energy_prohibition(query: str) -> str:
+    return _ENERGY_PROHIBITION.sub('', query)
+
+
 def docking_readiness_requested(query: str) -> bool:
     return isinstance(query, str) and _READINESS.search(query) is not None
 
@@ -68,8 +79,10 @@ def explicit_docking_action(query: str) -> bool:
     from src.agent.target_structure_followup import parse_domain_suitability_question
     if parse_domain_suitability_question(query):
         return False
-    clauses = _CLAUSES.split(query)
+    clauses = _CLAUSES.split(without_docking_energy_prohibition(query))
     for index, clause in enumerate(clauses):
+        clause = re.sub(r'是否建议\s*(?:docking\b|(?:分子)?对接)|'
+                        r'(?:最)?适合后续\s*(?:docking\b|(?:分子)?对接)\s*的', '', clause, flags=re.I)
         clause = _SUITABILITY.sub('', clause)
         clause = _QUESTION.sub('', clause)
         clause = _REFERENCE_QUESTION.sub('', clause)

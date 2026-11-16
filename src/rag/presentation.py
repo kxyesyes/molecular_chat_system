@@ -9,13 +9,20 @@ def _display_value(value):
         return None
     if isinstance(value, (dict, list, tuple)):
         return json.dumps(value, ensure_ascii=False)
-    return round(float(value), 2) if isinstance(value, (int, float)) else str(value)
+    return value if isinstance(value, (int, float)) else str(value)
+
+
+def _retrieval_score(record):
+    score = record.get("similarity_score")
+    if score is not None and (type(score) not in (int, float) or not math.isfinite(score)):
+        raise ValueError("Invalid retrieval score")
+    return score
 
 
 def rag_info_molecule(record):
     result = {
         "smiles": record.get("SMILES", ""),
-        "similarity": round(float(record.get("similarity_score", 0)), 3),
+        "similarity": _retrieval_score(record),
         "properties": {
             key: displayed for key, value in record.items()
             if key not in {"SMILES", "similarity_score", "source_index", "provenance"}
@@ -33,8 +40,9 @@ def format_rag_context(molecules):
         return ""
     parts = ["Relevant molecular data found:"]
     for position, record in enumerate(molecules, 1):
+        score = _retrieval_score(record)
         parts.append(f"{position}. SMILES: {record.get('SMILES', 'Unknown')} "
-                     f"(similarity: {record.get('similarity_score', 0):.3f})")
+                     f"(similarity: {score if score is not None else 'not provided'})")
         for key, value in record.items():
             if key not in {"SMILES", "similarity_score"} and _display_value(value) is not None:
                 rendered = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list, tuple)) else value

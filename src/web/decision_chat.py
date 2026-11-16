@@ -15,6 +15,7 @@ from src.agent.persistence.redaction import redact_sensitive, sanitize_bounded
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.worker_ownership import WorkerCleanupError
 from .model_lifecycle import finish_on_cancel
+from src.agent.tools.target_observation import resolution_preview, target_resolution_limit
 
 
 MAX_PENDING_EVENTS = 128
@@ -341,8 +342,8 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False, requested_en
     return '\n'.join(lines)
 
 
-def _activity_display_answer(data, *, concise=False):
-    """Render allowlisted activity observations for the result summary."""
+def activity_display_rows(data):
+    """Keep only activity rows that appear in the user-facing result."""
     rows = []
     for row in data or ():
         if not isinstance(row, dict):
@@ -355,6 +356,12 @@ def _activity_display_answer(data, *, concise=False):
                 'predicted_pIC50', 'activity_probability', 'value', 'probability')):
             continue
         rows.append(row)
+    return rows
+
+
+def _activity_display_answer(data, *, concise=False):
+    """Render allowlisted activity observations for the result summary."""
+    rows = activity_display_rows(data)
     if not rows:
         return ''
     lines = ['## 活性预测结果', '']
@@ -390,7 +397,8 @@ def _activity_display_answer(data, *, concise=False):
     return '\n'.join(lines).rstrip()
 
 
-def _target_display_answer(data, evidence_id=None, *, concise=False, experimental_only=False, include_function=True):
+def _target_display_answer(data, evidence_id=None, *, concise=False, experimental_only=False, include_function=True,
+                           resolution_limit=None):
     """Render the bounded target lookup rows without exposing audit JSON."""
     if not isinstance(data, list):
         return ''
@@ -442,14 +450,20 @@ def _target_display_answer(data, evidence_id=None, *, concise=False, experimenta
     for row in rows:
         structures = row.get('recommended_structures')
         if not isinstance(structures, list):
-            if not experimental_only:
-                continue
             structures = []
-        if not structures and not experimental_only:
+        if not structures and not experimental_only and resolution_limit is None:
             continue
         target = _display_cell(row.get('gene_symbol', row.get('target_name', '靶点')))
         lines.extend(['', f'**{target} 检索到的结构记录**'])
-        if experimental_only:
+        if resolution_limit is not None:
+            searched = row.get('searched_structure_count', len(structures))
+            structures, comparable = resolution_preview(structures, resolution_limit)
+            comparable = row.get('comparable_structure_count', comparable)
+            lines.append(f'本次检索 {searched} 条结构记录，其中 {comparable} 条实验结构有可比较的分辨率。'
+                         f'按分辨率数值从小到大列出 {len(structures)} 条，无法确认全库分辨率最高的结构。')
+            if resolution_limit > 20:
+                lines.append('单次最多展示 20 条结构。')
+        elif experimental_only:
             structures = [structure for structure in structures if isinstance(structure, dict)
                           and structure.get('structure_type') == 'experimental']
             if not structures:
@@ -479,10 +493,11 @@ def _target_display_answer(data, evidence_id=None, *, concise=False, experimenta
                 f'配体 ID：{_display_cell(ligand_text)}。'
             )
         count = row.get('structure_count')
-        if experimental_only:
-            lines.append('结构记录总数包括其他类型；此处仅展示已返回的实验结构。')
-        elif type(count) is int and count > len(structures[:20]):
-            lines.append(f'当前展示 {len(structures[:20])} 条，记录总数为 {count}；结构列表未完整展示。')
+        if resolution_limit is None:
+            if experimental_only:
+                lines.append('结构记录总数包括其他类型；此处仅展示已返回的实验结构。')
+            elif type(count) is int and count > len(structures[:20]):
+                lines.append(f'当前展示 {len(structures[:20])} 条，记录总数为 {count}；结构列表未完整展示。')
         if any(isinstance(structure, dict) and structure.get('cache_status') == 'unverified'
                for structure in structures[:20]):
             lines.append('本地结构记录尚未核验；用于对接前，请按靶点和 PDB 编号重新查询结构。')
@@ -617,6 +632,10 @@ def web_scientific_display(result, *, concise=False, requested_admet_endpoints=(
                         and type(lipinski.get('compliance')) is bool):
                     verdict = '符合' if lipinski['compliance'] else '不符合'
                     lines.append(f"Lipinski 五规则：{verdict}本工具判定，违反 {lipinski['violation_count']} 项（允许至多 1 项）。")
+                    labels = {'molecular_weight': '分子量', 'logp': 'logP', 'hba': 'HBA', 'hbd': 'HBD'}
+                    violations = [labels[key] for key in lipinski.get('violations', []) if key in labels]
+                    if violations:
+                        lines.append('超限指标：' + '、'.join(violations) + '。')
                     properties = assessment.get('molecular_properties', {})
                     if isinstance(properties, dict):
                         fields = (('分子量 (Da)', 'molecular_weight'), ('logP', 'logp'),
@@ -670,19 +689,32 @@ def web_scientific_display(result, *, concise=False, requested_admet_endpoints=(
         elif name == 'candidate_ranker' and isinstance(data, dict):
             rows = data.get('top_candidates', [])
             if rows:
+                evidence = [row.get('ranking_evidence', {}) for row in rows]
+                if all(e.get('weights_used') == {'properties': .5, 'admet': .25, 'activity': .25}
+                       for e in evidence):
+                    section = ['## 候选排序', '',
+                               '| 排名 | SMILES | 性质（50%） | ADMET（25%） | 活性（25%） | 优先级分数 |',
+                               '|---:|---|---:|---:|---:|---:|']
+                    for row, scores in zip(rows, evidence):
+                        values = (row['rank'], row['canonical_smiles'], scores['property_score'],
+                                  scores['admet_score'], scores['activity_score'], row['score'])
+                        section.append('| ' + ' | '.join(map(_display_cell, values)) + ' |')
+                    lines.insert(0, '\n'.join(section))
+                    continue
                 section = ['## 候选排序', '', '| 排名 | SMILES | 优先级分数 |', '|---:|---|---:|']
                 for row in rows:
                     section.append('| ' + ' | '.join(_display_cell(row.get(key)) for key in
                         ('rank', 'canonical_smiles', 'score')) + ' |')
-                evidence = [row.get('ranking_evidence', {}) for row in rows]
                 if all(e.get('weights_used') == {'properties': .5, 'admet': None, 'activity': None}
                        and e.get('admet_score') is None and e.get('activity_score') is None for e in evidence):
                     section.append('排序依据：0.5 ×（0.7 × QED + 0.3 × LogP 区间评分）；仅使用分子性质。')
                 lines.append('\n'.join(section))
         elif name == 'target_database_search' and data:
+            query = result.metadata.get('task_requirements', {}).get('request', {}).get('query', '')
             lines.append(_target_display_answer(data, block.get('evidence_id'), concise=concise,
                                                 experimental_only=experimental_only,
-                                                include_function=include_target_function))
+                                                include_function=include_target_function,
+                                                resolution_limit=target_resolution_limit(query)))
         elif (name == 'target_database_search' and (data is None or data == [])
               and block.get('lookup_status') == 'not_found'
               and block.get('status') == 'succeeded'
@@ -1133,7 +1165,8 @@ async def _deliver_result(handler, websocket, frames, execution):
                     'data': [row for block in approved for row in block['data']]}}}
                 _, warnings = await handler._send_agent_rag_results(sender, cards, rag_count)
                 for warning in warnings:
-                    await sender.send_text(json.dumps({'type':'status', 'message':warning}, ensure_ascii=False))
+                    await sender.send_text(json.dumps({'type':'status', 'stage':'retrieval_cards',
+                        'message':warning}, ensure_ascii=False))
 
     # The loop's worker ledger is already sealed. Retain this separate async
     # child without cancelling it: cancellation of a to_thread wrapper is not
@@ -1261,6 +1294,16 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
             raise asyncio.CancelledError()
         frames = await _prepare_result_frames(handler, result, display_changed,
             websocket=websocket, store=decision_loop.store, business_view=business_view)
+        if web_projection and (activity := web_projection.entry.get('activity_evidence')):
+            # Only this rendered list establishes ordinal authority. A ranked,
+            # truncated or replaced summary can have a different row order.
+            rows = activity['observations'][0]['data']
+            block = _activity_display_answer(rows, concise=True)
+            frame = json.loads(frames[0])
+            if (activity['trace_id'] == result.trace_id and block
+                    and frame.get('status') in {'completed', 'partial'}
+                    and block in (frame.get('display_answer') or '')):
+                web_projection.entry['activity_display_order'] = [r['smiles'] for r in activity_display_rows(rows)]
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError()
     except Exception:

@@ -19,6 +19,86 @@ MALFORMED = [
 ASPIRIN = "CC(=O)Oc1ccccc1C(=O)O"
 
 
+@pytest.mark.parametrize("query,count,properties", [
+    ("请生成两个符合 Lipinski 五规则的类药分子。", 2, False),
+    ("设计三个满足五规则的分子。", 3, False),
+    ("生成两个候选；要求符合 Lipinski 五规则。", 2, False),
+    ("生成两个候选，要求符合 Lipinski 五规则。", 2, False),
+    ("Generate two drug-like molecules satisfying the Lipinski rule of five.", 2, False),
+    ("生成两个符合 Lipinski 的分子，并计算它们的分子量。", 2, True),
+])
+def test_generation_checks_lipinski_on_generated_structures(query, count, properties):
+    from src.web.scientific_obligations import ScientificObligationCompiler
+    assert not ScientificObligationCompiler.is_profile_candidate(query)
+    prepared = prepare(query)
+    req = prepared.requirements
+    assert req.workflow_name == 'molecular_design' and req.metadata['requested_count'] == count
+    assert req.request['query'] == query
+    assert prepared.required_tools == {'llm_molecular_generator', 'drug_likeness_assessment',
+                                       *({'property_calculator'} if properties else set())}
+    for step in req.steps[1:]:
+        assert step.input_binding == '$.outputs.result'
+        assert req.dependencies[step.name] == ('molecular_design',)
+
+
+def test_generation_with_no_lipinski_check_keeps_generation_only():
+    assert prepare('生成两个分子，不要评估 Lipinski 五规则。').required_tools == {'llm_molecular_generator'}
+
+
+def test_existing_molecule_evaluation_preserves_generation_prohibition():
+    prepared = prepare('不要生成分子，只评估 CCO 是否符合 Lipinski 五规则。')
+    assert 'drug_likeness_assessment' in prepared.required_tools
+    assert 'llm_molecular_generator' not in prepared.required_tools
+
+
+def test_generation_cannot_replace_other_subject_or_skip_additional_admet():
+    for query in ('生成两个分子，再评估 CCO 是否符合 Lipinski 五规则。',
+                  '生成两个符合 Lipinski 的分子，同时预测 ADMET。'):
+        with pytest.raises(DecisionAdmissionError):
+            prepare(query)
+
+
+def test_lipinski_optimization_reuses_the_seed_and_checks_its_candidates():
+    req = prepare('优化 CCO，生成两个符合 Lipinski 五规则的分子。').requirements
+    assert req.workflow_name == 'hit_to_lead_optimization'
+    assert 'CCO' in req.steps[0].input_data
+    check, = [s for s in req.steps if s.tool_name == 'drug_likeness_assessment']
+    assert check.input_binding == '$.outputs.candidates' and check.metadata['require_lipinski_compliance']
+
+
+def test_generation_with_an_opted_out_goal_does_not_require_assessment():
+    assert prepare('生成两个分子，不要求符合 Lipinski 五规则。').required_tools == {'llm_molecular_generator'}
+    assert prepare('生成两个符合 Lipinski 的分子，先不做 ADMET。').required_tools == {
+        'llm_molecular_generator', 'drug_likeness_assessment'}
+
+
+def test_lipinski_generation_goal_uses_the_observed_verdict():
+    import json
+    from src.agent.scientific_session.web_acceptance import _scientific_data, web_observation_reasons
+    from src.agent.contracts import AgentResult, RunOutcome, ToolProvenance
+    from src.web.decision_chat import web_scientific_display
+    from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
+    from src.system.tool_adapter import execute_tool_compat
+    query = '生成一个符合 Lipinski 五规则的分子。'
+    step, = [s for s in prepare(query).requirements.steps if s.name == 'drug_likeness']
+    rows = []
+    for smiles, expected in [('CCO', True), ('C' * 40, False)]:
+        result = execute_tool_compat(DrugLikenessAssessment(), smiles)
+        assert result.data[0]['assessment']['lipinski_rule_of_five']['compliance'] is expected
+        result.quality['evidence_id'] = 'fixture'
+        result.provenance = ToolProvenance(tool_name='drug_likeness_assessment')
+        reasons = web_observation_reasons(result, {'input_data': {'query': smiles}}, step, request_query=query)
+        assert reasons == ([] if expected else ['lipinski_goal_not_satisfied'])
+        rows.extend(_scientific_data(result))
+    audit = json.dumps({'acceptance': {'profile': 'medchat-web-v1'}, 'observations': [{
+        'tool': 'drug_likeness_assessment', 'evidence_id': 'fixture', 'status': 'succeeded', 'data': rows}]})
+    result = AgentResult('display', False, audit, final_answer=audit, outcome=RunOutcome.PARTIAL,
+                         metadata={'binding_profile': 'medchat-web-v1'})
+    text = web_scientific_display(result, concise=True)
+    assert text.index('CCO') < text.index('C' * 40) < text.index('不符合')
+    assert '超限指标：分子量、logP' in text
+
+
 def prepare(query, **options):
     return prepare_web_request(
         {"message": query, "enable_rag": False, **options},

@@ -300,7 +300,9 @@
     if (key === "status" && typeof value === "string") {
       text = own(STATUS, value) ? STATUS[value] : value === "succeeded" ? "已完成" : value;
     }
-    const pre = element(state, "pre", "", "home-result-details__value"); parent.appendChild(pre);
+    const quantity = typeof value === "number" || numericText(value) !== undefined || key === "unit" || key === "units";
+    const pre = element(state, "pre", "", quantity ? "home-result-details__value home-result-details__quantity" : "home-result-details__value");
+    parent.appendChild(pre);
     let offset = 0;
     const page = () => {
       // Avoid splitting a Unicode surrogate pair at a display page boundary.

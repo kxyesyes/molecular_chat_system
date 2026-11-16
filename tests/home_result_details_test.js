@@ -128,6 +128,11 @@ async function run() {
     assert.equal(sections.length, 2);
     assert(sections[0].textContent.includes("CCO") && sections[1].textContent.includes("CCN"));
     for (const section of sections) {section.open = true; await section.dispatch("toggle");}
+    const cells = sections[0].all().filter(n => n.tagName === "pre" && n.parentNode.tagName === "td");
+    for (const value of ["0.1", "-6.2", "hr"]) {
+      assert(cells.some(n => n.textContent === value && n.className.includes("home-result-details__quantity")), value);
+    }
+    assert(cells.some(n => n.textContent === "hERG" && !n.className.includes("home-result-details__quantity")));
     assert(sections[0].textContent.includes("hERG") && sections[0].textContent.includes("0.1"));
     assert(sections[0].textContent.includes("Half_Life_Obach") && sections[0].textContent.includes("-6.2"));
     assert(sections[0].textContent.includes("超出物理范围，预测不可用"));
@@ -532,6 +537,7 @@ async function run() {
   });
   await test("CSS is scoped and supports native disclosure, keyboard focus and narrow overflow", () => {
     const css = fs.readFileSync(path.join(__dirname, "../src/web/static/css/result_details.css"), "utf8");
+    assert(/\.home-result-details__table\s+\.home-result-details__quantity\s*\{[^}]*white-space:\s*nowrap/.test(css));
     assert(css.includes(".home-result-details")); assert(css.includes(":focus-visible"));
     assert(/overflow-x:\s*auto/.test(css)); assert(!/url\(|@import/.test(css));
     for (const selector of css.replace(/\/\*[\s\S]*?\*\//g, "").split("}")) {

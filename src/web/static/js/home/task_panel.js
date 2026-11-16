@@ -8,14 +8,14 @@ window.HomeTaskPanel = {
     const existing = reuse && container.querySelector?.(".agent-task-panel");
     if (existing) return existing;
 
-    const panel = ownerDocument.createElement("div");
+    const panel = ownerDocument.createElement("details");
     panel.className = "agent-task-panel";
-    const header = ownerDocument.createElement("div");
+    const header = ownerDocument.createElement("summary");
     header.className = "agent-task-header";
     const copy = ownerDocument.createElement("div");
     const title = ownerDocument.createElement("div");
     title.className = "agent-task-title";
-    title.textContent = "智能任务执行";
+    title.textContent = "任务进度";
     copy.appendChild(title);
     const progress = ownerDocument.createElement("div");
     progress.className = "agent-task-progress";
@@ -33,6 +33,7 @@ window.HomeTaskPanel = {
   reset(panel) {
     if (!panel) return;
     panel.classList.add("is-active");
+    panel.querySelector(".agent-task-title").textContent = "任务进度";
     const progress = panel.querySelector?.(".agent-task-progress");
     const list = panel.querySelector?.(".agent-task-list");
     if (progress) progress.textContent = "执行中";
@@ -44,6 +45,7 @@ window.HomeTaskPanel = {
 
   showWaiting(panel) {
     if (!panel) return;
+    panel.querySelector(".agent-task-title").textContent = "任务进度";
     const progress = panel.querySelector?.(".agent-task-progress");
     if (progress) progress.textContent = "等待补充输入";
     // The caller owns the trace and verified that the last lifecycle event
@@ -83,6 +85,7 @@ window.HomeTaskPanel = {
 
     const progress = panel.querySelector?.(".agent-task-progress");
     if (progress) progress.textContent = progressText;
+    panel.querySelector(".agent-task-title").textContent = label === progressText ? "任务进度" : label;
     return true;
   },
 };

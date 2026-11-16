@@ -91,6 +91,24 @@ def looks_like_design(query: str) -> bool:
     return has_generation_intent(query) and not target_lookup_result_annotation(query)
 
 
+def requests_lipinski_compliant_candidates(query: str) -> bool:
+    """Recognize a rule the newly generated molecules must meet."""
+    rule = r"(?:Lipinski(?:['’]s)?|利平斯基|五规则|rule[ -]of[ -]five)"
+    compliance = (r"(?<!不)(?:符合|满足|遵循)\s*" + rule
+                  + r"|\b(?:satisf(?:y|ying)|meet(?:ing)?|follow(?:ing)?|comply(?:ing)?\s+with)\s+(?:the\s+)?" + rule
+                  + r"|" + rule + r"[ -]compliant\b")
+    positive = positive_intent_text(query)
+    if not looks_like_design(positive):
+        return False
+    for clause in re.split(r"[，,；;。\n]", positive):
+        if not re.search(compliance, clause, re.I) or re.search(r"不(?:要求|必|用)|\bnot\b", clause, re.I):
+            continue
+        if looks_like_design(clause) or re.match(
+                r"\s*(?:要求|且|并|均|都|各候选|候选分子|它们)?\s*(?:均|都)?\s*(?:" + compliance + ")", clause, re.I):
+            return True
+    return False
+
+
 def requests_generated_properties(query: str) -> bool:
     """Recognize an explicit descriptor step whose subject is the generated candidates."""
     text = positive_intent_text(query)
@@ -235,6 +253,8 @@ def positive_intent_text(query: str) -> str:
     This is shared by routing and deterministic planning. In particular the
     mere occurrence of a tool/endpoint in a prohibition is not authorization.
     """
+    from src.agent.contracts.docking_intent import without_docking_energy_prohibition
+    query = without_docking_energy_prohibition(query)
     text = re.sub(r"不要\s*跳过|do\s+not\s+skip|don't\s+skip", "", query, flags=re.I)
     # Keep punctuation intact: it can be part of a receptor path, a decimal
     # docking-box coordinate, or the canonical generation grammar.
@@ -250,7 +270,7 @@ def positive_intent_text(query: str) -> str:
             clause = restart['positive']
         # Also cover the ordinary object-before-prohibition order.
         clause = re.sub(
-            r"(?:admet|adme|毒性|活性|对接|docking|类药性)\s*" + _NEGATION + r".*$",
+            r"(?:admet|adme|毒性|活性|RG-MPNN|对接|docking|类药性)\s*" + _NEGATION + r".*$",
             "", clause, flags=re.I,
         )
         output.append(re.split(_NEGATION, clause, maxsplit=1, flags=re.I)[0])
@@ -266,12 +286,14 @@ def wants_activity(query: str) -> bool:
     """Return true only for a positive activity request, not a negation."""
     if not isinstance(query, str):
         return False
-    return bool(re.search(r"活性|\b(?:potency|activity|inhibition)\b",
+    return bool(re.search(r"活性|\b(?:potency|activity|inhibition)\b|(?<![A-Za-z0-9_-])RG-MPNN(?![A-Za-z0-9_-])",
                           positive_intent_text(query), re.I))
 
 
 def property_calculation_forbidden(query: str) -> bool:
     """A design bound does not override an explicit descriptor prohibition."""
+    from src.agent.contracts.docking_intent import without_docking_energy_prohibition
+    query = without_docking_energy_prohibition(query)
     text = re.sub(r"不要\s*跳过|do\s+not\s+skip|don't\s+skip", "", query, flags=re.I)
     operation = r"(?:(?:计算|运行|执行|评估|预测|进行)|\b(?:calculat\w*|comput\w*|run\w*|perform\w*|predict\w*)\b)"
     subject = r"(?:(?:候选)?(?:分子的?)?(?:理化性质|性质|描述符|分子量)|property_calculator\b|\b(?:properties|property|descriptors?|MW|logP|TPSA|QED|HBA|HBD)\b)"

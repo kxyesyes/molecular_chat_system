@@ -312,6 +312,22 @@ def test_tool_uses_application_prewarm_without_lazy_reload_or_waiting(tmp_path, 
     assert tool._predictor is None
 
 
+def test_failed_source_validation_tells_user_how_to_resume(tmp_path, monkeypatch):
+    from src.agent.tools.reverse_target_tool import ReverseTargetTool
+    monkeypatch.setenv("REVERSE_TARGET_DATA_DIR", str(tmp_path))
+    tool = ReverseTargetTool()
+    try:
+        tool.start_preload()
+        tool._source_runtime._thread.join(10)
+        result = tool.execute("CCO")
+        assert result["data"] is None
+        assert "参考库未通过校验" in result["message"]
+        assert "恢复参考库后重试" in result["message"]
+        assert str(tmp_path) not in result["message"]
+    finally:
+        tool.close()
+
+
 def test_injected_predictor_remains_borrowed_and_cannot_start_prewarm(tmp_path):
     from src.agent.tools.reverse_target_tool import ReverseTargetTool
     producer, _ = write_source(tmp_path / "source")

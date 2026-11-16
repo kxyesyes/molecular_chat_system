@@ -40,16 +40,11 @@ def scientific_clarification(query, required_tools):
     return GENERIC
 
 
-def has_valid_molecular_input(query, required_tools):
-    """Return whether a continuation supplies a complete validated molecule.
-
-    This is intentionally narrower than ``has_explicit_molecule``: a malformed
-    replacement must remain on the clarification path and must never be sent to
-    a scientific tool just because it has a ``SMILES:`` marker.
-    """
+def has_valid_molecular_input(query, required_tools, *, max_bytes=MAX_EXPLANATION_INPUT_BYTES):
+    """Check whole candidates, applying the short input limit for clarification by default."""
     if not MOLECULAR_INPUT_TOOLS.intersection(required_tools):
         return False
-    if not isinstance(query, str) or len(query.encode('utf-8')) > MAX_EXPLANATION_INPUT_BYTES:
+    if not isinstance(query, str) or (max_bytes is not None and len(query.encode('utf-8')) > max_bytes):
         return False
     try:
         from rdkit import rdBase

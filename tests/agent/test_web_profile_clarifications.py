@@ -19,6 +19,9 @@ def reply(case, text):
     'SMILES: CCO; temperature: 1.5',
     'SMILES: CCO; logP < 2',
     'SMILES: CCO; predict quantum orbital energies',
+    'SMILES: CCO。不要计算了',
+    'SMILES: CCO 做 ADMET 预测',
+    'SMILES 是 CCO 的结构，请再做活性预测',
     '生成 5 个候选分子',
 ])
 @pytest.mark.parametrize('observed', [False, True])
@@ -42,12 +45,22 @@ def test_exact_acknowledgement_and_same_molecule_preserve_action(make, text):
     assert before.action_sha256 == after.action_sha256
 
 
-def test_complete_missing_molecule_can_be_added(make):
+@pytest.mark.parametrize('field', ['SMILES: CCO', 'SMILES 是 CCO。', 'SMILES 为 CCO'])
+def test_complete_missing_molecule_can_be_added(make, field):
     case = make(query='计算理化性质和类药性')
-    reply(case, 'SMILES: CCO')
+    reply(case, field)
     result = execute(case, case.steps[0])
     assert result.success, result.to_legacy_dict()
     assert result.data[0]['smiles'] == 'CCO'
+
+
+@pytest.mark.parametrize('text', ['SMILES: CCO，CCN', 'SMILES: CCO 和 SMILES: CCN'])
+def test_confirming_the_same_complete_batch_preserves_the_binding(make, text):
+    case = make(query='计算理化性质和类药性；SMILES: CCO；SMILES: CCN')
+    before = case.resolver.resolve(decision(case.steps[0]))
+    reply(case, text)
+    after = case.resolver.resolve(decision(case.steps[0]))
+    assert before.action_sha256 == after.action_sha256
 
 
 def test_same_original_request_does_not_create_new_authority(make):

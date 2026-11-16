@@ -169,6 +169,20 @@ def test_partial_target_lookup_is_not_reported_as_success():
     assert raw["success"] is False
 
 
+@pytest.mark.parametrize('change', [
+    {'warnings': [{}]}, {'quality': 'invalid'}, {'data': [{'recommended_structures': [{}], 'structure_count': 'many'}]},
+    {'error': {'code': 'provider_error', 'message': 'unavailable'}},
+])
+def test_truncated_preview_does_not_override_typed_validation(boundary, monkeypatch, change):
+    make, call = boundary
+    tool = TargetDatabaseTool()
+    raw = {'success': True, 'status': 'partial', 'data': [target_row()],
+           'quality': {'service_statuses': ['resolved']}, 'warnings': ['structure_list_truncated'], **change}
+    monkeypatch.setattr(tool, 'execute', lambda query: raw)
+    result = call(lambda: SingleAttemptTool(make(tool)).execute({'query': 'EGFR'}))
+    assert not result.success and result.error is not None and result.data is None
+
+
 @pytest.mark.parametrize('kind', ['legacy_target_name', 'reverse', 'other_tool'])
 def test_domain_mapping_never_applies_by_name_alone_or_other_tools(boundary, kind):
     make, call = boundary

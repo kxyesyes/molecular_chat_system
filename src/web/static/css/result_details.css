@@ -62,6 +62,9 @@
   max-width: 100%;
   overflow-x: auto;
 }
+.home-result-details__table .home-result-details__quantity {
+  white-space: nowrap;
+}
 .home-result-details table {
   border-collapse: collapse;
   width: 100%;

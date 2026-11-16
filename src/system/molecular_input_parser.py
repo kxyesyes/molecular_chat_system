@@ -140,7 +140,8 @@ def parse_molecular_inputs(text, tool, *, prose_pattern=None):
                 continue
             # A Chinese comma separates the labeled field from the following
             # clause; inspect that clause for further structures as usual.
-            fields = re.split(r'[\r\n；。，;]', field_text, maxsplit=1)
+            fields = re.split(r'[\r\n；。，;]|\.[ \t]+(?=[\u4e00-\u9fff])',
+                              field_text, maxsplit=1)
             values.append(_labeled_field_value(fields[0].strip(), tool))
             if len(fields) > 1:
                 values.extend(_bare_values(fields[1], tool, prose_pattern))

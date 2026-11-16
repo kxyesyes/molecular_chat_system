@@ -48,6 +48,29 @@ def synthetic_rows():
     return rows
 
 
+@pytest.mark.parametrize('position,smiles', [('第二', 'CCN'), ('第1', 'CCO'), ('第三', None)])
+def test_activity_consistency_followup_uses_delivered_row(tmp_path, position, smiles):
+    from tests.agent.pi_web_support import run_web_turn
+
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+    _, first = run_web_turn(handler, '预测 CCO 和 CCN 对 BuChE 的活性。', history,
+                            SESSION, result_format='summary_details_v1')
+    delivered = next(frame['display_answer'] for frame in first if frame['type'] == 'agent_result')
+    assert delivered.index('SMILES：CCO') < delivered.index('SMILES：CCN')
+    _, follow = run_web_turn(handler, f'解释刚才{position}个分子的分类和回归预测是否一致。不要重新计算。',
+                             history, SESSION, result_format='summary_details_v1')
+    result = next(frame for frame in follow if frame['type'] == 'agent_result')
+    assert len(activity.calls) == 1
+    if smiles is None:
+        assert result['status'] == 'not_calculated' and '序号' in result['display_answer']
+    else:
+        assert result['status'] in {'completed', 'partial'}
+        assert smiles in result['display_answer']
+        assert ('CCO' if smiles == 'CCN' else 'CCN') not in result['display_answer']
+        assert ('不一致' if smiles == 'CCN' else '一致') in result['display_answer']
+
+
 def test_generated_activity_evidence_requires_exact_candidate_and_target_alignment():
     from src.agent.evidence_followup import accepted_generated_activity_evidence
     raw = accepted_result(synthetic_rows())

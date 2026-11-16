@@ -348,15 +348,17 @@ class TaskPlanner:
         bounds, unknown = requested_property_bounds(query)
         include_properties = (not request_parsing.property_calculation_forbidden(query)
                               and bool(bounds or unknown or request_parsing.requests_generated_properties(query)))
+        check_lipinski = request_parsing.requests_lipinski_compliant_candidates(query)
         return WorkflowPlan(
             workflow_name="molecular_design",
             steps=step_templates.molecular_design_steps(
                 build_generation_request(query, requested_count),
                 **({"include_properties": True} if include_properties else {}),
+                **({"check_lipinski": True} if check_lipinski else {}),
             ),
             metadata={
                 "input_type": "structured_generation_request",
-                "atomic": not include_properties,
+                "atomic": not (include_properties or check_lipinski),
                 "requested_count": requested_count,
             },
         )
@@ -396,6 +398,7 @@ class TaskPlanner:
             workflow_name="hit_to_lead_optimization",
             steps=step_templates.lead_optimization_steps(
                 query, generation_request=build_generation_request(query, requested_count),
+                **({"check_lipinski": True} if request_parsing.requests_lipinski_compliant_candidates(query) else {}),
             ),
             metadata={
                 "input_type": "lead_molecule",

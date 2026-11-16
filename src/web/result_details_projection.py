@@ -1,7 +1,7 @@
 """Single-copy presentation DTOs, without changing scientific execution state."""
 import re
 from src.agent.contracts import AgentResult, ToolResult
-from src.agent.scientific_session.decision_bounds import observation_value, validate_json
+from src.agent.scientific_session.decision_bounds import observation_value, prediction_batch_limits, validate_json
 from src.agent.scientific_session.decision_policy import DecisionBoundaryError
 from src.system.scientific_public_data import MAX_DETAIL_BYTES, MAX_DETAIL_NODES, public_scientific_data
 
@@ -136,6 +136,8 @@ def project_result_details(result, *, summary, status, error, warnings):
             for row in observation.data:
                 validate_json(row, max_bytes=byte_limit, reason='result_details_invalid')
             byte_limit, node_limit = MAX_DETAIL_BYTES, MAX_DETAIL_NODES
+        elif result.metadata.get('binding_profile') == 'medchat-web-v1' and type(observation) is ToolResult:
+            byte_limit, node_limit = prediction_batch_limits(observation.tool_name, observation.data)
         value = observation_value(observation, max_bytes=byte_limit, max_nodes=node_limit)
         # The legacy formatted rendering duplicates data and is never authority.
         value.pop('formatted', None)

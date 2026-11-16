@@ -112,8 +112,16 @@ window.HomeTaskStatus = (() => {
     let match = /^ADMET evidence was absent or unusable for (\d+) ranked candidate\(s\)$/.exec(text);
     if (match) return `${match[1]} 个候选缺少可用的 ADMET 证据。`;
     match = /^Activity evidence was absent, demo, fallback, or unusable for (\d+) ranked candidate\(s\)$/.exec(text);
-    return match ? `${match[1]} 个候选缺少可用的活性证据。` : text;
+    if (match) return `${match[1]} 个候选缺少可用的活性证据。`;
+    match = /^Required evidence was missing for (\d+) candidate\(s\); those candidates are not assessment-complete$/.exec(text);
+    return match ? `${match[1]} 个候选尚未满足本次排序的全部证据要求，请结合已完成的预测复核。` : text;
   }
+
+  const targetWarnings = new Map([
+    ["structure_list_truncated", "仅返回部分结构列表"],
+    ["structure_resolution_missing", "部分实验结构缺少分辨率"],
+    ["partial_authoritative_results", "靶点检索记录不完整"],
+  ]);
 
   function message(event) {
     const type = displayEventType(event?.event || event?.type, event?.payload);
@@ -136,7 +144,7 @@ window.HomeTaskStatus = (() => {
         "Physicochemical endpoints are calculated by RDKit inside ADMET-AI.",
         "Risk summary is a screening heuristic, not a safety conclusion.",
       ]);
-      const warnings = Array.isArray(event?.payload?.warnings)
+      let warnings = Array.isArray(event?.payload?.warnings)
         ? event.payload.warnings.filter(item => typeof item === "string" && !informational.has(item))
         : [];
       const optionalFailures = warnings.filter(item => optionalFailureMessage(item, toolName) !== item);
@@ -150,10 +158,13 @@ window.HomeTaskStatus = (() => {
         if (!independent.length) {
           return `${toolNames[toolName] || "计算步骤"}：步骤未完成；具体原因见失败步骤。`;
         }
-        text = independent.map(rankWarning).join("；");
-      } else {
-        text = warnings.map(item => rankWarning(optionalFailureMessage(item, toolName))).join("；");
+        warnings = independent;
       }
+      if (toolName === "target_database_search" && warnings.includes("structure_list_truncated")) {
+        warnings = warnings.filter(item => item !== "partial_authoritative_results");
+      }
+      text = warnings.map(item => toolName === "target_database_search" && targetWarnings.has(item)
+        ? targetWarnings.get(item) : rankWarning(optionalFailureMessage(item, toolName))).join("；");
     }
     text = optionalFailureMessage(text, toolName);
     for (const label of Object.values(toolNames)) {

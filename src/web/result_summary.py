@@ -208,12 +208,31 @@ def prepare_summary(handler, result, *, business_view=None):
             identifiers[evidence_id] = '该记录'
 
     def human_text(text):
+        if text == 'structure_list_truncated':
+            return '本次仅返回部分结构记录。'
+        if text == 'partial_authoritative_results':
+            return '靶点检索结果不完整。'
         rank_warning = re.fullmatch(r'ADMET evidence was absent or unusable for (\d+) ranked candidate\(s\)', text)
         if rank_warning:
             return f'{rank_warning.group(1)} 个候选缺少可用的 ADMET 证据。'
         rank_warning = re.fullmatch(r'Activity evidence was absent, demo, fallback, or unusable for (\d+) ranked candidate\(s\)', text)
         if rank_warning:
-            return f'{rank_warning.group(1)} 个候选缺少可用的活性证据。'
+            count = int(rank_warning.group(1))
+            # Read only the published projection. Rejected rankings carry no data.
+            rankings = [item['data'] for item in details.get('tool_result_sequence', [])
+                        if item['tool_name'] == 'candidate_ranker' and isinstance(item.get('data'), dict)]
+            if len(rankings) == 1:
+                excluded = [row['ranking_evidence']['activity'] for row in rankings[0].get('ranked_candidates', [])
+                            if row.get('ranking_evidence', {}).get('activity', {}).get('used') is False]
+                conflicts = sum(row.get('exclusion_reason') == 'classification_regression_conflict' for row in excluded)
+                if conflicts and len(excluded) == count:
+                    return (f'{count} 个候选的活性预测未计入排序。其中 {conflicts} 个的分类与回归预测不一致，'
+                            '请对照两项预测值及各自阈值复核。')
+            return f'{count} 个候选缺少可用的活性证据。'
+        rank_warning = re.fullmatch(r'Required evidence was missing for (\d+) candidate\(s\); '
+                                    r'those candidates are not assessment-complete', text)
+        if rank_warning:
+            return f'{rank_warning.group(1)} 个候选尚未满足本次排序的全部证据要求，请结合已完成的预测复核。'
         # This exact executor wrapper is bound to a verified observation. Keep
         # its concrete reason and the original warning in the detail snapshot.
         for prefix, label in optional_failure_prefixes:
@@ -247,13 +266,30 @@ def prepare_summary(handler, result, *, business_view=None):
     diagnostic = partial_projection({**details, 'metadata': result.metadata})
     internal_view_warnings = {'rank_source_unavailable'} if (business_view is not None
         and 'rank_source_unavailable' in business_view.get('warnings', [])) else set()
+    # The cited target view already states the exact scope of this incomplete
+    # ranking. Suppress only that same issue; other steps and warnings remain.
+    target_scope_shown = ('无法确认全库分辨率最高的结构' in safe_body
+                          and len(result.tool_results) == 1
+                          and result.tool_results[0].tool_name == 'target_database_search'
+                          and result.tool_results[0].success and result.tool_results[0].error is None)
     public_warnings = [human_text(item) for item in handler._sanitize_agent_warnings(
         [item for item in details['warnings']
          if item not in _ADMET_INFORMATIONAL_WARNINGS and item not in internal_view_warnings],
         reject_claims=terminal_failure)]
     issues = []
+    plan = result.metadata.get('task_requirements') or {}
+    uncovered_target = (plan.get('metadata') or {}).get('unsupported_activity_target')
+    if uncovered_target and has_observations:
+        issues.append(f'当前活性模型仅覆盖 PDE 和 BuChE，无法预测 {uncovered_target} 活性。本轮排序未计入活性。')
     generic_partial_issue = False
     if status == 'partial':
+        if (any(item.tool_name == 'reverse_target_predictor' and item.success and item.data == []
+                and item.quality.get('prediction_status') == 'verified_empty' for item in result.tool_results)
+                and plan.get('workflow_name') == 'comprehensive_evaluation'
+                and not any(item.tool_name == 'target_database_search' for item in result.tool_results)):
+            issues.append('当前相似度阈值下没有匹配靶点，已跳过后续结构检索。')
+        if re.search(r'重复执行\s*\d+\s*次', str(plan.get('request', {}).get('query', ''))):
+            issues.append('本轮只执行了一次工作流，尚未完成多轮一致性比较。')
         if result.metadata.get('stop_reason') == 'activity_target_conflict_or_unknown':
             issues.append('活性预测的靶点或物种不受支持、存在冲突或不明确；本次未进行活性预测。')
         for step in diagnostic['failed_steps']:
@@ -264,7 +300,7 @@ def prepare_summary(handler, result, *, business_view=None):
                 message = message.removesuffix(_ACTIVITY_INFORMATIONAL_SUFFIX)
             message = human_text(message)
             issues.append(f'{name}：{state}。{message}')
-        if not issues and not public_warnings:
+        if not issues and not public_warnings and not target_scope_shown:
             if has_observations and not details_error:
                 issues.append('部分请求尚未完成，详情见明细。')
                 generic_partial_issue = True

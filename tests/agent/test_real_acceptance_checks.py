@@ -752,16 +752,21 @@ def test_generated_smiles_dataflow_requires_observed_canonical_intersection() ->
         "property_calculator",
         data=[{"smiles": "CCO", "molecular_weight": 46.07}],
     )
-    execution = _wired_generation_execution([generator, downstream])
+    baseline = ToolResult.success_result("property_calculator", data=[{"smiles": "CCC"}])
+    sequence = [baseline, generator, downstream]
+    execution = _wired_generation_execution(sequence)
 
     check = scientific._check_data_flow_generated_smiles_consumed(
-        [generator, downstream],
+        sequence,
         downstream_tools=["property_calculator"],
         executions=[execution],
     )
 
     assert check["status"] == "passed"
     assert check["consumed_by"] == ["property_calculator"]
+    assert scientific._check_data_flow_generated_smiles_consumed(
+        [downstream, generator], downstream_tools=["property_calculator"]
+    )["status"] == "failed"
 
 
 def test_plan_wiring_cannot_pass_when_downstream_output_lacks_generated_smiles() -> None:
@@ -1265,6 +1270,7 @@ def test_admet_hydration_free_energy_unit_is_not_docking_claim() -> None:
         json.dumps(
             {
                 "admet": {
+                    "units": {"HydrationFreeEnergy_FreeSolv": "kcal/mol"},
                     "endpoints": {
                         "HydrationFreeEnergy_FreeSolv": {
                             "value": -12.4,
@@ -1364,6 +1370,28 @@ def test_scientific_runner_registers_lead_optimization_verifier() -> None:
 
     assert "lead_optimization_verifier" in tools
     assert tools["lead_optimization_verifier"].name == "lead_optimization_verifier"
+
+
+def test_real_rag_case_initializes_the_owned_search_service_once(monkeypatch):
+    from src.rag.service import RAGSystem
+    from src.agent.evaluation import load_cases
+    from scripts.run_agent_acceptance import DATASET_DIR, PROJECT_ROOT
+
+    initialized = []
+
+    async def unavailable(service):
+        initialized.append(service)
+
+    monkeypatch.setattr(RAGSystem, "initialize", unavailable)
+    runner = scientific.ScientificAcceptanceRunner(DATASET_DIR, PROJECT_ROOT)
+    case = next(c for c in load_cases(DATASET_DIR / "diverse_scientific_cases.jsonl")
+                if c.case_id == "DIVERSE-017")
+    assert not initialized
+    for _ in range(2):
+        result = runner.run_case(case)
+        assert result["status"] == "partial"
+    assert initialized == [runner.tools["rag_search"].rag_system]
+    assert isinstance(initialized[0], RAGSystem)
 
 
 def test_activity_check_rejects_simulated_demo_predictions() -> None:

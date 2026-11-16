@@ -37,6 +37,51 @@ def test_target_adapter_preserves_requested_species():
     assert TargetToolAdapter._validate_input(adapter, payload) == payload
 
 
+@pytest.mark.parametrize('query,expected', [
+    ('列出三个分辨率最高的实验结构', 3), ('列出分辨率最高的四个 PDB 条目', 4),
+    ('找出分辨率最高的结构', 1), ('Find the best-resolution structure', 1),
+    ('List the three highest resolution structures', 3),
+    ('按分辨率从高到低给出前 5 项', 5), ('列出分辨率最高的25个 PDB', 25),
+    ('列出可用结构，不按分辨率最高排序', None),
+    ('不用按最高分辨率排序', None), ('查找人源 EGFR 的实验结构和分辨率', None),
+])
+def test_structure_ranking_request_selects_only_positive_scope(query, expected):
+    from src.agent.tools.target_observation import target_resolution_limit
+    assert target_resolution_limit(query) == expected
+
+
+def test_ranked_lookup_cannot_rank_fallback_preview_after_enumeration_failure(monkeypatch):
+    class Service:
+        def search_targets(self, query, **kwargs):
+            return {'status': 'resolved', 'results': [{'target_id': 1, 'gene_symbol': 'EGFR',
+                'uniprot_id': 'P00533', 'recommended_structures': [{'structure_id': '1M17',
+                    'source': 'RCSB_PDB', 'structure_type': 'experimental', 'resolution': 2.6}]}]}
+        def get_target_structures(self, target_id):
+            raise OSError('test only')
+    tool = TargetDatabaseTool()
+    monkeypatch.setattr(tool, '_get_service', lambda: Service())
+    result = tool.execute({'query': 'EGFR', 'resolution_limit': 1})
+    assert not result['success'] and not result['data'][0]['recommended_structures']
+    assert '无法核对' in ' '.join(result['warnings'])
+
+
+def test_resolution_preview_reports_display_limit_with_a_larger_request():
+    from src.web.decision_chat import _target_display_answer
+    structures = [{'structure_id': f'1A{i:02}', 'source': 'RCSB_PDB', 'structure_type': 'experimental',
+                   'resolution': 2.5} for i in range(20)]
+    data = [{'gene_symbol': 'EGFR', 'searched_structure_count': 27, 'comparable_structure_count': 27,
+             'recommended_structures': structures}]
+    assert '单次最多展示 20 条' in _target_display_answer(data, resolution_limit=25)
+
+
+@pytest.mark.parametrize('value', [True, 0, -1, 21, '3'])
+def test_target_adapter_rejects_invalid_resolution_limit(value):
+    from src.agent.tooling.target_contract import TargetSearchInput
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        TargetSearchInput.model_validate({'query': 'EGFR', 'resolution_limit': value})
+
+
 def test_target_species_cannot_accept_a_mismatched_service_result(monkeypatch):
     class Service:
         def search_targets(self, query, **kwargs):
@@ -184,6 +229,35 @@ def test_long_structure_list_reports_truncation(monkeypatch):
     assert result['status'] == 'partial' and 'structure_list_truncated' in result['warnings']
     assert len(result['data'][0]['recommended_structures']) == 20
     assert '当前展示 20 条，记录总数为 21' in _target_display_answer(result['data'], concise=True)
+    identity = tool.execute('PDE4A')
+    assert identity['status'] == 'resolved'
+    assert 'structure_list_truncated' in identity['warnings']
+
+
+def test_named_target_comparison_keeps_structure_examples_for_each_identity(monkeypatch):
+    class Service:
+        def search_targets(self, query, **kwargs):
+            target_id = 1 if query in ('PDE5A', 'PDE5') else 2
+            return {'status': 'resolved', 'results': [{'target_id': target_id,
+                'gene_symbol': ('PDE5A', 'EGFR')[target_id - 1], 'structure_count': 30,
+                'has_experimental_structure': True, 'has_alphafold_structure': True}]}
+
+        def get_target_structures(self, target_id):
+            return {'structures': [{'structure_id': f'{target_id}{i:03d}',
+                'title': 'x' * 1200, 'source': 'AlphaFold' if i == 29 else 'RCSB_PDB',
+                'structure_type': 'predicted' if i == 29 else 'experimental'} for i in range(30)]}
+
+    tool = TargetDatabaseTool()
+    monkeypatch.setattr(tool, '_get_service', lambda: Service())
+    for query, expected_count in [(['PDE5A', 'EGFR'], 2), (['PDE5A', 'PDE5'], 1)]:
+        result = tool.execute(query)
+        assert result['status'] == 'resolved'
+        assert len(result['data']) == expected_count
+        for target in result['data']:
+            assert target['structure_count'] == 30
+            assert {row['source'] for row in target['recommended_structures']} == {'RCSB_PDB', 'AlphaFold'}
+            assert all(row['structure_id'] in result['formatted'] for row in target['recommended_structures'])
+        assert len(json.dumps(result).encode()) < 48 * 1024
 
 
 @pytest.mark.parametrize('query', [

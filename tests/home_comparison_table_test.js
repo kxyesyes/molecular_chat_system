@@ -19,6 +19,17 @@ const input = [
   "来源：已验证工具结果。",
 ].join("\n");
 const html = render(input);
+const scientific = render('## 候选排序\n\n' + input + '\n\n## 活性预测结果\n`#N`\n```text\n## 原始记录\n```', {displayKind: 'scientific_summary'});
+assert(scientific.includes('<h3 class="home-result-heading">候选排序</h3>'));
+assert(scientific.includes('<h3 class="home-result-heading">活性预测结果</h3>'));
+assert(scientific.includes('## 原始记录') && scientific.includes('#N'));
+assert(!render('## <img src=x>', {displayKind: 'scientific_summary'}).includes('<img'));
+const structure = 'CCOC(=O)C(C)CNC(=O)c1ccc2c(c1)NC(=O)C(C)(C)O2';
+const summaryTable = render('| 排名 | SMILES | 活性 |\n| --- | --- | --- |\n| 1 | ' + structure + ' | 0.758019 |', {displayKind: 'scientific_summary'});
+assert(summaryTable.includes('<td class="home-structure-cell">' + structure + '</td>'));
+assert(summaryTable.includes('>0.758019</td>'));
+assert(render('| SMILES | MW |\n| --- | --- |\n| `CCO` | 46.07 |', {displayKind: 'scientific_summary'})
+  .includes('<td class="home-structure-cell">CCO</td>'));
 const combined = render(input + "\n类药性评估结果\nLipinski 五规则：符合。", {displayKind:"scientific_summary"});
 assert(combined.includes("<table") && combined.includes("Lipinski"));
 assert(!combined.includes("药物相似性与成药性分析"), "a single tool card cannot label a multi-tool summary");
@@ -41,7 +52,7 @@ for (const value of ["CCO", "46.07", "0", "6.123", "unavailable"]) {
   assert(wide.includes(">" + value + "</td>"), "all scientific values must remain intact: " + value);
 }
 const template = fs.readFileSync(path.join(__dirname, "../src/web/templates/index.html"), "utf8");
-assert(template.includes('/static/js/home/formatters.js?v=20261112-scientific-summary-v1'), "refresh must load the accessible formatter");
+assert(template.includes('/static/js/home/formatters.js?v=20261114-progress-v2'), "refresh must load the accessible formatter");
 
 const unsafe = render("| 分子 | 来源 |\n| --- | --- |\n| <img src=x onerror=alert(1)> | [link](javascript:alert) |");
 assert(!unsafe.includes("<img"), "Table cells must retain HTML escaping");
