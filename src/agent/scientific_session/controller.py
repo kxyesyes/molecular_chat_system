@@ -930,7 +930,7 @@ class ScientificSession:
                         and details.get('reason') == 'decision_http_error'):
                     if details.get('http_status') == 401:
                         raise DecisionBoundaryError('model_authentication_failed')
-                    if details.get('http_status') == 503:
+                    if details.get('http_status') == 503 and binding and any(map(usable, session.results)):
                         raise DecisionBoundaryError('model_service_unavailable')
                 if (self.runtime.binding_profile == 'medchat-web-v1' and error
                         and error.code == AgentErrorCode.INVALID_INPUT
