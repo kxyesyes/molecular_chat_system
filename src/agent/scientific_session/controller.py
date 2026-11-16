@@ -894,15 +894,15 @@ class ScientificSession:
                            if self.runtime.binding_profile == 'medchat-web-v1' else {})),
                     timeout=min(60, remaining))
             await boundary()
-            # The wire schema accepts a syntactically valid identifier. A known step
-            # with an unknown tool still needs a fresh, catalog-valid model decision.
-            # Reject it before Pi acknowledges a proposal or reserves a tool attempt.
+            # A known step paired with the wrong tool needs a fresh decision
+            # before Pi acknowledges a proposal or reserves a tool attempt.
             next_system_message = model_system_message
             proposed = response.decision
             matched_step = None
             if (repeat_evaluation and response.success and type(proposed) is ToolDecision
-                    and proposed.tool_name not in adapters and proposed.tool_name not in requirements.forbidden_tools):
-                matched_step = next((entry for entry in catalog if entry['arguments'] == proposed.arguments), None)
+                    and proposed.tool_name not in requirements.forbidden_tools):
+                matched_step = next((entry for entry in catalog if entry['arguments'] == proposed.arguments
+                                     and entry['name'] != proposed.tool_name), None)
             if matched_step is not None:
                 response = DecisionResponse(None, AgentExecutionError(AgentErrorCode.INVALID_OUTPUT,
                     'Tool name does not match the compiled action catalog', {'reason': 'invalid_decision_schema',

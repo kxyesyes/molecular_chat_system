@@ -212,6 +212,17 @@ async function run() {
     assert(h.chat.querySelectorAll(".message-box").some(box =>
       box.getAttribute("data-content")?.includes("第 2/3 次运行失败，已停止比较")));
   });
+  await test("an authorization stop retains partial results and ends the repeat", () => {
+    const h = loadHome(); h.ready("pi");
+    h.input.value = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
+    h.send(); h.socket.emit(accepted());
+    const frame = result("partial");
+    frame.metadata.stop_reason = "tool_not_authorized";
+    h.socket.emit(frame); h.socket.emit(complete("partial"));
+    assert.equal(h.socket.sent.filter(f => f.type === "chat").length, 1);
+    const body = h.chat.querySelectorAll(".message-box").at(-1).getAttribute("data-content");
+    assert(body.includes(frame.final_answer) && body.includes("已停止比较"));
+  });
   await test("missing structure restores the original task for editing without sending it", () => {
     const h = loadHome(); h.ready("pi");
     h.input.value = "帮我分析一下分子性质"; h.send(); h.socket.emit(accepted(turn, trace));
@@ -1108,7 +1119,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261114-repeat-v2"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261115-repeat-v3"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");

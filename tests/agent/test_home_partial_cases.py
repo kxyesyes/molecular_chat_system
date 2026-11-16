@@ -78,8 +78,15 @@ def test_optimization_model_observation_preserves_full_admet_for_verifier():
     assert result.data[0]['admet']['endpoints'] == {'one': 0.5}
 
 
-@pytest.mark.parametrize('bad_calls', [1, 2])
-def test_repeat_rejects_unknown_tool_for_valid_step_before_dispatch(tmp_path, strict_source_factory, bad_calls):
+@pytest.mark.parametrize(('bad_calls', 'wrong_name', 'expected_tool'), [
+    (1, 'unknown_property_tool', 'property_calculator'),
+    (2, 'unknown_property_tool', 'property_calculator'),
+    (1, 'admet_predictor', 'property_calculator'),
+    (2, 'admet_predictor', 'property_calculator'),
+    (2, 'admet_predictor', 'drug_likeness_assessment'),
+])
+def test_repeat_rejects_mismatched_tool_for_valid_step_before_dispatch(
+        tmp_path, strict_source_factory, bad_calls, wrong_name, expected_tool):
     from dataclasses import replace
     from pi_web_support import PlannedWebModel, make_web_handler, run_web_turn
     from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
@@ -88,12 +95,14 @@ def test_repeat_rejects_unknown_tool_for_valid_step_before_dispatch(tmp_path, st
     from tests.agent.test_target_driven_design_workflow import FakeTool
 
     class MismatchedName(PlannedWebModel):
+        mismatches = 0
+
         async def decide(self, messages, **kwargs):
             response = await super().decide(messages, **kwargs)
-            if len(self.messages) <= bad_calls:
-                assert response.decision.arguments == {'step_ref': 'properties'}
+            if self.mismatches < bad_calls and getattr(response.decision, 'tool_name', None) == expected_tool:
+                self.mismatches += 1
                 return replace(response, decision=response.decision.model_copy(
-                    update={'tool_name': 'unknown_property_tool'}))
+                    update={'tool_name': wrong_name}))
             return response
 
     plan = compile_web_requirements(AgentContext(CASES['DIVERSE-020'], 'test'), allowed_tools=WEB_TOOLS)
@@ -106,14 +115,17 @@ def test_repeat_rejects_unknown_tool_for_valid_step_before_dispatch(tmp_path, st
         complete, frames = run_web_turn(handler, CASES['DIVERSE-020'])
         events = [f['event'] for f in frames if f['type'] == 'agent_event']
         started = [e['tool'] for e in events if e['event'] == 'tool_started']
-        assert len(model.messages) >= 2
+        assert model.mismatches == bad_calls
         assert sum((e.get('payload') or {}).get('accepted') is False for e in events) == 1
         if bad_calls == 1:
             assert complete['status'] == 'partial'
             assert started == [s.tool_name for s in plan.steps if s.tool_name != 'target_database_search']
             assert handler.web_results[-1].tool_results[-1].quality['prediction_status'] == 'verified_empty'
-        else:
+        elif expected_tool == 'property_calculator':
             assert len(model.messages) == 2 and not started and complete['status'] == 'failed'
+        else:
+            assert started == ['property_calculator'] and complete['status'] == 'partial'
+            assert handler.web_results[-1].metadata['stop_reason'] == 'tool_not_authorized'
         assert not tools['target_database_search'].inputs
     finally:
         handler.agent_system.tool_registry.close()
