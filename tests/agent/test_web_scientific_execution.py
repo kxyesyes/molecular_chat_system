@@ -1395,6 +1395,37 @@ def test_missing_smiles_waits_for_input_without_scientific_tool(web_handler, que
                    for frame in frames)
 
 
+def test_missing_logp_value_resumes_with_supplied_smiles_over_websocket(actual_app):
+    from test_pi_web_input_budget import compiled_decision
+
+    async def run():
+        async with actual_app(ordinary_policy='medchat-web-v1', respond=compiled_decision) as bundle:
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                first = await socket.turn({'message': '请计算一下这个分子的 LogP 值。',
+                                           'enable_tools': True, 'result_format': 'summary_details_v1'})
+                waiting = result_of(first)
+                assert waiting['status'] == 'waiting_for_input'
+                store = bundle.app.agent_state_store
+                assert store.get_tool_executions(waiting['trace_id']) == []
+                assert 'SMILES' in first[-1]['content']
+                frames = await socket.turn({'type': 'resume', 'trace_id': waiting['trace_id'],
+                                            'continuation_id': first[-1]['continuation_id'],
+                                            'result_format': 'summary_details_v1',
+                                            'message': 'SMILES 是 CCO。'})
+                resumed = result_of(frames)
+                assert resumed['status'] == 'completed'
+                assert resumed['trace_id'] == waiting['trace_id']
+                step, = store.get_tool_executions(resumed['trace_id'])
+                assert step['tool_name'] == 'property_calculator' and step['status'] == 'succeeded'
+                record, = step['output']['data']
+                assert record['smiles'] == 'CCO'
+                assert record['properties']['logp'] == pytest.approx(-0.0014, abs=0.0005)
+                assert 'logp' in frames[-1]['content'].lower() and '-0.001' in frames[-1]['content']
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('reconnect', [False, True])
 @pytest.mark.parametrize('query,field', [
     ('请计算这个分子的 LogP', 'CCO'),
@@ -1489,6 +1520,7 @@ def test_browser_cannot_enable_missing_structure_admission(web_handler, query):
     '计算分子量和 logP。这个分子为阿司匹林。',
     '请帮我计算分子的分子量和 logP。这个分子为阿司匹林。',
     '请计算这个分子的 logP。分子为阿司匹林。',
+    '请计算一下这个分子的 LogP 值。分子为阿司匹林。',
     '计算这个分子的 logP。结构是阿司匹林。',
     '计算该分子的分子量。使用阿司匹林。',
     'Calculate the logP of this molecule. It is aspirin.',

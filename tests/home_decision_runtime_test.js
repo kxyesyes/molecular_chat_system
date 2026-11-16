@@ -72,7 +72,8 @@ class Element {
   closest(selector) {return this.matches(selector) ? this : this.parentNode?.closest(selector) || null;}
 }
 
-function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = null} = {}) {
+function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = null,
+                   advancedConfig = {ragCount: 3, temperature: 0.7, molCount: 1}} = {}) {
   const body = new Element("body"); body.root = true;
   const composer = body.appendChild(new Element("div")); composer.className = "chat-composer";
   const fill = composer.appendChild(new Element("div")); fill.className = "fill";
@@ -113,7 +114,7 @@ function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = 
   const context = vm.createContext({window, document, WebSocket: Socket, TextEncoder, AbortController, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
     HomeChatRenderer: renderer, HomeState: {}, HomeFormatters: {formatContent: (s, options) => {formatCalls.push(options); return String(s);}},
-    HomeAdvancedOptions: {getConfig: () => ({ragCount: 3, temperature: 0.7, molCount: 1})},
+    HomeAdvancedOptions: {getConfig: () => ({...advancedConfig})},
     setTimeout: (fn, ms) => {timers.set(++timer, {fn, ms}); return timer;}, clearTimeout: id => timers.delete(id),
     fetch: async (url, options) => {requests.push([url, JSON.parse(options.body)]);
       return {ok: true, json: async () => vm.runInContext("JSON.parse", context)(JSON.stringify({success: true,
@@ -133,7 +134,7 @@ function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = 
   let source = fs.readFileSync(path.join(home, "main.js"), "utf8");
   // Expose lexical entry points only in this VM; run the complete real script.
   source = source.replace(/\}\)\(\);\s*$/, `window.testHome = {connectWebSocket, sendMessage, elements, scientificReferences,
-    addUserMessage, addAssistantMessage, appendToLastMessage, displayRAGInfo, handleQuickAction,
+    addUserMessage, addAssistantMessage, appendToLastMessage, displayRAGInfo, handleQuickAction, toggleRAG,
     prepare() {chatMode = true; elements.input = window.testInput; elements.sendBtn = window.testSend;
       elements.chatContainer = window.testChat; bindEvents();}};})();`);
   Object.assign(window, {testInput: input, testSend: send, testChat: chat});
@@ -180,6 +181,63 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
+  const repeatQuery = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
+  await test("a provider authentication failure after a property result ends the repeat", () => {
+    const h = loadHome(); h.ready("pi", false, true);
+    h.input.value = repeatQuery; h.send(); h.socket.emit(accepted());
+    const frame = result("partial");
+    frame.metadata.stop_reason = "model_authentication_failed";
+    frame.final_answer = "分子量 46.07 Da。";
+    frame.error = {code: "validation_error", message: "模型服务返回 HTTP 401。"};
+    frame.result_format = "summary_details_v1"; frame.details_state = "available";
+    frame.details = {view_id: "00000000000040008000000000000001", revision: "a".repeat(64), byte_length: 100};
+    h.socket.emit(frame); h.socket.emit(complete("partial"));
+    assert.equal(h.socket.sent.filter(f => f.type === "chat").length, 1);
+    assert(h.chat.textContent.includes(frame.final_answer) && h.chat.textContent.includes("已停止比较"));
+    assert(h.chat.textContent.includes(frame.error.message));
+    assert.equal(h.detailsMounts.length, 1);
+    assert.deepEqual(h.detailsMounts[0].options.reference, frame.details);
+    assert.equal(h.detailsMounts[0].options.traceId, trace);
+  });
+  await test("all repeat requests retain the originally submitted settings", () => {
+    const advancedConfig = {ragCount: 3, temperature: 0.7, molCount: 1};
+    const h = loadHome({advancedConfig}); h.ready("pi", false, true);
+    h.input.value = repeatQuery; h.send();
+    const first = h.socket.sent.at(-1);
+    for (let i = 0; i < 3; i++) {
+      const t = String(i + 1).repeat(32), tr = String(i + 4).repeat(32);
+      h.socket.emit(accepted(t, tr));
+      if (i === 0) {
+        h.render.toggleRAG();
+        Object.assign(advancedConfig, {ragCount: 8, temperature: 0.2, molCount: 4});
+      }
+      h.socket.emit(result("completed", t, tr)); h.socket.emit(complete("completed", t, tr));
+    }
+    assert.deepEqual(h.socket.sent.filter(f => f.type === "chat"), [first, first, first]);
+    h.input.value = "另一个请求"; h.send();
+    assert.equal(h.socket.sent.at(-1).temperature, 0.2);
+    assert.equal(h.socket.sent.at(-1).enable_rag, true);
+  });
+  for (const selected of [false, true]) await test(`an explicit SMILES repeat supersedes a prior ${selected ? "selection" : "collection"}`, async () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    h.socket.emit(result("partial")); h.socket.emit(candidateEvent()); h.socket.emit(complete("partial"));
+    await tick();
+    assert(h.refs.outgoing().reference && !h.refs.outgoing().selection);
+    if (selected) h.body.querySelectorAll(".molecule-selection-button")[1].click();
+    const previous = h.refs.outgoing();
+    assert.equal(Boolean(previous.selection), selected);
+    h.input.value = repeatQuery; h.send();
+    for (let i = 0; i < 3; i++) {
+      const t = String(i + 3).repeat(32), tr = String(i + 6).repeat(32);
+      h.socket.emit(accepted(t, tr)); h.socket.emit(result("completed", t, tr)); h.socket.emit(complete("completed", t, tr));
+    }
+    const requests = h.socket.sent.filter(f => f.message === repeatQuery);
+    assert.equal(requests.length, 3);
+    assert(requests.every(f => !f.reference && !f.selection));
+    h.input.value = "计算上次候选的 logP"; h.send();
+    assert.deepEqual(h.socket.sent.at(-1).reference, previous.reference);
+    assert.deepEqual(h.socket.sent.at(-1).selection, previous.selection);
+  });
   await test("explicit repeated evaluation submits three serial turns and preserves composer draft", () => {
     const h = loadHome(); h.ready("pi");
     const q = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
@@ -1119,7 +1177,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261115-repeat-v3"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261116-repeat-v4"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");

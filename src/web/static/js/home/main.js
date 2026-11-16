@@ -314,24 +314,27 @@
 
   function sendDecisionMessage(resume = false, repeat = null) {
     if (typeof dockingUI !== "undefined" && dockingUI?.blocked()) return;
-    const message = repeat ? repeat.query : elements.input.value;
+    const message = repeat ? repeat.payload.message : elements.input.value;
     if (!message.trim() || decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
-    if (agentConfigInputVersion !== (agentConfigSavedInputVersion ?? 0)) {
+    if (!repeat && agentConfigInputVersion !== (agentConfigSavedInputVersion ?? 0)) {
       HomeChatRenderer.showNotification("模型配置有未保存的修改，请先保存。", "warning");
       return;
     }
-    const config = HomeAdvancedOptions.getConfig();
-    const payload = resume
-      ? {type: "resume", trace_id: decisionWaiting.traceId, continuation_id: decisionWaiting.nonce, message}
-      : {type: "chat", message, enable_rag: ragEnabled, enable_tools: toolsEnabled,
-        rag_count: config.ragCount, temperature: config.temperature, mol_count: config.molCount,
-        ...(scientificReferences?.outgoing() || {})};
-    if (decisionResultFormat) payload.result_format = decisionResultFormat;
-    if (!sendDecisionControl(payload)) return;
-    if (!resume && !repeat && !payload.reference && !payload.selection) {
+    const format = decisionResultFormat ? {result_format: decisionResultFormat} : {};
+    let payload;
+    if (repeat) {
+      payload = repeat.payload;
+    } else if (resume) {
+      payload = {type: "resume", trace_id: decisionWaiting.traceId, continuation_id: decisionWaiting.nonce, message, ...format};
+    } else {
       const request = /^\s*请?重复执行\s*([23])\s*次\s+[A-Za-z0-9@+\-\[\]()=#\\/.:%]+\s*的综合评价[，,]\s*比较每次调用的工具顺序[、，,]事件流和最终结论是否一致[。.!！]?\s*$/.exec(message);
-      if (request) repeat = {query: message, count: Number(request[1]), runs: []};
+      const config = HomeAdvancedOptions.getConfig();
+      payload = {type: "chat", message, enable_rag: ragEnabled, enable_tools: toolsEnabled,
+        rag_count: config.ragCount, temperature: config.temperature, mol_count: config.molCount, ...format};
+      if (request) repeat = {payload, count: Number(request[1]), runs: []};
+      else Object.assign(payload, scientificReferences?.outgoing());
     }
+    if (!sendDecisionControl(payload)) return;
     decisionTurn = {socket: ws, phase: "pending", turnId: null, traceId: null, requestText: message,
       resume: resume ? decisionWaiting : null, cancelSent: false, result: null, repeat, events: []};
     scientificReferences?.startRequest();
@@ -435,7 +438,9 @@
         if (baseText === diagnostic) baseText = explanation;
         if (structuredReason === diagnostic) structuredReason = explanation;
       }
-      const text = window.MedChatStatus.isNonSuccess(message.status) && structuredReason &&
+      const showFailureReason = window.MedChatStatus.isNonSuccess(message.status) ||
+        (message.status === "partial" && message.metadata?.stop_reason === "model_authentication_failed");
+      const text = showFailureReason && structuredReason &&
         !baseText.includes(structuredReason)
         ? `${baseText}\n\n失败原因：${structuredReason}` : baseText;
       let retrievalNotice = "";
@@ -497,8 +502,12 @@
       let finalText = text;
       const repeat = turn.repeat;
       const authorizationStopped = metadata.stop_reason === "tool_not_authorized";
-      const continueRepeat = repeat && !projectionFailed && !turn.cancelSent && !authorizationStopped &&
-        ["partial", "completed"].includes(status);
+      const comparablePartial = status === "partial" && (
+        (!metadata.stop_reason && !message.error) ||
+        ["model_finished", "prediction_needs_review", "task_requirements_unfulfilled",
+          "reverse_target_no_matches"].includes(metadata.stop_reason));
+      const continueRepeat = repeat && !projectionFailed && !turn.cancelSent &&
+        (status === "completed" || comparablePartial);
       if (continueRepeat) {
         repeat.runs.push({events: turn.events, tools: turn.events.filter(e => e[0] === "tool_started").map(e => e[1]),
           answer: text, status});
@@ -509,6 +518,8 @@
         }
       } else if (repeat && status === "partial" && authorizationStopped && !projectionFailed) {
         finalText += `\n\n第 ${repeat.runs.length + 1}/${repeat.count} 次运行的后续步骤未获授权，已停止比较。`;
+      } else if (repeat && status === "partial" && !comparablePartial && !projectionFailed) {
+        finalText += `\n\n第 ${repeat.runs.length + 1}/${repeat.count} 次运行中断，已停止比较。`;
       } else if (repeat && status === "failed" && !projectionFailed) {
         finalText += `\n\n第 ${repeat.runs.length + 1}/${repeat.count} 次运行失败，已停止比较。此前返回结果的轮次：${repeat.runs.length}。`;
       }

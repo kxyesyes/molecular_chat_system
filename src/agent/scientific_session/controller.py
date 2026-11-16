@@ -573,10 +573,17 @@ class ScientificSession:
         session.input_queries = [context.query]
         session._decision_observation_seals = MappingProxyType({})
         resolver = None
+        repeat_evaluation = False
         if binding:
             try:
                 resolver = await owned(lambda: policy.resolver(session=session, requirements=requirements,
                     original_context=journal.context(0), adapters=adapters, input_journal=journal))
+                if policy.is_web and requirements.workflow_name == 'comprehensive_evaluation':
+                    query = requirements.request['query']
+                    if re.search(r'重复执行\s*\d+\s*次', query):
+                        # Admission already bounded this request. Validate its full molecule on the worker.
+                        repeat_evaluation = await owned(lambda: has_valid_molecular_input(
+                            query, required_tools, max_bytes=None))
             except DecisionBoundaryError as exc:
                 return AgentResult(context.trace_id, False, 'Binding admission rejected',
                     error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Binding admission rejected'),
@@ -589,9 +596,6 @@ class ScientificSession:
         if model_query is not None:
             model_requirements = {**requirement_payload, 'request': {
                 **requirement_payload['request'], 'query': model_query, 'memory': []}}
-        repeat_evaluation = (binding and policy.is_web and requirements.workflow_name == 'comprehensive_evaluation'
-                             and re.search(r'重复执行\s*\d+\s*次', requirements.request['query'])
-                             and has_valid_molecular_input(requirements.request['query'], required_tools))
         system_message = decision_system_message(request_kind, required_tools, catalog, model_requirements,
             ordinary_capabilities=ordinary_capabilities if request_kind == 'chat' else None,
             binding_profile=self.runtime.binding_profile)
@@ -1499,7 +1503,8 @@ class ScientificSession:
                     and state.outcome in (RunOutcome.PARTIAL, RunOutcome.FAILED)
                     and (state.stop_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable',
                                                'reverse_target_no_matches', 'activity_target_conflict_or_unknown')
-                         or (state.outcome == RunOutcome.PARTIAL and state.stop_reason == 'tool_not_authorized'))):
+                         or (state.outcome == RunOutcome.PARTIAL
+                             and state.stop_reason in ('tool_not_authorized', 'model_authentication_failed')))):
                 state.answer = await owned(lambda: render_bound(resolver,
                     required_tools=required_tools, evidence_ids=None,
                     interruption_reason=state.stop_reason))

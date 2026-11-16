@@ -1004,7 +1004,7 @@ class ScientificObligationCompiler:
     @staticmethod
     def is_bare_generic_molecule_request(query: str) -> bool:
         """A reply may fill a missing molecule only in a wholly generic request."""
-        terms = [pattern.pattern for _, patterns in _METRIC_PATTERNS for pattern in patterns]
+        terms = [pattern.pattern + r'(?:\s*值)?' for _, patterns in _METRIC_PATTERNS for pattern in patterns]
         terms += [_PROPERTY_REQUEST.pattern, _DRUG_LIKENESS_REQUEST.pattern, _ADMET_PATTERN.pattern]
         term = '(?:' + '|'.join(terms) + r')(?:\s*(?:特征|风险))?'
         action = r'(?:计算|分析|评估|预测|返回|给出|列出)'

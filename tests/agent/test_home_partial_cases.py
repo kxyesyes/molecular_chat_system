@@ -78,15 +78,16 @@ def test_optimization_model_observation_preserves_full_admet_for_verifier():
     assert result.data[0]['admet']['endpoints'] == {'one': 0.5}
 
 
-@pytest.mark.parametrize(('bad_calls', 'wrong_name', 'expected_tool'), [
-    (1, 'unknown_property_tool', 'property_calculator'),
-    (2, 'unknown_property_tool', 'property_calculator'),
-    (1, 'admet_predictor', 'property_calculator'),
-    (2, 'admet_predictor', 'property_calculator'),
-    (2, 'admet_predictor', 'drug_likeness_assessment'),
+@pytest.mark.parametrize(('bad_calls', 'wrong_name', 'expected_tool', 'smiles'), [
+    (1, 'unknown_property_tool', 'property_calculator', 'CCO'),
+    (2, 'unknown_property_tool', 'property_calculator', 'CCO'),
+    (1, 'admet_predictor', 'property_calculator', 'CCO'),
+    (2, 'admet_predictor', 'property_calculator', 'CCO'),
+    (2, 'admet_predictor', 'drug_likeness_assessment', 'CCO'),
+    pytest.param(1, 'admet_predictor', 'property_calculator', 'C' + '[CH2]' * 60 + 'O', id='long-smiles'),
 ])
 def test_repeat_rejects_mismatched_tool_for_valid_step_before_dispatch(
-        tmp_path, strict_source_factory, bad_calls, wrong_name, expected_tool):
+        tmp_path, strict_source_factory, bad_calls, wrong_name, expected_tool, smiles):
     from dataclasses import replace
     from pi_web_support import PlannedWebModel, make_web_handler, run_web_turn
     from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
@@ -105,14 +106,15 @@ def test_repeat_rejects_mismatched_tool_for_valid_step_before_dispatch(
                     update={'tool_name': wrong_name}))
             return response
 
-    plan = compile_web_requirements(AgentContext(CASES['DIVERSE-020'], 'test'), allowed_tools=WEB_TOOLS)
+    query = CASES['DIVERSE-020'].replace('CCO', smiles)
+    plan = compile_web_requirements(AgentContext(query, 'test'), allowed_tools=WEB_TOOLS)
     tools = {step.tool_name: FakeTool(step.tool_name) for step in plan.steps}
     tools.update(property_calculator=PropertyCalculator(),
                  reverse_target_predictor=ReverseTargetTool(strict_source_factory(('[Na+]',))))
     model = MismatchedName()
     handler = make_web_handler(tools, SQLiteAgentStateStore(tmp_path / 'repeat.sqlite'), model=model)
     try:
-        complete, frames = run_web_turn(handler, CASES['DIVERSE-020'], result_format='summary_details_v1')
+        complete, frames = run_web_turn(handler, query, result_format='summary_details_v1')
         events = [f['event'] for f in frames if f['type'] == 'agent_event']
         started = [e['tool'] for e in events if e['event'] == 'tool_started']
         assert model.mismatches == bad_calls
@@ -137,6 +139,51 @@ def test_repeat_rejects_mismatched_tool_for_valid_step_before_dispatch(
         assert not tools['target_database_search'].inputs
     finally:
         handler.agent_system.tool_registry.close()
+
+
+def test_auth_failure_after_properties_publishes_verified_row_and_stop_reason(tmp_path):
+    from pi_web_support import PlannedWebModel, make_web_handler, run_web_turn
+    from src.agent.contracts import AgentErrorCode, AgentExecutionError
+    from src.agent.decision_transport import DecisionResponse
+    from src.agent.persistence.result_details import read_result_details
+    from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
+    from src.agent.tools.property_calculator import PropertyCalculator
+    from tests.agent.test_target_driven_design_workflow import FakeTool
+
+    class AuthFailureAfterProperties(PlannedWebModel):
+        async def decide(self, messages, **kwargs):
+            if self.messages:
+                return DecisionResponse(None, AgentExecutionError(AgentErrorCode.PROVIDER_ERROR,
+                    'Authentication failed', {'reason': 'decision_http_error', 'http_status': 401}),
+                    None, {'request_attempts': 1})
+            return await super().decide(messages, **kwargs)
+
+    query = CASES['DIVERSE-020']
+    plan = compile_web_requirements(AgentContext(query, 'test'), allowed_tools=WEB_TOOLS)
+    tools = {step.tool_name: FakeTool(step.tool_name) for step in plan.steps}
+    tools['property_calculator'] = PropertyCalculator()
+    store = SQLiteAgentStateStore(tmp_path / 'auth-stop.sqlite')
+    handler = make_web_handler(tools, store, model=AuthFailureAfterProperties())
+    try:
+        complete, frames = run_web_turn(handler, query, session='auth-stop', result_format='summary_details_v1')
+        frame = next(f for f in frames if f['type'] == 'agent_result')
+        assert complete['status'] == frame['status'] == 'partial'
+        assert frame['metadata']['stop_reason'] == 'model_authentication_failed'
+        assert '401' in frame['error']['message']
+        assert frame['details_state'] == 'available'
+        step, = store.get_tool_executions(frame['trace_id'])
+        assert step['tool_name'] == 'property_calculator'
+        ref = frame['details']
+        snapshot = read_result_details(store, frame['trace_id'], session_id='auth-stop',
+                                       view_id=ref['view_id'], revision=ref['revision'])
+        detail, = snapshot['payload']['tool_result_sequence']
+        assert detail['tool_name'] == step['tool_name'] and detail['data'] == step['output']['data']
+        row, = step['output']['data']
+        props = row['properties']
+        assert f"| `{row['smiles']}` | {props['molecular_formula']} | {props['molecular_weight']} |" in frame['display_answer']
+    finally:
+        handler.agent_system.tool_registry.close()
+
 
 def test_supplied_target_dispatches_pending_activity_even_if_model_asks_again(tmp_path):
     import asyncio
