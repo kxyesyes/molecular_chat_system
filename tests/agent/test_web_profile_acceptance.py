@@ -127,7 +127,7 @@ def test_partial_renderer_requires_exact_server_interruption_reason(make, reason
         api().render_web_scientific_answer(case.resolver, evidence_ids=None, interruption_reason=reason)
 
 
-@pytest.mark.parametrize('reason', ['decision_input_budget_exceeded', 'web_dependency_unusable'])
+@pytest.mark.parametrize('reason', ['decision_input_budget_exceeded', 'web_dependency_unusable', 'tool_not_authorized'])
 def test_interruption_render_cannot_repair_mutated_owned_science(make, reason):
     case = make()
     result = execute(case, 0)

@@ -1493,8 +1493,9 @@ class ScientificSession:
                 and request_kind == 'scientific' else None)
             if (self.runtime.binding_profile == 'medchat-web-v1' and request_kind == 'scientific'
                     and state.outcome in (RunOutcome.PARTIAL, RunOutcome.FAILED)
-                    and state.stop_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable', 'reverse_target_no_matches',
-                                              'activity_target_conflict_or_unknown')):
+                    and (state.stop_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable',
+                                               'reverse_target_no_matches', 'activity_target_conflict_or_unknown')
+                         or (state.outcome == RunOutcome.PARTIAL and state.stop_reason == 'tool_not_authorized'))):
                 state.answer = await owned(lambda: render_bound(resolver,
                     required_tools=required_tools, evidence_ids=None,
                     interruption_reason=state.stop_reason))

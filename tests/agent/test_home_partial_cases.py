@@ -112,7 +112,7 @@ def test_repeat_rejects_mismatched_tool_for_valid_step_before_dispatch(
     model = MismatchedName()
     handler = make_web_handler(tools, SQLiteAgentStateStore(tmp_path / 'repeat.sqlite'), model=model)
     try:
-        complete, frames = run_web_turn(handler, CASES['DIVERSE-020'])
+        complete, frames = run_web_turn(handler, CASES['DIVERSE-020'], result_format='summary_details_v1')
         events = [f['event'] for f in frames if f['type'] == 'agent_event']
         started = [e['tool'] for e in events if e['event'] == 'tool_started']
         assert model.mismatches == bad_calls
@@ -126,6 +126,14 @@ def test_repeat_rejects_mismatched_tool_for_valid_step_before_dispatch(
         else:
             assert started == ['property_calculator'] and complete['status'] == 'partial'
             assert handler.web_results[-1].metadata['stop_reason'] == 'tool_not_authorized'
+            frame = next(f for f in frames if f['type'] == 'agent_result')
+            assert frame['metadata']['stop_reason'] == 'tool_not_authorized'
+            assert frame['details_state'] == 'available'
+            row, = handler.web_results[-1].tool_results[0].data
+            props = row['properties']
+            assert '| SMILES | 分子式 | 分子量 (Da) |' in frame['final_answer']
+            assert (f"| `{row['smiles']}` | {props['molecular_formula']} | {props['molecular_weight']} | "
+                    f"{props['logp']} | {props['tpsa']} |") in frame['final_answer']
         assert not tools['target_database_search'].inputs
     finally:
         handler.agent_system.tool_registry.close()

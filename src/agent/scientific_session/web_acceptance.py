@@ -424,11 +424,9 @@ def _scientific_data(result):
 
 
 def render_web_scientific_answer(resolver, *, required_tools=(), evidence_ids, interruption_reason=None):
-    # A transport-budget/dependency stop is not a model finish or successful task. The
-    # server may still display already authenticated work without inventing a
-    # model citation or dropping evidence to squeeze in another model request.
+    # After an interruption, publish only the observations authenticated by the resolver.
     interrupted = interruption_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable', 'reverse_target_no_matches',
-                                         'activity_target_conflict_or_unknown')
+                                         'activity_target_conflict_or_unknown', 'tool_not_authorized')
     if ((interruption_reason is not None and not interrupted)
             or (interrupted and evidence_ids is not None)
             or (evidence_ids is None and not interrupted)):
