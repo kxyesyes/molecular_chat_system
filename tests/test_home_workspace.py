@@ -52,6 +52,47 @@ def test_project_document_question_archive_and_owner_isolation(tmp_path, monkeyp
     assert owner.post(base + "/projects", json={"name":"资料组"}).status_code == 409
 
 
+def test_same_named_uploads_keep_their_source_in_project_and_history(tmp_path, monkeypatch):
+    from urllib.parse import unquote
+    from src.web.routes.workspace_routes import setup_workspace_routes
+
+    monkeypatch.setenv("MEDCHAT_AGENT_SESSION_DB", str(tmp_path / "sessions.db"))
+    prompts = []
+    async def answer(prompt):
+        prompts.append(prompt)
+        return "测试回答"
+
+    app = FastAPI()
+    setup_agent_sessions(app)
+    setup_workspace_routes(app, tmp_path / "projects", answer)
+    base = "/api/workspace"
+    name = "测定记录 (复核).csv"
+    with TestClient(app, base_url="http://localhost") as client:
+        expected_history = {}
+        for project_name, batches in [("组一", ["春季", "夏季"]), ("组二", ["秋季"])]:
+            project = client.post(base + "/projects", json={"name": project_name}).json()["id"]
+            root = f"{base}/projects/{project}"
+            expected_docs = []
+            for number, batch in enumerate(batches, 1):
+                raw = ("批次\r\n" + batch + "\r\n").encode("utf-8-sig")
+                doc = client.post(root + "/documents", files={"file": (name, raw)}).json()["id"]
+                path = f"{base}/documents/{doc}"
+                downloaded = client.get(path)
+                assert downloaded.content == raw
+                assert unquote(downloaded.headers["Content-Disposition"]).endswith(name)
+                assert client.post(path + "/questions", json={"question": "哪一批？"}).is_success
+                assert batch in prompts[-1]
+                assert all(other not in prompts[-1] for other in ("春季", "夏季", "秋季") if other != batch)
+                ordinal = number if len(batches) > 1 else None
+                expected_docs.insert(0, (doc, name, ordinal))
+                expected_history[doc] = (project_name, ordinal)
+            detail = client.get(root).json()
+            assert [(d["id"], d["name"], d["upload_number"]) for d in detail["documents"]] == expected_docs
+            assert [(q["document_id"], q["name"], q["upload_number"]) for q in detail["questions"]] == expected_docs
+        history = client.get(base + "/questions").json()
+        assert {q["document_id"]: (q["project_name"], q["upload_number"]) for q in history} == expected_history
+
+
 def test_archive_uses_verified_result_and_owner(tmp_path, monkeypatch):
     from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
     from src.agent.persistence.result_details import publish_result_details

@@ -1947,7 +1947,7 @@
     documentQuestionPending = true;
     updateDecisionControls();
     if (!chatMode) enterChatMode();
-    addUserMessage(doc.name + " · " + question);
+    addUserMessage((doc.label || doc.name) + " · " + question);
     elements.input.value = "";
     showTypingIndicator();
     try {

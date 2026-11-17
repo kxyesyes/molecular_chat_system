@@ -16,6 +16,16 @@ from src.web.project_workspace import (
 from src.web.request_auth import require_browser_session
 
 
+_DOCUMENT_SOURCES = """
+    WITH sources AS (
+        SELECT id, project, name, rowid AS upload_order,
+               CASE WHEN count(*) OVER same_name > 1
+                    THEN row_number() OVER (same_name ORDER BY rowid) END AS upload_number
+        FROM documents WINDOW same_name AS (PARTITION BY project, name)
+    )
+"""
+
+
 class ProjectName(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 
@@ -64,11 +74,11 @@ def setup_workspace_routes(app: FastAPI, root: Path, answer_document, run_store=
     def detail(project: str, request: Request):
         with database(request) as db:
             result = require_project(db, project)
-            result["documents"] = [dict(r) for r in db.execute(
-                "SELECT id,name FROM documents WHERE project=? ORDER BY rowid DESC", (project,))]
-            result["questions"] = [dict(r) for r in db.execute(
-                """SELECT d.name,q.question,q.answer,q.created FROM questions q
-                   JOIN documents d ON d.id=q.document WHERE d.project=? ORDER BY q.id DESC""", (project,))]
+            result["documents"] = [dict(r) for r in db.execute(_DOCUMENT_SOURCES +
+                "SELECT id,name,upload_number FROM sources WHERE project=? ORDER BY upload_order DESC", (project,))]
+            result["questions"] = [dict(r) for r in db.execute(_DOCUMENT_SOURCES +
+                """SELECT d.id AS document_id,d.name,d.upload_number,q.question,q.answer,q.created
+                   FROM questions q JOIN sources d ON d.id=q.document WHERE d.project=? ORDER BY q.id DESC""", (project,))]
             result["bookmarks"] = [dict(r) for r in db.execute(
                 "SELECT kind,record,title FROM bookmarks WHERE project=? ORDER BY rowid DESC", (project,))]
             return result
@@ -124,9 +134,11 @@ def setup_workspace_routes(app: FastAPI, root: Path, answer_document, run_store=
     @app.get(base + "/questions")
     def questions(request: Request):
         with database(request) as db:
-            return [dict(r) for r in db.execute(
-                """SELECT d.project,d.name,q.question,q.answer,q.created FROM questions q
-                   JOIN documents d ON d.id=q.document ORDER BY q.id DESC LIMIT 100""")]
+            return [dict(r) for r in db.execute(_DOCUMENT_SOURCES +
+                """SELECT d.project,p.name AS project_name,d.id AS document_id,d.name,d.upload_number,
+                          q.question,q.answer,q.created
+                   FROM questions q JOIN sources d ON d.id=q.document JOIN projects p ON p.id=d.project
+                   ORDER BY q.id DESC LIMIT 100""")]
 
     @app.get(base + "/runs")
     def runs(request: Request):
