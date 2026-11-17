@@ -119,6 +119,22 @@ test("sidebar project, document question, and analysis archive work at phone wid
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
 });
 
+test("history explains an analysis without an archived result and still shows its events", async t => {
+  const page = await pageFor(t, "/", (route, url) => {
+    if (url.pathname === "/api/workspace/runs") return route.fulfill({json:[
+      {trace_id:"r1", title:"历史分析", status:"completed"}]});
+    if (url.pathname.endsWith("/reference")) return route.fulfill({contentType:"application/json",body:"null"});
+    if (url.pathname.endsWith("/events")) return route.fulfill({json:{data:{events:[{message:"执行结束"}]}}});
+    if (url.pathname === "/api/tasks") return route.fulfill({json:{data:[]}});
+    return route.fulfill({json:[]});
+  });
+  await page.locator("#openSidebarBtn").click();
+  await page.getByRole("button", {name:"分析记录",exact:true}).click();
+  await page.getByRole("button", {name:"查看记录"}).click();
+  await page.getByText("此记录未保存回答正文或结果明细。").waitFor({timeout:1500});
+  assert(await page.getByText("执行结束").isVisible());
+});
+
 test("homepage retains zero temperature and opens one knowledge graph per click", async t => {
   const page = await pageFor(t, "/");
   const more = page.locator(".index_con .right .more");

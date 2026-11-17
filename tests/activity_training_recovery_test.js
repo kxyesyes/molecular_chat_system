@@ -7,7 +7,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "../src/web/static/js/activity_prediction/training_monitor.js"), "utf8");
 
-function restore(fetch) {
+function restore(fetch, callbacks = {}) {
   const saved = new Map([["activeTrainJobId", JSON.stringify({jobId: "active-job", totalEpochs: 4})]]);
   const labels = {};
   const dock = {style: {}};
@@ -22,7 +22,7 @@ function restore(fetch) {
     clearInterval(fn) {timers.delete(fn);},
   };
   vm.runInNewContext(source, context);
-  context.window.ActivityTraining.initRecovery({});
+  context.window.ActivityTraining.initRecovery(callbacks);
   return {saved, labels, timers, dock};
 }
 
@@ -53,3 +53,22 @@ test("refresh discards a training job confirmed missing", async () => {
   assert.equal(state.timers.size, 0);
   assert.equal(state.dock.style.display, "none");
 });
+
+for (const first of ["canceled", "running"]) {
+  test("cancellation releases the recovered job after initial state " + first, async () => {
+    let phase = first;
+    const finished = [];
+    const state = restore(async () => ({
+      ok: true, status: 200, json: async () => ({success:true, status:{state:phase}}),
+    }), {onFinish: value => finished.push(value)});
+    await new Promise(resolve => setImmediate(resolve));
+    if (first === "running") {
+      phase = "canceled";
+      await [...state.timers][0]();
+    }
+    assert.deepEqual(finished, ["canceled"]);
+    assert.equal(state.saved.has("activeTrainJobId"), false);
+    assert.equal(state.timers.size, 0);
+    assert.equal(state.labels["dock-status-text"], "训练已取消");
+  });
+}

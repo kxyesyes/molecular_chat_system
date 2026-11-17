@@ -73,6 +73,7 @@ window.HomeWorkspace = (() => {
         if (kind === "run") {
           const reference = await request(base + "/runs/" + encoded + "/reference");
           if (reference) window.HomeResultDetails.mount(content, {traceId:key, reference});
+          else content.append(node("p", "此记录未保存回答正文或结果明细。"));
           const events = response.data.events || [];
           for (const e of events) content.append(node("p", e.message || e.event));
           if (!events.length) content.append(node("p", "尚无运行事件"));

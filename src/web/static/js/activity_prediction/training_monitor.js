@@ -189,6 +189,16 @@ window.ActivityTraining = (function () {
     activeTimer = null;
   }
 
+  function finishCanceled(callbacks) {
+    stopPolling();
+    localStorage.removeItem("activeTrainJobId");
+    ActivityUtils.setText("dock-status-text", "训练已取消");
+    ActivityUtils.setText("d-status", "训练已取消");
+    const dot = document.getElementById("dock-dot");
+    if (dot) dot.className = "dock-dot";
+    callbacks?.onFinish?.("canceled");
+  }
+
   function startPolling(jobId, totalEpochs, callbacks) {
     const options = callbacks || {};
     const startTime = Date.now();
@@ -212,6 +222,10 @@ window.ActivityTraining = (function () {
         }
 
         const status = payload.status;
+        if (status.state === "canceled") {
+          finishCanceled(options);
+          return;
+        }
         const rawProgress = Number(status.progress ?? 0);
         const progress = Number.isFinite(rawProgress)
           ? Math.max(0, Math.min(100, rawProgress))
@@ -311,6 +325,10 @@ window.ActivityTraining = (function () {
       fetch(`/api/activity/train/status/${parsed.jobId}`)
         .then(async function (response) {
           const payload = response.ok ? await response.json() : null;
+          if (payload?.success && payload.status?.state === "canceled") {
+            finishCanceled(callbacks);
+            return;
+          }
           if (response.status === 404 || (payload?.success &&
               ["completed", "failed"].includes(payload.status?.state))) {
             localStorage.removeItem("activeTrainJobId");
