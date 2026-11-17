@@ -144,18 +144,21 @@
   });
 
   async function saveMol() {
-    var smi = await Editor.getSMILES();
-    if (!smi) {
-      UI.toast("请先绘制分子", "error");
-      return;
-    }
-    if (S.propsSmiles !== smi || !S.curProps) {
-      setFeedback("当前分子的真实属性尚未完成，暂不保存，避免 SMILES 与属性错配。", "warn");
-      UI.toast("请等待当前分子属性计算完成", "warn");
-      return;
-    }
-
+    var button = document.getElementById("saveMolBtn");
+    if (button.disabled) return;
+    button.disabled = true;
+    button.textContent = "保存中…";
     try {
+      var smi = await Editor.getSMILES();
+      if (!smi) {
+        UI.toast("请先绘制分子", "error");
+        return;
+      }
+      if (S.propsSmiles !== smi || !S.curProps) {
+        setFeedback("当前分子的真实属性尚未完成，暂不保存，避免 SMILES 与属性错配。", "warn");
+        UI.toast("请等待当前分子属性计算完成", "warn");
+        return;
+      }
       var d = await Api.saveMolecule(smi, S.curProps);
       if (d.success) {
         setFeedback("当前分子已保存到设计结果目录。", "success");
@@ -165,8 +168,11 @@
         UI.toast("保存失败: " + d.error, "error");
       }
     } catch (_) {
-      setFeedback("网络异常，分子保存没有完成。", "error");
-      UI.toast("网络错误", "error");
+      setFeedback("分子保存失败，请检查结构和连接后重试。", "error");
+      UI.toast("分子保存失败", "error");
+    } finally {
+      button.disabled = false;
+      button.textContent = "保存当前分子";
     }
   }
 

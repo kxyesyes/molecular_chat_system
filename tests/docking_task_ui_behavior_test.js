@@ -41,6 +41,17 @@ const response = (data) => ({ ok: true, status: 200, json: async () => ({ succes
 const tests = [];
 function test(name, fn) { tests.push([name, fn]); }
 
+test("pose controls explain why an empty result cannot be viewed", () => {
+  const {context, get} = harness();
+  get("pose-select").options = [];
+  const notices = [];
+  context.Utils.showToast = text => notices.push(text);
+  for (const action of [context.prevPose, context.nextPose, context.overlayTopN]) {
+    action();
+    assert.match(notices.pop() || "", /暂无.*姿势/);
+  }
+});
+
 test("a running single task replaces stale result content with its actual progress", () => {
   const { context: c, get } = harness();
   get("results-content").innerHTML = "请先上传文件";

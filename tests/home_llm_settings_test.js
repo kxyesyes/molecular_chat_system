@@ -77,7 +77,7 @@ function createSelect(document, options = []) {
 }
 
 function harness(responses = []) {
-  const document = { createElement: () => createDomElement(document) };
+  const document = { createElement: () => createDomElement(document), querySelectorAll: () => [] };
   const elements = {};
   for (const name of ["settingsBtn", "llmProvider", "llmStream", "llmBaseUrl", "llmModelName", "llmApiKey", "llmSettingsStatus", "connectionStatus", "modelSelect", "testLlmConfig", "saveLlmConfig", "input"]) {
     elements[name] = createDomElement(document);
@@ -977,6 +977,6 @@ test("send readiness does not overwrite a draft typed before config load", async
 
 test("homepage loads the updated settings script instead of the stale cached version", () => {
   const activeHtml = html.replace(/<!--[\s\S]*?-->/g, "");
-  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261116-repeat-v6"></script>'));
+  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261116-ui-feedback-v1"></script>'));
   assert.match(activeHtml, /<button[^>]*class="btn"[^>]*aria-label="发送消息"/);
 });

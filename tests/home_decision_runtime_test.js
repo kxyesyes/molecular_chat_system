@@ -141,7 +141,7 @@ function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = 
   vm.runInContext(source, context, {filename: "main.js"});
   window.testHome.prepare(); window.testHome.connectWebSocket(); sockets[0].open();
   return {body, chat, input, composer, fill, render: window.testHome, logs, requests, timers, sockets, storage, formatCalls, socket: sockets[0], refs: window.testHome.scientificReferences,
-    detailsMounts, detailsAborts: () => detailsAborts,
+    renderer: window.HomeChatRenderer, detailsMounts, detailsAborts: () => detailsAborts,
     send: () => window.testHome.sendMessage(), reconnect: () => window.testHome.connectWebSocket(),
     button: name => body.querySelectorAll("button").find(b => b.textContent === name),
     ready: (mode, docking = false, details = false) => sockets.at(-1).emit({type: "connection_ready", normal_chat_mode: mode,
@@ -181,6 +181,16 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
+  await test("blank decision input gives feedback without sending chat", () => {
+    const h = loadHome();
+    h.ready("pi");
+    let notice;
+    h.render.elements.input.value = "   ";
+    h.renderer.showNotification = message => { notice = message; };
+    h.send();
+    assert.equal(notice, "请输入消息内容");
+    assert(!h.socket.sent.some(frame => frame.type === "chat"));
+  });
   const repeatQuery = "请重复执行 3 次 CCO 的综合评价，比较每次调用的工具顺序、事件流和最终结论是否一致。";
   for (const [subject, punctuation] of [["次 CCO", "?"], ["次 CCO", "？"], ["次CCO", "?"], ["次CCO", "？"]]) {
     await test("three repeat turns with " + subject + " and " + punctuation, () => {
@@ -1208,7 +1218,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261116-repeat-v6"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261116-ui-feedback-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");

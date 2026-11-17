@@ -112,19 +112,23 @@ function restoreDockingInteractions() {
   }, 100);
 }
 
-function prevPose() {
+function stepPose(offset) {
   const sel = document.getElementById("pose-select");
-  if (!sel || sel.disabled || sel.options.length === 0) return;
-  sel.selectedIndex = Math.max(0, sel.selectedIndex - 1);
+  if (!sel || sel.disabled || !sel.options.length) {
+    Utils.showToast("暂无可浏览的对接姿势", "info");
+    return;
+  }
+  const index = sel.selectedIndex + offset;
+  if (index < 0 || index >= sel.options.length) {
+    Utils.showToast(offset < 0 ? "已是第一个姿势" : "已是最后一个姿势", "info");
+    return;
+  }
+  sel.selectedIndex = index;
   onPoseSelectChange(sel);
 }
 
-function nextPose() {
-  const sel = document.getElementById("pose-select");
-  if (!sel || sel.disabled || sel.options.length === 0) return;
-  sel.selectedIndex = Math.min(sel.options.length - 1, sel.selectedIndex + 1);
-  onPoseSelectChange(sel);
-}
+function prevPose() { stepPose(-1); }
+function nextPose() { stepPose(1); }
 
 function resultProteinColor() {
   return {gray: "#bfbfbf", dark: "#e6eef8"}[AppState.currentStyle] || "spectrum";
@@ -139,7 +143,10 @@ function overlayTopN() {
   const jobId = AppState.currentJobId;
   const selector = document.getElementById("pose-select");
   const nInput = document.getElementById("overlay-count");
-  if (!jobId || !selector.options.length) return;
+  if (!jobId || selector.disabled || !selector.options.length) {
+    Utils.showToast("暂无可叠加的对接姿势", "info");
+    return;
+  }
   const n = Math.min(selector.options.length, Math.max(1, Math.trunc(Number(nInput.value)) || 1));
   nInput.value = String(n);
   if (n === 1) return viewPose(1);

@@ -315,7 +315,11 @@
   function sendDecisionMessage(resume = false, repeat = null) {
     if (typeof dockingUI !== "undefined" && dockingUI?.blocked()) return;
     const message = repeat ? repeat.payload.message : elements.input.value;
-    if (!message.trim() || decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
+    if (decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
+    if (!message.trim()) {
+      HomeChatRenderer.showNotification("请输入消息内容", "warning");
+      return;
+    }
     if (!repeat && agentConfigInputVersion !== (agentConfigSavedInputVersion ?? 0)) {
       HomeChatRenderer.showNotification("模型配置有未保存的修改，请先保存。", "warning");
       return;
@@ -1040,6 +1044,11 @@
   // 绑定事件处理器
   function bindEvents() {
     console.log("🔗 绑定事件处理器");
+    document.querySelectorAll("[data-unavailable-action]").forEach(button => {
+      button.addEventListener("click", () => {
+        HomeChatRenderer.showNotification(button.textContent.trim() + "功能尚未开放", "info");
+      });
+    });
 
     // 发送按钮点击
     if (elements.sendBtn) {

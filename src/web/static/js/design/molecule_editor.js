@@ -271,20 +271,26 @@ var MoleculeEditor = (function () {
     var requestSeq = (S.siteRequestSeq || 0) + 1;
     S.siteRequestSeq = requestSeq;
     var writeSeq = S.editorWriteSeq;
-    var smi = await getSMILES();
-    if (!smi || requestSeq !== S.siteRequestSeq || writeSeq !== S.editorWriteSeq || S.editorWriteInFlight) return;
-    S.smiles = smi;
-    S.detectedSiteCount = null;
-    S.detectedSitesSmiles = null;
-    document.getElementById("subBtn").disabled = true;
-    document.getElementById("curSmiles").textContent = smi;
     try {
+      var smi = await getSMILES();
+      if (requestSeq !== S.siteRequestSeq || writeSeq !== S.editorWriteSeq || S.editorWriteInFlight) return;
+      if (!smi) {
+        UI.toast("请先绘制分子", "warn");
+        return;
+      }
+      S.smiles = smi;
+      S.detectedSiteCount = null;
+      S.detectedSitesSmiles = null;
+      document.getElementById("subBtn").disabled = true;
+      document.getElementById("curSmiles").textContent = smi;
+      UI.setFeedback("正在识别连接点…", "info");
       var d = await Api.detectSites(smi);
       if (requestSeq !== S.siteRequestSeq) return;
       var currentSmiles = await getSMILES();
       if (requestSeq !== S.siteRequestSeq || writeSeq !== S.editorWriteSeq || currentSmiles !== smi || S.smiles !== smi) return;
       if (d.success) {
         var n = d.sites.length;
+        UI.setFeedback(n ? "检测到 " + n + " 个连接点" : "未找到连接点，请标记 [*]", "info");
         S.detectedSiteCount = n;
         S.detectedSitesSmiles = smi;
         document.getElementById("siteText").textContent =
@@ -297,9 +303,13 @@ var MoleculeEditor = (function () {
           ind.style.opacity = "0";
         }, 3000);
         if (n > 0) UI.toast("位点: " + n, "success");
+      } else {
+        throw new Error(d.error || "连接点识别失败");
       }
-    } catch (_) {
-      /* 静默 */
+    } catch (error) {
+      if (requestSeq !== S.siteRequestSeq || writeSeq !== S.editorWriteSeq) return;
+      UI.setFeedback("连接点识别失败", "error");
+      UI.toast(error.message || "连接点识别失败", "error");
     }
   }
 
@@ -384,22 +394,17 @@ var MoleculeEditor = (function () {
   }
 
   /* ── 导出 / 复制 / 清空 ── */
-  function exportSmiles() {
-    getSMILES().then(function (s) {
-      if (s) {
-        navigator.clipboard.writeText(s).then(function () {
-          UI.toast("已复制", "success");
-        });
+  async function copySmiles() {
+    try {
+      var smiles = await getSMILES();
+      if (!smiles) {
+        UI.toast("请先绘制分子", "warn");
+        return;
       }
-    });
-  }
-
-  function copySmiles() {
-    var smi = document.getElementById("curSmiles").textContent;
-    if (smi && smi !== "等待绘制分子..." && smi !== "等待绘制...") {
-      navigator.clipboard.writeText(smi).then(function () {
-        UI.toast("SMILES 已复制", "success");
-      });
+      await navigator.clipboard.writeText(smiles);
+      UI.toast("SMILES 已复制", "success");
+    } catch (_) {
+      UI.toast("复制失败，请手动复制 SMILES", "error");
     }
   }
 
@@ -433,7 +438,7 @@ var MoleculeEditor = (function () {
     detectSites: detectSites,
     execSubstitute: execSubstitute,
     confirmImport: confirmImport,
-    exportSmiles: exportSmiles,
+    exportSmiles: copySmiles,
     copySmiles: copySmiles,
     clearCanvas: clearCanvas,
   };

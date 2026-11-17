@@ -476,7 +476,7 @@
     clear(evidence);
     if (evidence) appendText(evidence, "p", "尚无运行记录。完成调用后，这里会保留工具、模型版本、权重标识和警告。", "evidence-empty");
     updateSmilesCount();
-    setStatus("not_calculated", "等待输入分子结构。提交后将在此显示实际工具结果。");
+    setStatus("not_calculated", "输入与结果已清空。");
   }
   function loadExample(smiles) {
     if (inFlight) return;
