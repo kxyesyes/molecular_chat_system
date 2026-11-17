@@ -96,6 +96,19 @@ def test_docx_and_long_document_retrieval():
     assert len(prompt) < 13000
 
 
+def test_long_document_prioritizes_current_topic_and_uses_history_for_ties():
+    from src.web.project_workspace import document_prompt
+
+    body = "采购预算审批编号".ljust(1500) * 8 + "签字人为林老师。"
+    history = [{"question": "采购预算审批编号是什么？", "answer": "见采购段。"}]
+    prompt = document_prompt("审批记录", body, "签字人是谁？", history)
+    assert "[9] 签字人为林老师。" in prompt
+
+    history = [{"question": "签字人是谁？", "answer": "见第九段。"}]
+    follow_up = document_prompt("审批记录", body, "请再说明。", history)
+    assert "[9] 签字人为林老师。" in follow_up
+
+
 def test_configured_model_receives_source_and_provider_failure_is_retryable(tmp_path, monkeypatch):
     import json
     import httpx

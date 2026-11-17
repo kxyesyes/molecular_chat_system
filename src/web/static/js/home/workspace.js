@@ -125,6 +125,7 @@ window.HomeWorkspace = (() => {
     onSelection();
   }
   async function render() {
+    if (selected && selected.project !== select.value) setDocument(null);
     items.replaceChildren();
     id("Upload").hidden = mode === "history" || !select.value;
     id("ProjectForm").hidden = mode === "history" && !!select.value;
@@ -153,7 +154,7 @@ window.HomeWorkspace = (() => {
       });
       el.append(download, button("用此文档提问", () => {
         if (!allowedToAttach()) throw new Error("请先结束当前聊天任务");
-        setDocument(doc); dialog.close();
+        setDocument({...doc, project:project.id}); dialog.close();
         document.querySelector(".fill textarea").focus();
       }));
     }

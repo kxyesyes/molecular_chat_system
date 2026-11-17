@@ -81,13 +81,17 @@ def document_prompt(name, body, question, recent=()):
     passages = [body[i:i + 1500] for i in range(0, len(body), 1500)]
     indexes = list(range(len(passages)))
     if len(indexes) > 8:
-        query = " ".join([row["question"] for row in recent] + [question])
-        terms = set(re.findall(r"[a-z0-9]+", query.lower()))
-        terms.update(re.findall(r"(?=([\u3400-\u9fff]{2}))", query))
+        def query_terms(query):
+            return set(re.findall(r"[a-z0-9]+", query.lower()) +
+                       re.findall(r"(?=([\u3400-\u9fff]{2}))", query))
+
+        current_terms = query_terms(question)
+        history_terms = query_terms(" ".join(row["question"] for row in recent))
 
         def relevance(index):
             passage = passages[index].lower()
-            return sum(term in passage for term in terms)
+            return (sum(term in passage for term in current_terms),
+                    sum(term in passage for term in history_terms))
 
         indexes = sorted(sorted(indexes, key=relevance, reverse=True)[:8])
     excerpt = "\n\n".join(f"[{i + 1}] {passages[i]}" for i in indexes)

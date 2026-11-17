@@ -119,6 +119,47 @@ test("sidebar project, document question, and analysis archive work at phone wid
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
 });
 
+test("project changes detach the previous document even when file names match", async t => {
+  const projects = [{id:"p1", name:"项目一"}, {id:"p2", name:"项目二"}];
+  const page = await pageFor(t, "/", (route, url) => {
+    if (url.pathname === "/api/workspace/projects") {
+      if (route.request().method() === "POST") {
+        const project = {id:"p3", name:route.request().postDataJSON().name};
+        projects.push(project);
+        return route.fulfill({json:project});
+      }
+      return route.fulfill({json:projects});
+    }
+    const project = projects.find(p => url.pathname === "/api/workspace/projects/" + p.id);
+    if (project) return route.fulfill({json:{...project, questions:[], bookmarks:[],
+      documents:project.id === "p3" ? [] : [{id:project.id + "-doc", name:"报告.txt"}]}});
+    return route.fulfill({json:[]});
+  });
+  const dialog = page.locator("#workspaceDialog");
+  async function openProjects() {
+    await page.locator("#openSidebarBtn").click();
+    await page.getByRole("button", {name:"我的项目", exact:true}).click();
+    await dialog.getByRole("button", {name:"用此文档提问"}).waitFor();
+  }
+  const attach = dialog.getByRole("button", {name:"用此文档提问"});
+  await openProjects();
+  await attach.click();
+  await openProjects();
+  assert.equal(await page.evaluate(() => HomeWorkspace.selected.id), "p1-doc");
+  await dialog.getByLabel("当前项目").selectOption("p2");
+  await page.waitForFunction(() => !document.querySelector("#workspaceActions").disabled);
+  assert.equal(await page.locator(".workspace-attachment").isHidden(), true);
+  assert.equal(await page.evaluate(() => Boolean(HomeWorkspace.selected)), false);
+  await attach.click();
+  assert.equal(await page.evaluate(() => HomeWorkspace.selected.id), "p2-doc");
+  await openProjects();
+  await dialog.getByLabel("项目名称").fill("项目三");
+  await dialog.getByRole("button", {name:"新建项目"}).click();
+  await dialog.getByText("已新建项目", {exact:true}).waitFor();
+  assert.equal(await page.locator(".workspace-attachment").isHidden(), true);
+  assert.equal(await page.evaluate(() => Boolean(HomeWorkspace.selected)), false);
+});
+
 test("history explains an analysis without an archived result and still shows its events", async t => {
   const page = await pageFor(t, "/", (route, url) => {
     if (url.pathname === "/api/workspace/runs") return route.fulfill({json:[
