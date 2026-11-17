@@ -192,6 +192,8 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
                 raise KeyError(task_id)
         return projection, selected_runtime, manager
 
+    app.state.workspace_task_lookup = runtime_get
+
     @app.get("/api/tasks")
     async def list_tasks(
         request: Request,

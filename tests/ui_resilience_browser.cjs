@@ -44,6 +44,81 @@ async function pageFor(t, pathname, api) {
   return page;
 }
 
+test("sidebar project, document question, and analysis archive work at phone width", async t => {
+  const base = "/api/workspace";
+  let project, document, savedQuestion, bookmarked = false;
+  let questionRequests = 0;
+  let downloadRequests = 0;
+  const task = { task_id: "t1", task_type: "activity_prediction", status: "succeeded", result: {message: "已完成测试"} };
+  const page = await pageFor(t, "/", async (route, url) => {
+    const path = url.pathname, method = route.request().method();
+    const json = value => route.fulfill({json:value});
+    if (path === base + "/projects" && method === "POST") {
+      project = {id:"p1", name:route.request().postDataJSON().name}; return json(project);
+    }
+    if (path === base + "/projects") return json(project ? [project] : []);
+    if (path.endsWith("/documents")) { document = {id:"d1",name:"study.txt"}; return json(document); }
+    if (path.endsWith("/documents/d1")) {
+      if (!downloadRequests++) return route.fulfill({status:503, json:{detail:"下载暂不可用"}});
+      return route.fulfill({contentType:"application/octet-stream", body:"测试正文"});
+    }
+    if (path.endsWith("/documents/d1/questions")) {
+      questionRequests++;
+      if (questionRequests === 1) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+        return route.fulfill({status:503,json:{detail:"问答暂不可用"}});
+      }
+      savedQuestion = {question:route.request().postDataJSON().question,answer:"来自文档的答案",name:"study.txt",project:"p1"};
+      return json(savedQuestion);
+    }
+    if (path.endsWith("/bookmarks")) { bookmarked = true; return json({project:"p1"}); }
+    if (path === base + "/projects/p1") return json({...project, documents:document?[document]:[],
+      questions:savedQuestion?[savedQuestion]:[], bookmarks:bookmarked?[{kind:"task",record:"t1"}]:[]});
+    if (path === base + "/questions") return json(savedQuestion?[savedQuestion]:[]);
+    if (path === base + "/runs") return json([]);
+    if (path === "/api/tasks") return json({success:true,data:[task]});
+    if (path === "/api/tasks/t1") return json({success:true,data:task});
+    return route.fulfill({status:503,json:{detail:"测试服务不可用"}});
+  });
+  page.setDefaultTimeout(3000);
+  const dialog = page.locator("#workspaceDialog");
+  async function open(label) {
+    const entry = page.getByRole("button",{name:label,exact:true}).first();
+    await page.locator("#openSidebarBtn").click();
+    await entry.click();
+    await dialog.waitFor();
+  }
+  await open("上传文档");
+  await dialog.getByLabel("项目名称").fill("研究资料");
+  await dialog.getByRole("button",{name:"新建项目"}).click();
+  await dialog.getByLabel("选择文档").setInputFiles({name:"study.txt",mimeType:"text/plain",buffer:Buffer.from("测试正文")});
+  await dialog.getByRole("button",{name:"上传",exact:true}).click();
+  const download = dialog.getByRole("link",{name:"下载原件"});
+  await download.click();
+  await dialog.getByText("下载暂不可用").waitFor();
+  const saved = page.waitForEvent("download");
+  await download.click();
+  assert.equal((await saved).suggestedFilename(), "study.txt");
+  await dialog.getByRole("button",{name:"用此文档提问"}).click();
+  await page.getByRole("textbox",{name:"消息"}).fill("请概括正文");
+  await page.getByRole("button",{name:"发送消息"}).dblclick();
+  await page.locator(".error-message").getByText(/问答暂不可用/).waitFor();
+  assert.equal(await page.getByRole("textbox",{name:"消息"}).inputValue(), "请概括正文");
+  assert.equal(questionRequests, 1);
+  await page.getByRole("button",{name:"发送消息"}).click();
+  await page.locator(".assistant-message").getByText(/来自文档的答案/).waitFor();
+  await page.reload();
+  await open("分析记录");
+  await dialog.getByText("请概括正文",{exact:true}).waitFor();
+  await dialog.getByRole("button",{name:"归入当前项目"}).click();
+  await page.waitForFunction(() => document.querySelector("#workspaceStatus").textContent.includes("已归入"));
+  await dialog.getByRole("button",{name:"关闭"}).click();
+  await open("我的项目");
+  await dialog.getByRole("button",{name:"查看记录"}).click();
+  await dialog.getByText(/已完成测试/).waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
+});
+
 test("homepage retains zero temperature and opens one knowledge graph per click", async t => {
   const page = await pageFor(t, "/");
   const more = page.locator(".index_con .right .more");

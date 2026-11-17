@@ -1059,6 +1059,11 @@ class MolecularChatApp:
         # Register additional page routes
         from .routes.main_routes import register_main_routes
         register_main_routes(self.app, templates)
+        from .routes.workspace_routes import setup_workspace_routes
+        setup_workspace_routes(
+            self.app, user_llm_config_path().parent / "projects",
+            self._answer_workspace_document, self._get_agent_state_store,
+        )
         from .routes.scientific_reference_routes import setup_scientific_reference_routes
         setup_scientific_reference_routes(self.app, self._get_scientific_references())
 
@@ -1120,6 +1125,12 @@ class MolecularChatApp:
             logger.info("Task runtime and system metadata routes registered")
         except Exception as e:
             logger.warning(f"Task runtime routes registration failed: {e}")
+
+    async def _answer_workspace_document(self, prompt):
+        from .project_workspace import generate_document_answer
+        await self._refresh_llm_config_from_env()
+        async with self.model_request_gate.request():
+            return await generate_document_answer(self.model, prompt)
 
     def _bind_task_runtime(self, docking_service):
         # Exact trusted opt-in only. The default does not import or construct C.

@@ -897,6 +897,29 @@ class SQLiteAgentStateStore:
         from .scientific_references import get
         return get(self, trace_id, session_id=session_id, presentation_id=presentation_id, revision=revision)
 
+    def list_workspace_runs(self, owner: str) -> list[dict]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT trace_id,status,substr(query,1,100) AS title,created_at
+                   FROM agent_runs WHERE session_id=? AND user_id=?
+                   ORDER BY created_at DESC LIMIT 100""", (owner, owner),
+            ).fetchall()
+        return [redact_sensitive(dict(row)) for row in rows]
+
+    def latest_result_reference(self, trace_id: str, owner: str):
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT a.id AS view_id,a.sha256 AS revision,
+                          json_extract(a.metadata_json,'$.byte_length') AS byte_length
+                   FROM workflow_artifacts a JOIN agent_runs r ON r.trace_id=a.trace_id
+                   WHERE a.trace_id=? AND r.session_id=? AND r.user_id=? AND a.validated=1
+                     AND json_extract(a.metadata_json,'$.kind')='agent_result_details'
+                     AND json_extract(a.metadata_json,'$.session_id')=?
+                     AND json_extract(a.metadata_json,'$.user_id')=?
+                   ORDER BY a.created_at DESC LIMIT 1""", (trace_id, owner, owner, owner, owner),
+            ).fetchone()
+        return dict(row) if row else None
+
     def get_run(self, trace_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
