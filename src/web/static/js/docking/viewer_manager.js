@@ -242,15 +242,21 @@ const ViewerManager = {
 
   // 重置视角
   reset() {
-    if (AppState.viewer) {
+    if (this.hasContent()) {
       AppState.viewer.zoomTo();
       AppState.viewer.render();
     }
   },
 
+  hasContent() {
+    if (AppState.viewer && (AppState.viewer.getModelList().length || dockingBoxVisible)) return true;
+    Utils.showToast("请先载入分子结构", "info");
+    return false;
+  },
+
   // 导出图片
   async exportImage() {
-    if (AppState.viewer) {
+    if (this.hasContent()) {
       AppState.viewer.render();
       try {
         await saveDockingDownload(await fetch(AppState.viewer.pngURI()), "molecule_structure.png");
@@ -287,10 +293,7 @@ function loadMolecule(pdbData, type, sourceName) {
   ViewerManager.loadMolecule(pdbData, type, sourceName);
 }
 function resetView() {
-  if (viewer) {
-    viewer.zoomTo();
-    viewer.render();
-  }
+  ViewerManager.reset();
 }
 function exportImage() {
   ViewerManager.exportImage();

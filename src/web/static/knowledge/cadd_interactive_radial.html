@@ -1,8 +1,8 @@
 <html>
     <head>
         <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         
-            <script src="lib/bindings/utils.js"></script>
             <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/dist/vis-network.min.css" integrity="sha512-WgxfT5LWjfszlPHXRmBWHkV2eceiWTOBvrKCNbdgDYTHrT2AeLCGbF4sZlZw3UMN3WtL0tGUoIAKsu8mllg/XA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
             <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.2/dist/vis-network.min.js" integrity="sha512-LnvoEWDFrqGHlHmDD2101OrLcbsfkrzoSpvtSQtxK3RMnRV0eOkhhBN2dXHKRrUU8p2DGRTk35n4O8nWSVe1mQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
             
@@ -350,6 +350,20 @@
         border-radius: 15px;
         font-size: 12px;
     }
+    @media (max-width: 640px) {
+        body { overflow: auto; }
+        #title-container, #catalog-container, #legend-container {
+            position: static;
+            transform: none;
+            margin: 8px;
+            padding: 12px;
+        }
+        #title-container h1 { font-size: 18px; }
+        #mynetwork { float: none; box-sizing: border-box; height: 52dvh; }
+        #catalog-container { max-height: 42dvh; }
+        #catalog-container.collapsed { width: auto; }
+        #detail-content { box-sizing: border-box; padding: 18px; }
+    }
 </style>
 
 </style>
@@ -432,7 +446,11 @@
                   return network;
 
               }
-              drawGraph();
+              if (window.vis) {
+                  drawGraph();
+              } else {
+                  document.getElementById('mynetwork').textContent = '图谱加载失败，可从目录查看知识点。';
+              }
         </script>
     <div id="catalog-container">
     <div id="catalog-toggle" onclick="toggleCatalog()">📚 目录</div>
@@ -1266,9 +1284,8 @@ var originalNodeColors = {};
 
 // 等待pyvis的network初始化完成后再绑定事件
 function initCustomFeatures() {
-    if (typeof nodes === 'undefined' || typeof edges === 'undefined' || typeof network === 'undefined') {
-        console.log('等待network初始化...');
-        setTimeout(initCustomFeatures, 100);
+    if (!network) {
+        document.getElementById('reset-btn').disabled = true;
         return;
     }
     
@@ -1440,12 +1457,6 @@ function focusNodeById(nodeId) {
 
 // 点击目录项，过滤显示对应节点和下级节点
 function focusNode(title) {
-    // 确保network已初始化
-    if (typeof nodes === 'undefined' || typeof network === 'undefined') {
-        console.log('network尚未初始化');
-        return;
-    }
-    
     var nodeId = nodeMapping[title];
     if (!nodeId) {
         console.log('未找到节点: ' + title);
@@ -1464,6 +1475,10 @@ function focusNode(title) {
     
     // 检查是否为知识点（叶子节点）
     var isKnowledgePoint = nodeTypes[nodeId] === '知识点';
+    if (!network) {
+        if (isKnowledgePoint) showKnowledgeDetail(title);
+        return;
+    }
     
     // 获取要高亮的节点：当前节点 + 所有子孙节点 + 所有祖先节点
     var highlightedNodes = new Set();

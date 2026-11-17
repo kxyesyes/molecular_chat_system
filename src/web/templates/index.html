@@ -2063,6 +2063,7 @@
   <link rel="stylesheet" href="/static/css/home_chat_layout.css?v=20261114-progress-v2" />
   <!-- SMILES分子可视化库 -->
   <script src="/static/js/lib/smiles-drawer.min.js"></script>
+  <link rel="stylesheet" href="/static/css/home_workspace.css?v=1">
 </head>
 
 <body>
@@ -2226,18 +2227,18 @@
 
       <div class="data">
         <h4>数据管理</h4>
-        <div class="btn">
+        <button type="button" class="btn" data-workspace="upload">
           <img src="/static/images/l9.png" alt="" />
           <span>上传文档</span>
-        </div>
-        <div class="btn">
+        </button>
+        <button type="button" class="btn" data-workspace="projects">
           <img src="/static/images/I12.png" alt="" />
           <span>我的项目</span>
-        </div>
-        <div class="btn">
+        </button>
+        <button type="button" class="btn" data-workspace="history">
           <img src="/static/images/I11.png" alt="" />
           <span>分析记录</span>
-        </div>
+        </button>
       </div>
     </div>
 
@@ -2255,8 +2256,7 @@
       </div>
       <div class="icon_list">
         <div class="list">
-          <div class="item knowledge-entry" data-action="knowledge-graph" title="知识图谱"
-            onclick="window.open('./cadd_interactive_radial.html', '_blank')">
+          <div class="item knowledge-entry" data-action="knowledge-graph" title="知识图谱">
             <img src="/static/images/r11.png" alt="" />
             <span>知识图谱</span>
           </div>
@@ -2494,13 +2494,31 @@
   <script src="/static/js/home/task_state.js?v=20261008-home-task-state-v1"></script>
   <script src="/static/js/home/task_status.js?v=20261114-result-reading-v1"></script>
   <script src="/static/js/home/task_panel.js?v=20261114-progress-v2"></script>
-  <script src="/static/js/home/advanced_options.js?v=20261001-explicit-count-v1"></script>
+  <script src="/static/js/home/advanced_options.js?v=20261116-ui-feedback-v1"></script>
   <script src="/static/js/home/docking_source_selection.js?v=20261101-missing-atoms-v1"></script>
     <script src="/static/js/home/docking_consent.js?v=20261113-vina-score-v2"></script>
   <!-- Cache lineage: /static/js/home/main.js?v=20260713-workflow-complete-v2 -->
   <!-- Cache lineage: /static/js/home/main.js?v=20260925-terminal-labels-v1 -->
   <!-- Cache lineage: /static/js/home/main.js?v=20261017-docking-v1 -->
-  <script src="/static/js/home/main.js?v=20261116-repeat-v6"></script>
+  <dialog id="workspaceDialog" aria-labelledby="workspaceTitle">
+    <header><h2 id="workspaceTitle"></h2><button type="button" id="workspaceClose" aria-label="关闭">关闭</button></header>
+    <fieldset id="workspaceActions">
+      <label>当前项目<select id="workspaceProject"></select></label>
+      <form id="workspaceProjectForm">
+        <label>项目名称<input maxlength="100" required id="workspaceName"></label>
+        <button type="submit">新建项目</button><button type="submit" value="rename">重命名</button>
+      </form>
+      <form id="workspaceUpload">
+        <label>选择文档<input type="file" required id="workspaceFile" accept=".txt,.md,.csv,.docx"></label>
+        <small>TXT、Markdown、CSV 或 DOCX，最大 1 MiB</small>
+        <button type="submit">上传</button>
+      </form>
+      <div id="workspaceItems"></div>
+    </fieldset>
+    <p id="workspaceStatus" role="status"></p>
+  </dialog>
+  <script src="/static/js/home/workspace.js?v=3"></script>
+  <script src="/static/js/home/main.js?v=20261117-projects-v1"></script>
 </body>
 
 </html>

@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>活性预测 - MedChat</title>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
-    <link rel="stylesheet" href="/static/css/activity_prediction_v2.css">
+    <link rel="stylesheet" href="/static/css/activity_prediction_v2.css?v=20261116-ui-feedback-v1">
     <link rel="stylesheet" href="/static/css/mobile_baseline.css?v=20260511a">
-    <link rel="stylesheet" href="/static/css/subpage_header.css?v=20260525a">
+    <link rel="stylesheet" href="/static/css/subpage_header.css?v=20261116-ui-feedback-v1">
   </head>
   <body>
-    <div class="header">
+    <div class="header activity-header">
       <div class="logo-section">
         <div class="logo-item">
           <img src="/static/images/logo.png" alt="Logo" />
@@ -528,12 +528,12 @@
 
     <script src="/static/js/shared/safe_render.js?v=20261007-url-policy-v1"></script>
     <script src="/static/js/activity_prediction/utils.js"></script>
-    <script src="/static/js/activity_prediction/model_manager.js?v=20260902-admin-auth-removed"></script>
-    <script src="/static/js/activity_prediction/charts.js"></script>
-    <script src="/static/js/activity_prediction/results_renderer.js?v=20261112-review-warning"></script>
+    <script src="/static/js/activity_prediction/model_manager.js?v=20261116-ui-feedback-v1"></script>
+    <script src="/static/js/activity_prediction/charts.js?v=20261116-ui-feedback-v1"></script>
+    <script src="/static/js/activity_prediction/results_renderer.js?v=20261116-ui-feedback-v1"></script>
     <script src="/static/js/activity_prediction/preflight.js"></script>
-    <script src="/static/js/activity_prediction/training_monitor.js?v=20260902-admin-auth-removed"></script>
-    <script src="/static/js/activity_prediction/main.js?v=20260912-family"></script>
+    <script src="/static/js/activity_prediction/training_monitor.js?v=20261117-training-cancel"></script>
+    <script src="/static/js/activity_prediction/main.js?v=20261117-training-cancel"></script>
     <script>
       document.addEventListener("DOMContentLoaded", function () {
         ActivityMain.init();

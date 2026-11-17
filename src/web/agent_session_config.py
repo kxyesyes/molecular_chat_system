@@ -35,6 +35,7 @@ class AgentEntrySessionMiddleware(AgentSessionMiddleware):
             path.startswith(prefix)
             for prefix in (
                 "/api/tasks/",
+                "/api/workspace/",
                 "/api/agent/workflows/",
                 "/api/agent/runs/",
                 "/api/agent/docking/",

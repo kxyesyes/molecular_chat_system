@@ -59,7 +59,7 @@ window.ActivityResults = (function () {
     if (singleSummary) singleSummary.style.display = "none";
     if (batchHistEl) batchHistEl.style.display = "none";
 
-    if (batchHistEl) {
+    if (batchHistEl && window.echarts) {
       const chart = echarts.getInstanceByDom(batchHistEl);
       if (chart) chart.clear();
     }

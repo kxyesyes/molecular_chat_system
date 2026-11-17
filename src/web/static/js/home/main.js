@@ -195,8 +195,10 @@
     return decisionTurn && decisionTurn.phase !== "ended";
   }
 
+  let documentQuestionPending = false;
   function updateDecisionControls() {
-    if (elements.sendBtn) elements.sendBtn.disabled = decisionAwaitingReady ||
+    if (elements.sendBtn) elements.sendBtn.disabled = documentQuestionPending ||
+      (decisionAwaitingReady && !window.HomeWorkspace?.selected) ||
       (typeof dockingUI !== "undefined" && dockingUI?.blocked()) ||
       (decisionMode && Boolean(decisionActive() || decisionWaiting || decisionAbandonAwait));
     if (!decisionControls) return;
@@ -315,7 +317,11 @@
   function sendDecisionMessage(resume = false, repeat = null) {
     if (typeof dockingUI !== "undefined" && dockingUI?.blocked()) return;
     const message = repeat ? repeat.payload.message : elements.input.value;
-    if (!message.trim() || decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
+    if (decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
+    if (!message.trim()) {
+      HomeChatRenderer.showNotification("请输入消息内容", "warning");
+      return;
+    }
     if (!repeat && agentConfigInputVersion !== (agentConfigSavedInputVersion ?? 0)) {
       HomeChatRenderer.showNotification("模型配置有未保存的修改，请先保存。", "warning");
       return;
@@ -1040,6 +1046,12 @@
   // 绑定事件处理器
   function bindEvents() {
     console.log("🔗 绑定事件处理器");
+    window.HomeWorkspace?.init({
+      closeSidebar: () => {if (window.innerWidth <= 1024) setSidebarVisible(false);},
+      canAttach: () => !documentQuestionPending && !decisionActive() && !decisionWaiting &&
+        !decisionAbandonAwait && !dockingUI?.blocked() && !moleculeCandidateLifecycle.isRequestInFlight(),
+      selectionChanged: updateDecisionControls,
+    });
 
     // 发送按钮点击
     if (elements.sendBtn) {
@@ -1490,10 +1502,8 @@
     setSidebarVisible(isClosing);
   }
 
-  let isSidebarAnimating = false;
+  let sidebarCloseTimer;
   function setSidebarVisible(visible) {
-    if (isSidebarAnimating) return;
-
     const sidebar = elements.sidebarPanel;
     const mask = elements.sidebarMask;
     const openBtn = elements.openSidebarBtn;
@@ -1502,7 +1512,7 @@
 
     if (visible) {
       // 打开侧边栏
-      isSidebarAnimating = true;
+      clearTimeout(sidebarCloseTimer);
       
       // 只有在小屏幕下才激活遮罩层显影
       if (window.innerWidth <= 1024) {
@@ -1516,21 +1526,16 @@
       sidebar.classList.add("is-open");
       if (openBtn) openBtn.classList.remove("is-visible");
 
-      setTimeout(() => {
-        isSidebarAnimating = false;
-      }, 300);
     } else {
       // 关闭侧边栏
       if (sidebar.classList.contains("is-closing")) return;
 
-      isSidebarAnimating = true;
       sidebar.classList.remove("is-open");
       sidebar.classList.add("is-closing");
       mask.classList.remove("is-active");
 
-      setTimeout(() => {
+      sidebarCloseTimer = setTimeout(() => {
         if (openBtn) openBtn.classList.add("is-visible");
-        isSidebarAnimating = false;
       }, 280);
     }
   }
@@ -1561,6 +1566,7 @@
   }
 
   function resetToHomeState() {
+    window.HomeWorkspace?.clear();
     const rightPanel = document.querySelector(".index_con .right");
     const mass = document.querySelector(".mass");
     const iconList = document.querySelector(".icon_list");
@@ -1930,7 +1936,37 @@
   }
 
   // 修复后的消息发送函数
+  async function sendDocumentQuestion(doc) {
+    const question = elements.input.value.trim();
+    if (!question) { HomeChatRenderer.showNotification("请输入关于文档的问题", "warning"); return; }
+    if (decisionActive() || decisionWaiting || decisionAbandonAwait || dockingUI?.blocked() ||
+        moleculeCandidateLifecycle.isRequestInFlight()) return;
+    if (agentConfigInputVersion !== (agentConfigSavedInputVersion ?? 0)) {
+      HomeChatRenderer.showNotification("请先保存模型配置", "warning"); return;
+    }
+    documentQuestionPending = true;
+    updateDecisionControls();
+    if (!chatMode) enterChatMode();
+    addUserMessage(doc.name + " · " + question);
+    elements.input.value = "";
+    showTypingIndicator();
+    try {
+      const result = await window.HomeWorkspace.ask(doc, question);
+      addAssistantMessage(result.answer);
+    } catch (error) {
+      removeTypingIndicator();
+      showErrorMessage(error.message || "文档问答失败");
+      if (!elements.input.value) elements.input.value = question;
+    } finally {
+      documentQuestionPending = false;
+      updateDecisionControls();
+      HomeChatRenderer.scrollToBottom();
+    }
+  }
+
   function sendMessage() {
+    if (documentQuestionPending) return;
+    if (window.HomeWorkspace?.selected) { void sendDocumentQuestion(window.HomeWorkspace.selected); return; }
     if (decisionAwaitingReady) return; // no legacy fallback before the new server announcement
     if (typeof dockingUI !== "undefined" && dockingUI?.blocked()) return;
     if (decisionMode) {sendDecisionMessage(); return;}
@@ -2779,6 +2815,7 @@
 
     const message = quickMessages[action];
     if (message) {
+      window.HomeWorkspace?.clear();
       elements.input.value = message;
       sendMessage();
     }
@@ -3417,6 +3454,7 @@
   function analyzeMolecule(smiles) {
     const analysisQuery = `请分析这个分子的属性: ${smiles}`;
     if (elements.input) {
+      window.HomeWorkspace?.clear();
       elements.input.value = analysisQuery;
       sendMessage();
     }

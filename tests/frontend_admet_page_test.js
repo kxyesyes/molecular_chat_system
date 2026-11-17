@@ -54,7 +54,7 @@ assert(template.includes('id="structure-file"'), 'provide a real file input');
 assert(template.includes('id="file-help"'), 'explain supported upload formats');
 assert(styles.includes('align-items: stretch'), 'keep both workspace columns at the same row height');
 assert(template.includes('/static/css/admet.css?v=20261005-38874c3'), 'bust stale ADMET stylesheet caches after layout changes');
-assert(template.includes('/static/js/admet.js?v=20261111-smiles-file'), 'bust stale ADMET script caches after behavior changes');
+assert(template.includes('/static/js/admet.js?v=20261116-ui-feedback-v1'), 'bust stale ADMET script caches after behavior changes');
 assert(!template.includes('置信度'), 'do not imply a confidence score that the API does not return');
 assert(styles.includes('max(460px, calc(100vh - 260px))'), 'fill the initial workspace with meaningful content');
 assert(!styles.includes('min-height: 620px'), 'do not force a large empty result panel');
@@ -184,6 +184,7 @@ async function main() {
   assert.equal(app.elements['reset-admet'].disabled, false);
   assert(app.elements['endpoint-groups'].textContent.includes('46.07'));
   await app.elements['reset-admet'].dispatch('click');
+  assert.match(app.elements['run-status'].textContent, /已清空/);
   assert.equal(app.elements['smiles-input'].value, '');
   assert.equal(app.elements['endpoint-groups'].textContent, '');
   await app.elements['admet-form'].dispatch('submit');

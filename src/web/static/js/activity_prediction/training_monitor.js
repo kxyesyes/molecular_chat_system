@@ -89,6 +89,8 @@ window.ActivityTraining = (function () {
 
   function updateDock(epoch, total, metric, eta, state) {
     const safeState = normalizeState(state);
+    const trainBtn = document.getElementById("trainBtn");
+    if (trainBtn && safeState === "running") trainBtn.textContent = "⏳ 训练中...";
     const dot = document.getElementById("dock-dot");
     if (dot) dot.className = `dock-dot ${safeState}`;
 
@@ -187,6 +189,16 @@ window.ActivityTraining = (function () {
     activeTimer = null;
   }
 
+  function finishCanceled(callbacks) {
+    stopPolling();
+    localStorage.removeItem("activeTrainJobId");
+    ActivityUtils.setText("dock-status-text", "训练已取消");
+    ActivityUtils.setText("d-status", "训练已取消");
+    const dot = document.getElementById("dock-dot");
+    if (dot) dot.className = "dock-dot";
+    callbacks?.onFinish?.("canceled");
+  }
+
   function startPolling(jobId, totalEpochs, callbacks) {
     const options = callbacks || {};
     const startTime = Date.now();
@@ -196,10 +208,24 @@ window.ActivityTraining = (function () {
     activeTimer = setInterval(async function () {
       try {
         const res = await fetch(`/api/activity/train/status/${jobId}`);
+        if (res.status === 404) {
+          stopPolling();
+          localStorage.removeItem("activeTrainJobId");
+          ActivityUtils.setText("dock-status-text", "任务不存在");
+          if (options.onFinish) options.onFinish("failed");
+          return;
+        }
         const payload = await res.json();
-        if (!res.ok || !payload.success) return;
+        if (!res.ok || !payload.success || !payload.status) {
+          ActivityUtils.setText("dock-status-text", "状态暂不可用，正在重试");
+          return;
+        }
 
         const status = payload.status;
+        if (status.state === "canceled") {
+          finishCanceled(options);
+          return;
+        }
         const rawProgress = Number(status.progress ?? 0);
         const progress = Number.isFinite(rawProgress)
           ? Math.max(0, Math.min(100, rawProgress))
@@ -273,6 +299,7 @@ window.ActivityTraining = (function () {
           }
         }
       } catch (err) {
+        ActivityUtils.setText("dock-status-text", "状态暂不可用，正在重试");
         console.error("Polling error:", err);
       }
     }, 1000);
@@ -286,32 +313,37 @@ window.ActivityTraining = (function () {
       const parsed = JSON.parse(saved);
       if (!parsed.jobId) return;
 
+      const trainBtn = document.getElementById("trainBtn");
+      if (trainBtn) {
+        trainBtn.disabled = true;
+        trainBtn.textContent = "正在恢复训练任务…";
+      }
       const dock = document.getElementById("train-dock");
       if (dock) dock.style.display = "flex";
       ActivityUtils.setText("dock-status-text", "Reconnecting...");
 
       fetch(`/api/activity/train/status/${parsed.jobId}`)
-        .then(function (response) {
-          return response.json();
-        })
-        .then(function (payload) {
-          if (
-            !payload.success ||
-            !payload.status ||
-            payload.status.state === "completed" ||
-            payload.status.state === "failed"
-          ) {
+        .then(async function (response) {
+          const payload = response.ok ? await response.json() : null;
+          if (payload?.success && payload.status?.state === "canceled") {
+            finishCanceled(callbacks);
+            return;
+          }
+          if (response.status === 404 || (payload?.success &&
+              ["completed", "failed"].includes(payload.status?.state))) {
             localStorage.removeItem("activeTrainJobId");
             if (dock) dock.style.display = "none";
+            callbacks?.onFinish?.(payload?.status?.state || "failed");
             return;
           }
 
+          if (!payload?.success || !payload.status) throw new Error("状态暂不可用");
           updateDock(payload.status.epoch ?? 0, parsed.totalEpochs, null, null, "running");
           startPolling(parsed.jobId, parsed.totalEpochs, callbacks);
         })
         .catch(function () {
-          localStorage.removeItem("activeTrainJobId");
-          if (dock) dock.style.display = "none";
+          ActivityUtils.setText("dock-status-text", "状态暂不可用，正在重试");
+          startPolling(parsed.jobId, parsed.totalEpochs, callbacks);
         });
     } catch (err) {
       localStorage.removeItem("activeTrainJobId");

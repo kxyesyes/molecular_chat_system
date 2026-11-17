@@ -1,0 +1,31 @@
+#workspaceDialog {
+  box-sizing: border-box; width: min(38rem, calc(100vw - 1.5rem)); max-height: 85vh;
+  margin: auto; padding: 1.25rem; overflow: auto; color: #233447; background: white;
+  border: 1px solid #d6e1e9; border-radius: 1rem; box-shadow: 0 16px 66px #172c472e;
+}
+#workspaceDialog::backdrop { background: #15263866; }
+#workspaceDialog header, #workspaceDialog form, .workspace-row, .workspace-attachment {
+  display: flex; align-items: center; flex-wrap: wrap; gap: .5rem;
+}
+#workspaceDialog header { justify-content: space-between; margin-bottom: 1rem; }
+#workspaceDialog h2, #workspaceDialog h3 { margin: 0; color: #20364b; }
+#workspaceDialog h3 { font-size: 1rem; margin-top: 1rem; }
+#workspaceDialog fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+#workspaceDialog label { display: grid; gap: .25rem; flex: 1 1 12rem; min-width: 0; font-size: .9rem; }
+#workspaceDialog form { align-items: end; margin: .8rem 0; }
+#workspaceDialog form small { flex-basis: 100%; }
+#workspaceDialog input, #workspaceDialog select, #workspaceDialog button, #workspaceDialog a,
+.workspace-attachment button {
+  box-sizing: border-box; font: inherit; max-width: 100%; border: 1px solid #cad7e1;
+  border-radius: .45rem; background: white; color: inherit; padding: .45rem .65rem;
+}
+#workspaceDialog input, #workspaceDialog select { width: 100%; }
+#workspaceDialog button, .workspace-attachment button { cursor: pointer; }
+#workspaceDialog button[type=submit] { background: #eaf3fc; }
+#workspaceDialog [hidden], .workspace-attachment[hidden] { display: none; }
+.workspace-row { padding: .65rem 0; border-bottom: 1px solid #e4ebf0; overflow-wrap: anywhere; }
+.workspace-row > strong, .workspace-row > summary { flex: 1 1 13rem; }
+#workspaceDialog details, #workspaceDialog pre { width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
+#workspaceDialog p { margin: .6rem 0; }
+#workspaceStatus { color: #365570; }
+.workspace-attachment { font-size: .85rem; overflow-wrap: anywhere; margin: .4rem .7rem; }

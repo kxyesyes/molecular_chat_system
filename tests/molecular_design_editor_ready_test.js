@@ -49,6 +49,23 @@ function setup(initialEditor, initialState = {}) {
 
 function readyEditor() { return { getSmiles() {}, setMolecule() {} }; }
 
+test("double save dispatches once, shows progress, and releases the button after a failure", async () => {
+  const h = setup(null, {propsSmiles: "CO", curProps: {}});
+  h.context.MoleculeEditor.getSMILES = async () => "CO";
+  const pending = [];
+  h.context.DesignApi.saveMolecule = () => new Promise(resolve => pending.push(resolve));
+  const save = h.context.window.saveMol;
+  const calls = Promise.all([save(), save()]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pending.length, 1);
+  assert.equal(h.status.disabled, true);
+  assert.match(h.status.textContent, /保存中/);
+  pending[0]({success:false, error:"服务不可用"});
+  await calls;
+  assert.equal(h.status.disabled, false);
+  assert.match(h.toasts.at(-1).text, /服务不可用/);
+});
+
 test("file uploads import the SMILES field from a design export or titled SMI record", () => {
   const { context } = setup(null);
   const imported = [];

@@ -273,7 +273,8 @@ window.ActivityMain = (function () {
       setStatus("Training");
 
       ActivityTraining.startPolling(data.job_id, totalEpochs, {
-        onFinish: function () {
+        onFinish: function (state) {
+          if (state === "canceled") setStatus("训练已取消");
           if (trainBtn) {
             trainBtn.disabled = false;
             trainBtn.textContent = "🚀 重新训练";
@@ -351,7 +352,8 @@ window.ActivityMain = (function () {
       });
 
     ActivityTraining.initRecovery({
-      onFinish: function () {
+      onFinish: function (state) {
+        if (state === "canceled") setStatus("训练已取消");
         const trainBtn = document.getElementById("trainBtn");
         if (trainBtn) {
           trainBtn.disabled = false;

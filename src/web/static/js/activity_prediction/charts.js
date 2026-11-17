@@ -205,6 +205,10 @@ window.ActivityCharts = (function () {
   function initMetricsChart() {
     const dom = document.getElementById("metricsChart");
     if (!dom) return;
+    if (!window.echarts) {
+      dom.textContent = "训练图表加载失败";
+      return;
+    }
 
     if (!metricsChart) {
       metricsChart = echarts.init(dom);
@@ -263,7 +267,7 @@ window.ActivityCharts = (function () {
         return Number.isFinite(value);
       });
 
-    if (!scores.length) {
+    if (!scores.length || !window.echarts) {
       chartDom.style.display = "none";
       return;
     }

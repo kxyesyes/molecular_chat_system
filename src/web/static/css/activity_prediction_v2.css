@@ -110,6 +110,7 @@ body {
 }
 
 #modelSelector {
+  max-width: 32ch;
   background: transparent;
   border: none;
   color: #4f46e5;

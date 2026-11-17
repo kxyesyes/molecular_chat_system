@@ -87,6 +87,20 @@ function family(overrides = {}) {
     }, ...overrides};
 }
 const cells = row => row.children.map(cell => cell.textContent);
+test("chart download failure preserves forms, result tables and task recovery initialization", () => {
+  const h = setup();
+  delete h.context.echarts;
+  h.ids.metricsChart = new Element();
+  let recovery = false;
+  h.context.ActivityTraining.initRecovery = () => { recovery = true; };
+  vm.runInContext(read("src/web/static/js/activity_prediction/charts.js"), h.context);
+  h.context.ActivityMain.init();
+  assert.ok(h.ids.predictForm.listeners.submit && h.ids.batchForm.listeners.submit && recovery);
+  assert.match(h.ids.metricsChart.textContent, /图表/);
+  h.render([family()], {isSingleRequest: true});
+  assert.match(h.ids.resultsBody.textContent, /4\.3210/);
+  h.context.ActivityCharts.renderHistogram([{success:true, predicted_pIC50:4.321}]);
+});
 function assertNoExecutableNodes(node) {
   assert.ok(!["img", "svg", "script", "iframe", "a"].includes(node.tagName));
   for (const name of Object.keys(node)) {

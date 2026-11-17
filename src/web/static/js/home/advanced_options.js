@@ -24,16 +24,18 @@ window.HomeAdvancedOptions = (function () {
       const saved = localStorage.getItem(HomeConfig.storageKeys.advancedOptions);
       if (!saved) return;
 
-      const loaded = JSON.parse(saved);
+      const loaded = JSON.parse(saved) ?? {};
+      const validCount = Number.isInteger(loaded.molCount) && loaded.molCount >= 1 && loaded.molCount <= 10;
       advancedConfig.ragCount =
-        loaded.ragCount || HomeConfig.advancedDefaults.ragCount;
+        Number.isInteger(loaded.ragCount) && loaded.ragCount >= 1 && loaded.ragCount <= 20
+          ? loaded.ragCount : HomeConfig.advancedDefaults.ragCount;
       advancedConfig.temperature =
-        loaded.temperature || HomeConfig.advancedDefaults.temperature;
-      advancedConfig.molCount =
-        loaded.molCount || HomeConfig.advancedDefaults.moleculeCount;
+        Number.isFinite(loaded.temperature) && loaded.temperature >= 0 && loaded.temperature <= 2
+          ? loaded.temperature : HomeConfig.advancedDefaults.temperature;
+      advancedConfig.molCount = validCount ? loaded.molCount : HomeConfig.advancedDefaults.moleculeCount;
       // Older saved options always included the default count; they cannot
       // establish that the user intended to override a natural-language count.
-      advancedConfig.molCountExplicit = loaded.molCountExplicit === true;
+      advancedConfig.molCountExplicit = validCount && loaded.molCountExplicit === true;
     } catch (error) {
       console.error("❌ 加载高级选项失败:", error);
     }

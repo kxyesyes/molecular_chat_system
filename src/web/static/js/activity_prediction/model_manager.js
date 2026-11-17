@@ -140,52 +140,46 @@ window.ActivityModels = (function () {
   }
 
   async function loadModels() {
+    let currentModel;
+    let emptyMessage = "(尚未训练自定义模型)";
     try {
       const res = await fetch("/api/activity/models");
       const data = await res.json();
-      if (!data.success) return [];
-
-      allModels = data.models || [];
-      const selector = document.getElementById("modelSelector");
-      const deleteBtn = document.getElementById("deleteModelBtn");
-      const infoBtn = document.getElementById("modelInfoBtn");
-
-      if (!selector) return allModels;
-
-      selector.replaceChildren();
-
-      if (!allModels.length) {
-        const emptyOption = document.createElement("option");
-        emptyOption.value = "";
-        emptyOption.textContent = "(尚未训练自定义模型)";
-        selector.appendChild(emptyOption);
-        if (deleteBtn) deleteBtn.style.display = "none";
-        if (infoBtn) infoBtn.style.display = "none";
-        updateTaskTypeStat();
-        updatePopoverContent();
-        return allModels;
-      }
-
-      if (deleteBtn) deleteBtn.style.display = "flex";
-      if (infoBtn) infoBtn.style.display = "block";
-
+      if (!data.success || !Array.isArray(data.models)) throw new Error("模型列表不可用");
+      allModels = data.models;
+      currentModel = data.current_model;
+    } catch (e) {
+      console.error("加载模型列表失败", e);
+      allModels = [];
+      emptyMessage = "模型列表加载失败";
+    }
+    const selector = document.getElementById("modelSelector");
+    if (!selector) return allModels;
+    const deleteBtn = document.getElementById("deleteModelBtn");
+    const infoBtn = document.getElementById("modelInfoBtn");
+    selector.replaceChildren();
+    selector.disabled = !allModels.length;
+    if (deleteBtn) deleteBtn.style.display = allModels.length ? "flex" : "none";
+    if (infoBtn) infoBtn.style.display = allModels.length ? "block" : "none";
+    if (!allModels.length) {
+      const emptyOption = document.createElement("option");
+      emptyOption.value = "";
+      emptyOption.textContent = emptyMessage;
+      selector.appendChild(emptyOption);
+    } else {
       allModels.forEach(function (model) {
         const opt = document.createElement("option");
         opt.value = model.model_id;
         opt.textContent = model.name;
-        if (data.current_model === model.model_id) {
+        if (currentModel === model.model_id) {
           opt.selected = true;
         }
         selector.appendChild(opt);
       });
-
-      updateTaskTypeStat();
-      updatePopoverContent();
-      return allModels;
-    } catch (e) {
-      console.error("加载模型列表失败", e);
-      return [];
     }
+    updateTaskTypeStat();
+    updatePopoverContent();
+    return allModels;
   }
 
   async function confirmDeleteModel() {

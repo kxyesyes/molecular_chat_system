@@ -138,4 +138,27 @@
   .model-status-header {
     display: none !important;
   }
+
+  .activity-header {
+    flex-wrap: wrap;
+  }
+
+  .activity-header .nav-section {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .activity-header .model-status-header {
+    display: flex !important;
+    min-width: 0;
+  }
+
+  .activity-header #modelSelector {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .activity-header .back-btn {
+    flex-shrink: 0;
+  }
 }

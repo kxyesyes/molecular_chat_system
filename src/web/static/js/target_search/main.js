@@ -291,7 +291,7 @@ const TargetSearchApp = (() => {
 
         <div class="action-row target-actions">
           <button class="small-btn secondary" type="button" onclick="TargetSearchApp.loadDetail(${inlineJsArg(item.target_id)})">详情</button>
-          <button class="small-btn primary" type="button" onclick="TargetSearchApp.downloadPreferred(${inlineJsArg(item.target_id)})">下载推荐</button>
+          <button class="small-btn primary" type="button" onclick="TargetSearchApp.downloadPreferred(${inlineJsArg(item.target_id)}, this)">下载推荐</button>
         </div>
       </article>
     `;
@@ -471,7 +471,7 @@ const TargetSearchApp = (() => {
         </div>
         <div class="recommend-actions">
           <span class="score-pill">Score ${item.score || 0}</span>
-          <button class="small-btn primary" type="button" onclick="TargetSearchApp.downloadStructure(${inlineJsArg(item.id)}, ${inlineJsArg(item.file_format || "cif")})">下载推荐</button>
+          <button class="small-btn primary" type="button" onclick="TargetSearchApp.downloadStructure(${inlineJsArg(item.id)}, ${inlineJsArg(item.file_format || "cif")}, this)">下载推荐</button>
         </div>
       </section>
     `;
@@ -537,9 +537,9 @@ const TargetSearchApp = (() => {
         <div class="structure-side">
           <span class="score-pill">Score ${item.score || 0}</span>
           <span class="level-pill">${escapeHtml(item.recommendation_level || "Reference")}</span>
-          <button class="small-btn secondary" type="button" onclick="TargetSearchApp.downloadStructure(${inlineJsArg(item.id)}, 'pdb')">下载 PDB</button>
-          <button class="small-btn secondary" type="button" onclick="TargetSearchApp.downloadStructure(${inlineJsArg(item.id)}, 'cif')">下载 mmCIF</button>
-          <button class="small-btn primary" type="button" onclick="TargetSearchApp.sendToDocking(${inlineJsArg(item.id)})">准备并打开分子对接</button>
+          <button class="small-btn secondary" type="button" onclick="TargetSearchApp.downloadStructure(${inlineJsArg(item.id)}, 'pdb', this)">下载 PDB</button>
+          <button class="small-btn secondary" type="button" onclick="TargetSearchApp.downloadStructure(${inlineJsArg(item.id)}, 'cif', this)">下载 mmCIF</button>
+          <button class="small-btn primary" type="button" onclick="TargetSearchApp.sendToDocking(${inlineJsArg(item.id)}, this)">准备并打开分子对接</button>
         </div>
       </article>
     `;
@@ -592,8 +592,9 @@ const TargetSearchApp = (() => {
     return "Demo seed structure metadata";
   }
 
-  async function downloadPreferred(targetId) {
-    hideMessage();
+  async function downloadPreferred(targetId, button) {
+    if (button) button.disabled = true;
+    showMessage("正在获取推荐结构…", "info");
     try {
       const data = await TargetSearchApi.detail(targetId);
       const preferred = (data.structures || [])[0];
@@ -606,11 +607,13 @@ const TargetSearchApp = (() => {
       await downloadStructure(preferred.id, preferred.file_format || "cif");
     } catch (error) {
       showMessage(formatStructureActionError(error), "error");
+    } finally {
+      if (button) button.disabled = false;
     }
   }
 
-  async function downloadStructure(structureId, format) {
-    hideMessage();
+  async function downloadStructure(structureId, format, button) {
+    if (button) button.disabled = true;
     showMessage("正在检查结构文件状态...", "info");
     try {
       const preflight = await TargetSearchApi.preflight(structureId, format);
@@ -627,11 +630,14 @@ const TargetSearchApp = (() => {
       showMessage(`结构文件已开始下载：${filename}。${formatPreflightMessage(preflight, "download")}`, "success");
     } catch (error) {
       showMessage(formatStructureActionError(error), "error");
+    } finally {
+      if (button) button.disabled = false;
     }
   }
 
-  async function sendToDocking(structureId) {
-    hideMessage();
+  async function sendToDocking(structureId, button) {
+    if (button) button.disabled = true;
+    showMessage("正在准备对接结构…", "info");
     try {
       const preflight = await TargetSearchApi.preflight(structureId, "cif");
       showMessage(formatPreflightMessage(preflight, "docking"), preflight.suitable_for_direct_docking ? "success" : "info");
@@ -644,6 +650,8 @@ const TargetSearchApp = (() => {
       window.location.href = `/molecular-docking?target_structure=${encodeURIComponent(targetId)}&target_structure_id=${encodeURIComponent(targetId)}`;
     } catch (error) {
       showMessage(formatStructureActionError(error), "error");
+    } finally {
+      if (button) button.disabled = false;
     }
   }
 

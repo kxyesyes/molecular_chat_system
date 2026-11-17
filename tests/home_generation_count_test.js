@@ -33,6 +33,12 @@ function payload(options) {
 }
 
 const automatic = load();
+automatic.input("temperatureSlider", 0);
+assert.strictEqual(load(automatic.saved()).options.getConfig().temperature, 0, "zero temperature survives reload");
+const invalidSaved = load({ragCount: [], temperature: "oops", molCount: 999, molCountExplicit: true});
+assert.strictEqual(invalidSaved.options.getConfig().temperature, 0.7);
+assert.strictEqual(invalidSaved.options.getConfig().ragCount, 5);
+assert.strictEqual(invalidSaved.options.getConfig().molCount, undefined);
 assert(!("mol_count" in payload(automatic.options)), "untouched default must not override the prompt's ten molecules");
 automatic.input("temperatureSlider", 0.3);
 assert(!("mol_count" in payload(automatic.options)), "unrelated settings must not opt into a count override");

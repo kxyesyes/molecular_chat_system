@@ -35,6 +35,37 @@ function setup() {
   return { context, elements, requests, S: context.DesignState, P: context.PropertiesPanel, E: context.MoleculeEditor };
 }
 
+test("both copy actions give feedback for an empty editor or unavailable clipboard", async () => {
+  const {context, E} = setup();
+  const messages = [];
+  context.DesignUI.toast = message => messages.push(message);
+  for (const copy of [E.exportSmiles, E.copySmiles]) {
+    await copy();
+    assert.match(messages.at(-1) || "", /请先/);
+  }
+  const editor = context.document.getElementById("ketcher-frame").contentWindow.ketcher;
+  editor.smiles = "CO";
+  context.navigator = {};
+  await E.copySmiles();
+  assert.match(messages.at(-1), /复制失败/);
+  let copied;
+  context.navigator.clipboard = {async writeText(value) {copied = value;}};
+  await E.exportSmiles();
+  assert.equal(copied, "CO");
+});
+
+test("site detection reports empty input and API failure", async () => {
+  const {context, E} = setup();
+  const messages = [];
+  context.DesignUI.toast = message => messages.push(message);
+  await E.detectSites();
+  assert.match(messages.at(-1) || "", /请先/);
+  context.document.getElementById("ketcher-frame").contentWindow.ketcher.smiles = "CO";
+  context.DesignApi.detectSites = async () => ({success:false, error:"无法识别"});
+  await E.detectSites();
+  assert.match(messages.at(-1), /无法识别/);
+});
+
 test("Ketcher imports plain attachment placeholders with distinct unused R-group labels", async () => {
   const { context, E } = setup();
   const loaded = [];
