@@ -1077,8 +1077,10 @@ class ScientificObligationCompiler:
                 # Generated candidates are inputs to the target-design workflow;
                 # the single-structure compiler cannot own this request.
                 return False
+        from src.agent.contracts.generation_request import requests_structural_modification
         if (looks_like_design(query)
-                and re.search(r"优化|optimi[sz]e|lead\s+optimization|降低|提高|改善", query, re.I)):
+                and (requests_structural_modification(query) or
+                     re.search(r"优化|optimi[sz]e|lead\s+optimization|降低|提高|改善", query, re.I))):
             # Lead optimization already has a typed multi-step workflow. Do
             # not let the property-only compiler reject its generation bound.
             return False

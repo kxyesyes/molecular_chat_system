@@ -4,6 +4,8 @@ import pytest
 
 from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
 from tests.agent.test_generation_ranking_contract import CountingTool, GEN, output
+from tests.agent.test_generation_transport_characterization import offline_models
+from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
 from src.agent.contracts import AgentErrorCode, ToolResult
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.tools.property_calculator import PropertyCalculator
@@ -11,7 +13,8 @@ from src.agent.tools.lead_optimization_verifier import LeadOptimizationVerifier
 from tests.test_scientific_reference_target_context import confirmed, pointer, FOLLOWUP, SOURCE
 
 
-def test_handler_passes_confirmed_source_target_to_optimizer(tmp_path, confirmed):
+@pytest.mark.parametrize("query", [FOLLOWUP, FOLLOWUP.replace("优化", "结构改造")])
+def test_handler_passes_confirmed_source_target_to_optimizer(tmp_path, confirmed, query):
     store, service, view, _ = confirmed
     generator = CountingTool(GEN, output(GEN))
     unavailable = [CountingTool(name, ToolResult.error_result(name,
@@ -28,7 +31,7 @@ def test_handler_passes_confirmed_source_target_to_optimizer(tmp_path, confirmed
         required.append((kwargs['requirements'].workflow_name, kwargs['required_tools']))
         return await original(*args, **kwargs)
     handler.process_decision_message = capture
-    run_web_turn(handler, FOLLOWUP, [], 'owner', reference=pointer(view))
+    run_web_turn(handler, query, [], 'owner', reference=pointer(view))
     assert len(calls) == 1
     assert required[0][1] <= set(handler.agent_system.tools), required
     assert calls[0].query.endswith("\n靶点: PDE")
@@ -38,12 +41,51 @@ def test_handler_passes_confirmed_source_target_to_optimizer(tmp_path, confirmed
 
 
 @pytest.mark.parametrize('query', [FOLLOWUP + '\n靶点: PDE\nSMILES: CCN',
+    '请改造这个分子 SMILES: CCO，给出两个候选。',
+    '将 SMILES: CCO 改造成两个针对 PDE 的候选分子',
+    '对分子 SMILES: CCO 做两种结构改造，比较改造前后对 PDE 的活性和分子量。',
     '优化 CCN，针对 BuChE 降低 logP', 'Lead optimization for CCN targeting PDE5A'])
 def test_target_hint_does_not_replace_explicit_lead_optimization(query):
     from src.agent.routing.hybrid import HybridSkillRouter
     decision = HybridSkillRouter().decide(query)
     assert decision.selected_skill == 'hit_to_lead_optimization'
     assert 'target_database_search' not in decision.allowed_tools
+
+
+@pytest.mark.parametrize("query", ["请解释分子改造的含义。", "不要改造分子，只计算 CCO 的分子量。"])
+def test_discussing_or_declining_modification_does_not_run_optimizer(query):
+    from src.agent.routing.hybrid import HybridSkillRouter
+    assert HybridSkillRouter().decide(query).selected_skill != "hit_to_lead_optimization"
+
+
+@pytest.mark.parametrize("query", [
+    "请改造分子 SMILES: CCO，优先降低 logP，给出两个候选。不要做 ADMET。",
+    "SMILES: CCO，优先降低 logP，返回两个新 SMILES。不要做 ADMET。",
+])
+def test_modification_turn_delivers_verified_parent_candidate_comparison(tmp_path, offline_models, query):
+    model = offline_models("OCC\nOCCO\nCC(O)CO")
+    handler = make_web_handler([LLMMolecularGenerator(model), PropertyCalculator(),
+                                LeadOptimizationVerifier()], SQLiteAgentStateStore(tmp_path / "state.sqlite"))
+    complete, _ = run_web_turn(handler, query, [], "owner")
+    assert complete["status"] == "completed", complete["content"]
+    assert len(model.prompts) == 1 and "Original SMILES: CCO\n" in model.prompts[0]
+    assert "基线结构：`CCO`" in complete["content"]
+    assert "| OCCO | logP | -0.001 | -1.029 | 满足比较目标 |" in complete["content"]
+    assert "| CC(O)CO | logP | -0.001 | -0.641 | 满足比较目标 |" in complete["content"]
+
+
+def test_generator_receives_the_displayed_second_parent(confirmed, offline_models):
+    store, service, view, _ = confirmed
+    model = offline_models("NCC\nNCCO\nNCC(O)CO")
+    handler = make_web_handler([LLMMolecularGenerator(model), PropertyCalculator(),
+                                LeadOptimizationVerifier()], store)
+    handler.scientific_references = service
+    query = "对第2个候选做两种结构改造，降低 logP。不要做 ADMET。"
+    complete, _ = run_web_turn(handler, query, [], "owner", reference=pointer(view))
+    assert complete["status"] == "completed", complete["content"]
+    assert len(model.prompts) == 1
+    assert "Original SMILES: CCN\n" in model.prompts[0]
+    assert "基线结构：`CCN`" in complete["content"]
 
 
 def test_handler_displays_independent_generation_constraint_summary(tmp_path):

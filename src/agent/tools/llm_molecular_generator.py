@@ -41,6 +41,7 @@ from src.agent.contracts.generation_request import (
     has_generation_intent,
     parse_chinese_integer,
     parse_generation_count,
+    requests_structural_modification,
     serialize_target_evidence,
     validate_generation_count,
     validate_generation_request_length,
@@ -207,9 +208,11 @@ class LLMMolecularGenerator(BaseMolecularTool):
             
             # 分析查询意图
             try:
+                outputs = query.get('outputs') if isinstance(query, Mapping) else None
                 intent = self._analyze_generation_intent(
                     query_text,
                     requested_count=requested_count,
+                    baseline_bound=isinstance(outputs, Mapping) and 'baseline' in outputs,
                 )
             except MolecularInputUnavailable:
                 result['message'] = 'SMILES 校验暂不可用，未执行分子生成。'
@@ -222,7 +225,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
             except ValueError:
                 return self._invalid_input_result(
                     query_text,
-                    '优化输入中的 SMILES 无效或不受支持；请提供完整结构，不会提取片段替代。',
+                    '请提供一个完整有效的母体 SMILES，或从已显示的候选中选择一个分子再进行改造。',
                     details={'reason': 'invalid_optimization_input'},
                 )
             intent['temperature'] = temperature  # 注入温度参数
@@ -521,6 +524,8 @@ class LLMMolecularGenerator(BaseMolecularTool):
         self,
         query: str,
         requested_count: int | None = None,
+        *,
+        baseline_bound: bool = False,
     ) -> Dict[str, Any]:
         """分析生成意图 - 改进版，更准确识别数量"""
         intent = {
@@ -534,7 +539,8 @@ class LLMMolecularGenerator(BaseMolecularTool):
         query_lower = query.lower()
         
         # 检查是否是优化任务
-        if any(word in query_lower for word in ['optimize', '优化', 'improve', '改进', 'modify', '修改']):
+        requires_parent = baseline_bound or requests_structural_modification(query)
+        if requires_parent or any(word in query_lower for word in ['optimize', '优化', 'improve', '改进', 'modify', '修改']):
             intent['type'] = 'optimization'
             if '|' in query:
                 raise ValueError('CXSMILES extensions are not supported for optimization.')
@@ -547,6 +553,8 @@ class LLMMolecularGenerator(BaseMolecularTool):
             except MolecularInputMissing:
                 # Only genuinely seedless prose retains description generation.
                 smiles_list = []
+            if requires_parent and len(smiles_list) != 1:
+                raise ValueError('A structural modification requires one parent molecule.')
             if smiles_list:
                 intent['base_smiles'] = smiles_list[0]
         

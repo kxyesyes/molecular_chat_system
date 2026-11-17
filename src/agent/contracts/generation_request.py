@@ -214,7 +214,8 @@ _ENGLISH_COUNT_TAIL = (
 )
 _CHINESE_REFERENCE = r"[A-Za-z0-9\u3400-\u9fff-]{1,24}"
 # Returning an ordinal selects an existing result, not a new candidate count.
-_CHINESE_GENERATION_VERB = r"(?:生成|创建|设计|制作|构建|合成|给我|提供|优化成|返回(?!\s*第))"
+_CHINESE_OPTIMIZE_TO = r"(?:优化|改造)成"
+_CHINESE_GENERATION_VERB = rf"(?:生成|创建|设计|制作|构建|合成|给我|提供|{_CHINESE_OPTIMIZE_TO}|返回(?!\s*第))"
 _CHINESE_MOLECULAR_NOUN = (
     r"(?:分子|化合物|结构|候选|配体|骨架|类似物|抑制剂|激动剂|拮抗剂|药物|(?i:SMILES))"
 )
@@ -226,7 +227,7 @@ _CHINESE_OPTIMIZATION_COUNT_SLOT = (
 )
 _CHINESE_OPTIMIZATION_COUNT_BODY = (
     _CHINESE_OPTIMIZATION_COUNT_SLOT +
-    r"(?:种|个)\s*(?:结构)?优化"
+    r"(?:种|个)\s*(?:结构)?(?:优化|改造)"
 )
 _CHINESE_OPTIMIZATION_COUNT_PATTERN = re.compile(
     rf"(?:做|进行|^){_CHINESE_OPTIMIZATION_COUNT_BODY}"
@@ -238,7 +239,7 @@ _CHINESE_COUNT_OBJECT_FOLLOW = (
     rf"(?=[^,，。；;、!?！？\r\n]{{0,24}}{_CHINESE_MOLECULAR_NOUN}|用于|给|$)"
 )
 _CHINESE_OPTIMIZATION_OUTPUT_PATTERN = re.compile(
-    rf"优化成{_CHINESE_OPTIMIZATION_COUNT_SLOT}(?:个|种|份)\s*"
+    rf"{_CHINESE_OPTIMIZE_TO}{_CHINESE_OPTIMIZATION_COUNT_SLOT}(?:个|种|份)\s*"
     rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
 )
 _CHINESE_TARGET_PREFIX = r"(?:[A-Za-z][A-Za-z0-9-]{0,19}\s*)?"
@@ -507,6 +508,24 @@ def _raise_request_too_long(query: str) -> None:
     )
 
 
+def requests_structural_modification(query: str) -> bool:
+    """Recognize an instruction to modify a structure, excluding quoted or declined edits."""
+    if "改造" not in query:
+        return False
+    for clause in re.split(r"[,，。;；!?！？\n]|而是", _strip_generation_literals(query)):
+        prefix, edit, suffix = clause.partition("改造")
+        if not edit or re.search(
+            r"解释|介绍|例如|比如|什么是|如何|不(?:要|用|必|需要|做)|无需|禁止|勿|(?:不|别)(?:再)?\s*$", prefix
+        ):
+            continue
+        if suffix.startswith(("前", "后", "的", "过")):
+            continue
+        if (re.search(r"分子(?!量)|化合物|候选|SMILES", clause, re.I)
+                or re.match(r"\s*(?:一下)?\s*(?:[BCNOFPSI]|\[)", suffix)):
+            return True
+    return False
+
+
 def _build_generation_analysis(query: str) -> _GenerationAnalysis:
     query = str(query)
     if len(query) > MAX_GENERATION_REQUEST_CHARS:
@@ -517,6 +536,11 @@ def _build_generation_analysis(query: str) -> _GenerationAnalysis:
             overlength=True,
         )
     text = _strip_generation_literals(query)
+    if requests_structural_modification(text):
+        # In a modification request, "给出两个候选" specifies the output batch.
+        # Keep existing-candidate property questions outside this count grammar.
+        candidate_count = rf"{_CHINESE_OPTIMIZATION_COUNT_SLOT}(?:个|种)\s*新?候选(?:分子)?"
+        text = re.sub(rf"给出(?={candidate_count}\s*(?:$|[,，。；;!?！？]))", "返回", text)
     occurrences = _collect_generation_occurrences(text)
     masked = _mask_non_actionable_generation_occurrences(
         text,
@@ -996,7 +1020,7 @@ def _has_generation_negation(value: str) -> bool:
     )
     if re.search(
         rf"(?:请勿|勿|不要|无需|不需要|禁止|别|不可|不能|不)\s*"
-        rf"{optimization_reference}(?:{_CHINESE_OPTIMIZATION_ACTION}|优化成)",
+        rf"{optimization_reference}(?:{_CHINESE_OPTIMIZATION_ACTION}|{_CHINESE_OPTIMIZE_TO})",
         value,
     ):
         return True
@@ -1942,6 +1966,7 @@ __all__ = [
     "preserve_generation_trust_envelope",
     "preserve_target_quality",
     "preserve_trust_signals",
+    "requests_structural_modification",
     "sanitize_target_evidence",
     "serialize_target_evidence",
     "validate_generation_count",

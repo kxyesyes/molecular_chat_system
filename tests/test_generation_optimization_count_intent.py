@@ -25,6 +25,9 @@ S05 = "对第 2 个候选做两种优化，优先降低 logP，仍保留分子�
     "对第３个候选做２种优化",
     "对第3个候选分子做两种优化",
     "对这个分子做两种优化",
+    "对这个分子做两种结构改造",
+    "将第3个候选改造成两个新分子",
+    "请改造这个分子 SMILES: CCO，给出两个候选。",
     "对第3个候选分子进行两种结构优化",
     "将第3个候选分子优化成2个候选",
 ])
@@ -66,6 +69,8 @@ def test_ordinal_only_and_non_actionable_counts_keep_default(query):
 @pytest.mark.parametrize("query", [
     "不要对第3个候选分子做两种优化",
     "不要对这个分子做两种优化",
+    "不要对这个分子做两种结构改造",
+    "不要将第3个候选改造成两个新分子",
     "无需对第3个候选分子进行两种结构优化",
     "不要将第3个候选分子优化成2个候选",
 ])
@@ -108,6 +113,18 @@ def test_active_count_is_not_masked_by_prior_negated_optimization(query):
 
 def test_explicit_authoritative_count_remains_authoritative():
     assert preflight_generation_request(S05, 4, count_supplied=True) == 4
+
+
+@pytest.mark.parametrize("query", [
+    "不改造分子，只比较两个候选的分子量。",
+    "请解释分子改造的含义。",
+    "对算法进行改造，给出两个候选方案。",
+    "请解释“对这个分子做两种结构改造”。",
+])
+def test_non_actionable_modification_does_not_dispatch(query):
+    from src.agent.contracts.generation_request import requests_structural_modification
+    assert not requests_structural_modification(query)
+    assert preflight_generation_request(query) is None
 
 
 def test_non_molecular_optimization_does_not_acquire_molecular_intent():
