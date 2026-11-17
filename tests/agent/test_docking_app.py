@@ -236,6 +236,7 @@ async def test_actual_route_setup_shares_one_binding_with_generic_apis(applicati
     app = app_class.__new__(app_class)
     app.__dict__.update(vars(application))
     app.config = {'docking': rig.config}
+    monkeypatch.setitem(app._setup_routes.__globals__, 'user_llm_config_path', lambda: rig.root / 'unused.env')
     calls = []
     def api_routes(fastapi, service, *, task_runtime):
         calls.append(('api', task_runtime, service))

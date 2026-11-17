@@ -777,7 +777,8 @@ def test_activity_model_frontend_uses_model_id_protocol() -> None:
     ).read_text(encoding="utf-8")
 
     assert "opt.value = model.model_id" in source
-    assert "data.current_model === model.model_id" in source
+    assert "currentModel = data.current_model" in source
+    assert "currentModel === model.model_id" in source
     assert "JSON.stringify({ model_id:" in source
     assert "opt.textContent = model.name" in source
     assert "model.model_id === selector.value" in source

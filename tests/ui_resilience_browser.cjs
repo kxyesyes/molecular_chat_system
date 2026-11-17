@@ -171,7 +171,10 @@ test("model list reports failure and its controls fit a long model name", async 
   const page = await pageFor(t, "/activity-prediction", (route, url) => {
     if (available && url.pathname === "/api/activity/models") {
       return route.fulfill({ json: { success: true, current_model: "fixture",
-        models: [{ model_id: "fixture", name: "test-model-".repeat(20) }] } });
+        models: [
+          { model_id: "first", name: "同名模型" },
+          { model_id: "fixture", name: "test-model-".repeat(20) },
+        ] } });
     }
     return route.fulfill({ status: 503, json: { detail: "服务暂不可用" } });
   });
@@ -179,6 +182,8 @@ test("model list reports failure and its controls fit a long model name", async 
   assert(await page.locator("#deleteModelBtn").isHidden());
   available = true;
   await page.reload();
+  await page.locator('#modelSelector option[value="fixture"]').waitFor({state:"attached"});
+  assert.equal(await page.locator("#modelSelector").inputValue(), "fixture");
   for (const width of widths) {
     await page.setViewportSize({ width, height: 812 });
     await page.locator("#modelInfoBtn").click();
