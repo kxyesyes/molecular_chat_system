@@ -1,11 +1,7 @@
-import sys
-from types import SimpleNamespace
-
 import pytest
 
 from tests.agent.test_generation_transport_characterization import offline_models
 
-import src.agent.tools.llm_molecular_generator as generator_module
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.planning import WorkflowPlan
 from src.agent.router import SkillRouter
@@ -469,32 +465,9 @@ def test_supervisor_public_mol_count_is_authoritative_for_target_workflow():
     }
 
 
-def test_supervisor_hit_to_lead_real_generator_reports_public_count(
-    monkeypatch, offline_models,
-):
+def test_supervisor_hit_to_lead_real_generator_reports_public_count(offline_models):
     model = offline_models("\n".join("C" * length for length in range(1, 11)), max_calls=1)
     generator = LLMMolecularGenerator(llm_model=model)
-    monkeypatch.setattr(generator, "_check_rdkit", lambda _result: True)
-    monkeypatch.setattr(generator, "validate_smiles", lambda _smiles: True)
-    # This is a count-transport probe with a synthetic RDKit facade. Whole-input
-    # chemistry has separate real-RDKit tests; patch its new parser seam here.
-    monkeypatch.setattr(generator_module, "parse_molecular_smiles", lambda *_args: [])
-    monkeypatch.setattr(generator_module, "RDKIT_AVAILABLE", False)
-
-    class AcceptingChem:
-        @staticmethod
-        def MolFromSmiles(smiles):
-            return smiles
-
-        @staticmethod
-        def MolToSmiles(molecule):
-            return molecule
-
-    monkeypatch.setitem(
-        sys.modules,
-        "rdkit",
-        SimpleNamespace(Chem=AcceptingChem),
-    )
     tools = build_fake_tools()
     tools["llm_molecular_generator"] = generator
     supervisor = SupervisorAgent(tools=tools)
@@ -512,7 +485,9 @@ def test_supervisor_hit_to_lead_real_generator_reports_public_count(
         if item["tool_name"] == "llm_molecular_generator"
     )
     assert generation_result["quality"]["requested_count"] == 7
+    assert generation_result["quality"]["actual_count"] == 7
     assert len(model.prompts) == 1
+    assert "Original SMILES: CCO\n" in model.prompts[0]
 
 
 def test_supervisor_public_invalid_mol_count_fails_before_tools():
