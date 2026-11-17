@@ -460,28 +460,13 @@ class LLMMolecularGenerator(BaseMolecularTool):
         if not re.match(r"^[A-Za-z0-9@+\-\[\]\(\)=#\\/%.:]+$", value):
             return False
 
-        has_atom = False
-        index = 0
-        while index < len(value):
-            char = value[index]
-            if not char.isalpha():
-                index += 1
-                continue
-            if char == "C" and index + 1 < len(value) and value[index + 1] == "l":
-                has_atom = True
-                index += 2
-                continue
-            if char == "B" and index + 1 < len(value) and value[index + 1] == "r":
-                has_atom = True
-                index += 2
-                continue
-            if char in "BCNOFPSIHbcnops":
-                has_atom = True
-                index += 1
-                continue
-            return False
-
-        return has_atom
+        # Bracketed elements can lie outside the organic subset (e.g. [Na+]).
+        # RDKit validates the element and its chemistry after line extraction.
+        atoms_removed, count = re.subn(
+            r"\[\d*(?:[A-Z][a-z]?|se|as|[bcnops])"
+            r"|Cl|Br|[BCNOFPSIHbcnops]", "", value,
+        )
+        return count > 0 and not re.search(r"[A-Za-z]", atoms_removed)
 
     @classmethod
     def _clean_generated_smiles_line(cls, line: str) -> Optional[str]:

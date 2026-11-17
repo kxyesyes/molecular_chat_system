@@ -88,6 +88,47 @@ def test_generator_receives_the_displayed_second_parent(confirmed, offline_model
     assert "基线结构：`CCN`" in complete["content"]
 
 
+@pytest.mark.parametrize("parent,candidate", [
+    pytest.param("Cn1c(=O)c2c(ncn2C)n(C)c1=O",
+                 "OCn1c(=O)c2c(ncn2C)n(C)c1=O", id="caffeine"),
+    pytest.param("CC(C)(CO)[C@@H](O)C(=O)NCCC(=O)[O-].[Na+]",
+                 "OCC(C)(CO)[C@@H](O)C(=O)NCCC(=O)[O-].[Na+]", id="sodium-salt"),
+    pytest.param("Nc1ncnc2c1ncn2[C@@H]1O[C@H](CO)[C@@H](O)[C@H]1O",
+                 "Nc1ncnc2c1ncn2[C@@H]1O[C@H](CCO)[C@@H](O)[C@H]1O",
+                 id="adenosine-goal-missed"),
+    pytest.param("Cc1cc2nc3c(=O)[nH]c(=O)nc-3n(C[C@H](O)[C@H](O)[C@H](O)CO)c2cc1C",
+                 "OCc1cc2nc3c(=O)[nH]c(=O)nc-3n(C[C@H](O)[C@H](O)[C@H](O)CO)c2cc1C", id="flavin"),
+    pytest.param("O=C1N[C@@H](Cc2ccccc2)C(=O)N[C@@H]1CO",
+                 "O=C1N[C@@H](Cc2ccc(O)cc2)C(=O)N[C@@H]1CO", id="cyclic-dipeptide"),
+    pytest.param(r"CCCCCCCC/C=C\CCCCCCCC(=O)OC[C@H](O)COP(=O)([O-])OCC[N+](C)(C)C",
+                 r"OCCCCCCCC/C=C\CCCCCCCC(=O)OC[C@H](O)COP(=O)([O-])OCC[N+](C)(C)C", id="phospholipid"),
+    pytest.param("C[C@H](CCCC(C)C)[C@H]1CC[C@@H]2[C@@H]3CC=C4C[C@@H](O)CC[C@]4(C)[C@H]3CC[C@]12C",
+                 "C[C@H](CCCC(C)CO)[C@H]1CC[C@@H]2[C@@H]3CC=C4C[C@@H](O)CC[C@]4(C)[C@H]3CC[C@]12C", id="sterol"),
+    pytest.param("N[C@@H](Cc1ccc(O)cc1)C(=O)N[13CH2]C(=O)O",
+                 "N[C@@H](Cc1cc(O)c(O)cc1)C(=O)N[13CH2]C(=O)O", id="isotope-peptide"),
+])
+def test_complex_modification_preserves_comparison(tmp_path, offline_models, parent, candidate):
+    from rdkit import Chem
+    from rdkit.Chem import Crippen
+
+    original, product = map(Chem.MolFromSmiles, (parent, candidate))
+    echo = Chem.MolToSmiles(original, rootedAtAtom=1)
+    model = offline_models(f"{echo}\n{candidate}")
+    handler = make_web_handler([LLMMolecularGenerator(model), PropertyCalculator(),
+                                LeadOptimizationVerifier()], SQLiteAgentStateStore(tmp_path / "state.sqlite"))
+    query = f"请改造这个分子，降低 logP，返回一个新 SMILES。不要做 ADMET。\nSMILES: {parent}"
+    complete, _ = run_web_turn(handler, query, [], "owner", result_format="summary_details_v1")
+    assert len(model.prompts) == 1
+    seed = model.prompts[0].split("Original SMILES: ", 1)[1].splitlines()[0]
+    assert Chem.MolToSmiles(Chem.MolFromSmiles(seed)) == Chem.MolToSmiles(original)
+    baseline, value = (round(Crippen.MolLogP(mol), 3) for mol in (original, product))
+    verdict = "满足比较目标" if value < baseline else "未满足比较目标"
+    assert complete["status"] == ("completed" if value < baseline else "partial")
+    rows = [row for row in complete["content"].splitlines() if " | logP | " in row
+            and row.endswith(("| 满足比较目标 |", "| 未满足比较目标 |"))]
+    assert rows == [f"| {Chem.MolToSmiles(product)} | logP | {baseline} | {value} | {verdict} |"]
+
+
 def test_handler_displays_independent_generation_constraint_summary(tmp_path):
     generator = CountingTool(GEN, output(GEN))
     handler = make_web_handler([generator, PropertyCalculator()],
