@@ -1382,6 +1382,32 @@ def test_oral_screening_keeps_calculated_results_and_partial_status(web_handler,
     assert '无法确定哪个分子更适合口服筛选' in complete['content']
 
 
+@pytest.mark.parametrize('query,labels,values', [
+    ('计算一下拓扑极性表面积和可旋转键数。SMILES: CCOC(=O)c1ccccc1',
+     ('TPSA', '可旋转键数'), ('26.3', '2')),
+    ('计算下面分子的分子式与分子量：CC(=O)NC1=CC=C(O)C=C1',
+     ('分子式', '分子量'), ('C8H9NO2', '151.16')),
+])
+def test_everyday_descriptor_summary(web_handler, query, labels, values):
+    complete, _ = run_web_turn(web_handler, query, result_format='summary_details_v1')
+    assert complete['status'] == 'completed', complete['content']
+    assert all(label in complete['content'] for label in labels)
+    assert all('| ' + value + ' |' in complete['content'] for value in values)
+
+
+def test_short_lower_logp_followup_uses_the_displayed_pair(web_handler):
+    history = []
+    complete, _ = run_web_turn(web_handler, '比较 CCO 和 CCCO 的分子量和 logP。',
+                               history, 'owner', result_format='summary_details_v1')
+    assert complete['status'] == 'completed'
+    complete, frames = run_web_turn(web_handler, '哪一个的 logP 更低？',
+                                    history, 'owner', result_format='summary_details_v1')
+    assert complete['status'] == 'completed'
+    assert '`CCO` 的 LogP 更低' in complete['content']
+    assert '-0.001' in complete['content'] and '0.389' in complete['content']
+    assert not any(frame.get('event', {}).get('event') == 'tool_started' for frame in frames)
+
+
 @pytest.mark.parametrize('query', ['请计算这个分子的 LogP', '计算分子的分子量和 logP。'])
 def test_missing_smiles_waits_for_input_without_scientific_tool(web_handler, query):
     _, frames = run_web_turn(web_handler, query)
@@ -1476,6 +1502,7 @@ def test_missing_logp_value_resumes_with_supplied_smiles_over_websocket(actual_a
     ('计算分子的分子量和 logP。', 'CCO'),
     ('计算分子量和 logP。', 'SMILES 是 CCO。'),
     ('请帮我计算一下分子的分子量和 logP。', 'SMILES 为 CCO'),
+    ('只计算分子量和 logP，不要预测 ADMET。', 'SMILES: CCO'),
 ])
 def test_missing_smiles_continuation_resumes_same_scientific_obligation(web_handler, reconnect, query, field):
     async def drive_two_turns():
@@ -1569,6 +1596,8 @@ def test_browser_cannot_enable_missing_structure_admission(web_handler, query):
     '计算该分子的分子量。使用阿司匹林。',
     'Calculate the logP of this molecule. It is aspirin.',
     '预测该分子的 ADMET 特征，结构是阿司匹林。',
+    '只计算阿司匹林的分子量和 logP，不要预测 ADMET。',
+    '只计算分子量和 logP，不要预测 ADMET。另查找靶点。',
 ])
 def test_bare_subject_clarification_requires_the_entire_generic_request(query):
     plan = ScientificObligationCompiler().compile(query)

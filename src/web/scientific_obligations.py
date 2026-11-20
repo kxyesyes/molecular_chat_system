@@ -374,7 +374,8 @@ _METRIC_PATTERNS: tuple[tuple[Metric, tuple[re.Pattern[str], ...]], ...] = (
     ),
     (
         "tpsa",
-        (re.compile(r"(?<![A-Za-z0-9_])tpsa(?![A-Za-z0-9_])", re.I),),
+        (re.compile(r"(?<![A-Za-z0-9_])(?:tpsa|topological\s+polar\s+surface\s+area)(?![A-Za-z0-9_])", re.I),
+         re.compile(r"拓扑极性表面积")),
     ),
     (
         "mw",
@@ -727,7 +728,7 @@ def _metric_list_has_unknown_token(query: str) -> bool:
     query = OPTIMIZATION_INTERPRETATION.sub('', query)
     # A forward reference introduces the explicit structure list, not a metric.
     # Only strip the complete grammatical subject; keep every following metric.
-    query = re.sub(r'^\s*(?:请\s*)?(?:计算|比较|对比)\s*(?:以下|下列)'
+    query = re.sub(r'^\s*(?:请\s*)?(?:计算|比较|对比)\s*(?:以下|下列|下面)'
                    r'(?:[一二三四五六七八九十两\d]+个)?分子\s*的', '计算 ', query)
     # An explicitly supported bound is an evaluation of the preceding
     # descriptors, not another metric name. Keep unknown trailing clauses
@@ -1004,12 +1005,15 @@ class ScientificObligationCompiler:
     @staticmethod
     def is_bare_generic_molecule_request(query: str) -> bool:
         """A reply may fill a missing molecule only in a wholly generic request."""
+        if not _explicit_admet_request(query):
+            query = re.sub(r'[，,；;。]\s*(?:不要|无需|不用)(?:预测|计算|运行|做)?\s*ADMET\s*[。.!！]?\s*$',
+                           '', query, flags=re.I)
         terms = [pattern.pattern + r'(?:\s*值)?' for _, patterns in _METRIC_PATTERNS for pattern in patterns]
         terms += [_PROPERTY_REQUEST.pattern, _DRUG_LIKENESS_REQUEST.pattern, _ADMET_PATTERN.pattern]
         term = '(?:' + '|'.join(terms) + r')(?:\s*(?:特征|风险))?'
         action = r'(?:计算|分析|评估|预测|返回|给出|列出)'
         subject = r'(?:(?:这个|该)?分子\s*的\s*)?'
-        first = r'(?:请\s*)?(?:帮我\s*)?' + action + r'\s*(?:一下\s*)?' + subject + term
+        first = r'(?:请\s*)?(?:帮我\s*)?(?:只|仅)?' + action + r'\s*(?:一下\s*)?' + subject + term
         separator = r'\s*(?:[、，,。；;\n]\s*(?:并且?|再|也)?|以及|并且?|再|和|及|与|and)\s*'
         chinese = first + '(?:' + separator + '(?:' + action + r'\s*)?' + term + ')*'
         metrics = term + r'(?:\s*(?:,|and)\s*' + term + ')*'
@@ -1120,6 +1124,10 @@ class ScientificObligationCompiler:
             # fall through to the generic activity-only or exclusion paths.
             return not comparison_request(query).supported
         if positive.strip() != query.strip():
+            # A wholly generic request can still ask for its missing SMILES.
+            # The clarification freezes only the explicitly requested tools.
+            if ScientificObligationCompiler.is_bare_generic_molecule_request(query):
+                return True
             # Exclusions and restarts belong to the full Web planner's shared
             # positive/forbidden contract. This small profile must not count a
             # prohibited endpoint as a requested capability or bypass that gate.

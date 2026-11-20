@@ -340,13 +340,17 @@ def batch_lipinski_followup(query, history, session_id):
 
 def batch_logp_followup(query, history, session_id):
     """Compare two descriptors from the immediately prior accepted batch."""
-    if not re.fullmatch(
-        r'\s*(?:刚才|之前|上一轮)(?:比较的)?(?:这)?(?:两个|两种)分子[，,]?\s*'
-        r'哪个\s*log\s*p\s*(?:更高|较高)[？?，,]\s*差值(?:是)?多少[？?。.!！]?'
-        r'(?:\s*仅根据(?:刚才|之前|上一轮)的计算回答[。.!！]?)?\s*', query, re.I):
+    match = re.fullmatch(
+        r'\s*(?P<prior>(?:刚才|之前|上一轮)(?:比较的)?(?:这)?(?:两个|两种)分子[，,]?\s*)?'
+        r'哪(?:一)?个(?:分子)?的?\s*log\s*p\s*(?:更|较)(?P<direction>高|低)'
+        r'(?:[？?，,]\s*差值(?:是)?多少)?[？?。.!！]?'
+        r'(?:\s*仅根据(?:刚才|之前|上一轮)的计算回答[。.!！]?)?\s*', query, re.I)
+    if not match:
         return None
     previous = history[-1] if history else {}
     evidence = previous.get('batch_property_evidence')
+    if not evidence and not match['prior']:
+        return None  # Other workflows may own an implicit candidate comparison.
     if ((previous.get('agent_used') is not True and previous.get('batch_property_evidence_reused') is not True)
             or not isinstance(evidence, dict) or evidence.get('session_id') != session_id
             or not evidence.get('trace_id') or not evidence.get('evidence_id')
@@ -361,8 +365,10 @@ def batch_logp_followup(query, history, session_id):
     if difference < 0.001:
         conclusion = '两者显示值相近，无法根据当前精度确定高低。'
     else:
-        higher = first if values[0] > values[1] else second
-        conclusion = f"`{higher['smiles']}` 的 LogP 更高，差值为 {difference:.3f}。"
+        direction = match['direction']
+        select = max if direction == '高' else min
+        selected = select(evidence['rows'], key=lambda row: row['logp'])
+        conclusion = f"`{selected['smiles']}` 的 LogP 更{direction}，差值为 {difference:.3f}。"
     return {'content': f"`{first['smiles']}`：{values[0]:.3f}；`{second['smiles']}`：{values[1]:.3f}。\n\n{conclusion}",
             'status': 'completed', 'reused_evidence': evidence}
 
