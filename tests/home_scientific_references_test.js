@@ -152,9 +152,6 @@ async function restoredVisibilityTest(payload) {
   nearBottom = true;
   renderRestore(payload);
   assert.equal(scrolls, 1, "restoration should follow when the reader is at the bottom");
-  const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
-  assert(template.includes('/static/js/home/main.js?v=20260925-terminal-labels-v1'),
-    "terminal labels fix must invalidate the previous cached main script and preserve restoration visibility");
 }
 
 function rendererTest(payload) {

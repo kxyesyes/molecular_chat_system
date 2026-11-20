@@ -462,32 +462,6 @@ class StructureDownloader:
             return stem.split("-model_", 1)[0].rsplit(".", 1)[0]
         raise StructureDownloadError("AlphaFold record does not expose a UniProt model id.")
 
-    def _alphafold_url(self, structure: dict, file_format: str) -> str:
-        return self._alphafold_urls(structure, file_format)[0]
-
-    def _legacy_alphafold_download(self, structure: dict, file_format: str, local_path: str, absolute_path: Path) -> dict:
-        try:
-            url = self._alphafold_url(structure, file_format)
-            response = _request_structure(
-                url,
-                {"alphafold.ebi.ac.uk"},
-                timeout=45,
-            )
-            _reject_redirect_response(response)
-            response.raise_for_status()
-            self._publish_response(response, absolute_path, file_format)
-            self._mark_downloaded(structure["id"], local_path, download_url=url, file_format=file_format)
-            return {
-                "success": True,
-                "file_path": str(absolute_path),
-                "local_file_path": local_path,
-                "file_format": file_format,
-                "message": "Downloaded and cached AlphaFold structure file.",
-            }
-        except (requests.RequestException, StructureDownloadError) as exc:
-            logger.warning("AlphaFold download failed for %s: %s", structure.get("structure_id"), exc)
-            raise StructureDownloadError(f"Failed to download AlphaFold model as {file_format}: {exc}") from exc
-
     def _absolute_cache_path(self, local_path: str | Path) -> Path:
         path = Path(local_path)
         if path.is_absolute():
