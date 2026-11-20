@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Any
 
 from src.agent.persistence.base import AgentStateStore
-from src.agent.contracts.generation_request import has_generation_intent
+from src.agent.contracts.generation_request import has_generation_intent, requests_structural_modification
 from src.agent.contracts.target_request import analyze_target_request, TARGET_CLARIFICATION
 from src.agent.planning.request_parsing import (
     positive_intent_text, property_calculation_forbidden, requests_generated_properties,
@@ -87,7 +87,8 @@ class HybridSkillRouter:
         llm: Any = None,
     ) -> RouteDecision:
         text = query.strip()
-        lower = positive_intent_text(text).lower()
+        positive = positive_intent_text(text)
+        lower = positive.lower()
         if self._is_general_chat(lower):
             return RouteDecision(
                 selected_skill=None,
@@ -164,7 +165,9 @@ class HybridSkillRouter:
 
         if self._contains(lower, "全面", "综合", "成药性", "comprehensive", "full analysis"):
             add("comprehensive_evaluation", 0.95, "comprehensive workflow phrase")
-        if self._contains(lower, "优化", "降低", "提高", "改善", "hit-to-lead", "lead optimization"):
+        modify_molecule = requests_structural_modification(positive) and (
+            has_smiles or self._contains(lower, "候选", "分子", "化合物", "smiles"))
+        if modify_molecule or self._contains(lower, "优化", "降低", "提高", "改善", "hit-to-lead", "lead optimization"):
             add("hit_to_lead_optimization", 0.95, "lead optimization intent")
         # Referring to values already in the conversation is ordinary chat.
         # Remove only that object of “引用”, retaining independent source requests.
@@ -207,8 +210,8 @@ class HybridSkillRouter:
             r'\b(?:retrieve|search|find|look\s+up|literature|knowledge\s+base)\b)',
             lower, re.I))
 
-        explicit_lead_optimization = has_smiles and self._contains(
-            lower, "优化", "hit-to-lead", "lead optimization", "optimize", "optimise")
+        explicit_lead_optimization = has_smiles and (modify_molecule or self._contains(
+            lower, "优化", "hit-to-lead", "lead optimization", "optimize", "optimise"))
         if has_target and generation and not explicit_lead_optimization:
             add("target_driven_design", 1.0, "target plus design workflow intent")
         if generation:
@@ -224,7 +227,7 @@ class HybridSkillRouter:
             add("target_database_search", 0.92, "target structure search intent")
         if self._contains(lower, "哪些靶点", "作用于哪些", "潜在靶点", "可能作用", "反向寻靶", "反向预测靶点", "reverse target"):
             add("reverse_target_prediction", 0.95, "reverse target intent")
-        if activity_intent_requested(lower):
+        if activity_intent_requested(lower) and not modify_molecule:
             add("activity_prediction", 0.9, "activity endpoint requested")
         bounds, unknown_bounds = requested_property_bounds(lower)
         generated_properties = generation and (bounds or unknown_bounds or
@@ -262,7 +265,7 @@ class HybridSkillRouter:
             "配体",
         ) and self._contains(lower, "center", "size", "box"):
             add("docking_simulation", 1.0, "structured docking files and box intent")
-        if (lookup_has_target
+        if (lookup_has_target and not modify_molecule
                 and not (LABELED_ACTIVITY_COMPARISON.fullmatch(text) and not molecular_input.blocks_execution)
                 and self._contains(
             lookup_text,

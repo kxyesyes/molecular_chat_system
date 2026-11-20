@@ -10,7 +10,7 @@ import re
 
 from src.agent.contracts.scientific_references import reference_json
 from src.agent.contracts.resolved_molecule import ResolvedScientificMolecule
-from src.agent.contracts.generation_request import has_generation_intent
+from src.agent.contracts.generation_request import has_generation_intent, requests_structural_modification
 from src.agent.contracts.target_request import analyze_target_request
 from src.agent.utils.validators import InputValidator
 from src.agent.routing.hybrid import HybridSkillRouter
@@ -35,7 +35,7 @@ def scientific_intent(query):
         return False
     # Generation can use a prior molecule. Resolve distinguishes source
     # references from output counts, independently of endpoint/router scores.
-    if has_generation_intent(query):
+    if has_generation_intent(query) or requests_structural_modification(query):
         return True
     # Reuse the existing local routing policy, without an LLM or memory. A
     # docking-readiness search is not a request to calculate the selected ligand.
@@ -380,8 +380,8 @@ class ScientificReferenceService:
                 for row in view["ordered_candidates"]):
             raise ValueError(REFERENCE_CLARIFICATION)
         optimization = r"优化|\b(?:optimi[sz](?:e|ation|ing)|hit-to-lead)\b"
-        if (not re.search(optimization, query, re.I)
-                or re.search(r"(?:不(?:要|需要)?|无需|别|勿|停止)\s*(?:再)?\s*优化|"
+        if (not (re.search(optimization, query, re.I) or requests_structural_modification(query))
+                or re.search(r"(?:不(?:要|需要)?|无需|别|勿|停止)\s*(?:再)?\s*(?:优化|改造)|"
                              r"\b(?:not|never|don't)\s+(?:\w+\s+){0,3}optimi[sz]|"
                              r"解释|介绍|什么是|\b(?:explain|define|what\s+(?:is|are))\b",
                              query, re.I)

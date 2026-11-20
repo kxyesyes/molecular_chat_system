@@ -656,7 +656,10 @@ def web_scientific_display(result, *, concise=False, requested_admet_endpoints=(
         elif name == 'activity_predictor' and data:
             lines.append(_activity_display_answer(data, concise=concise))
         elif (name == 'lead_optimization_verifier' and block.get('status') == 'succeeded'
-              and block.get('scientific_usable') is not False and isinstance(data, dict)):
+              and isinstance(data, dict)
+              and (block.get('scientific_usable') is not False
+                   or (block.get('reason_codes') == ['optimization_goal_not_supported']
+                       and data.get('status') == 'evaluated_not_improved'))):
             candidates = data.get('candidates', [])
             section = ['## 优化目标检查', '',
                        f"基线结构：`{_display_cell(data.get('baseline_smiles'))}`", '',

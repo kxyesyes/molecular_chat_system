@@ -114,6 +114,15 @@ def test_real_response_candidates_are_not_displaced_by_injected_seed(offline_mod
     assert "符合要求" not in result["reasoning"]
 
 
+def test_modification_uses_parent_and_excludes_equivalent_echo(offline_models):
+    model = offline_models("OCC\nOCCO\nCC(O)CO")
+    result = LLMMolecularGenerator(model).execute(
+        "请改造这个分子 SMILES: CCO，降低 logP，返回2个新SMILES。")
+    assert result["success"]
+    assert [row["smiles"] for row in result["data"]] == ["OCCO", "CC(O)CO"]
+    assert "Original SMILES: CCO\n" in model.prompts[0]
+
+
 def test_seed_and_duplicate_variants_do_not_fill_candidate_shortage(offline_models):
     model = offline_models(f"{ASPIRIN}\n{ASPIRIN_EQUIVALENT}\nCCO\nOCC")
     result = LLMMolecularGenerator(model).execute({

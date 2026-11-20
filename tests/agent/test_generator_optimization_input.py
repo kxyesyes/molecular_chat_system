@@ -24,6 +24,9 @@ def boundary(monkeypatch, offline_models):
 
 
 INVALID = [
+    '改造分子 SMILES: CC(C)((',
+    '请改造这个分子，给出两个候选。',
+    '请改造这两个分子。SMILES: CCO\nSMILES: CCN',
     'optimize SMILES: CCO)((',
     'optimize SMILES: CCO]',
     'optimize SMILES: CCO.',

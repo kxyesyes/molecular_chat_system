@@ -36,10 +36,12 @@ _PIC50_NATURAL_CONVERSION = re.compile(
 def comparison_tools(query):
     """Recognize explicit multi-endpoint comparisons, not open-ended design."""
     from src.agent.planning.request_parsing import positive_intent_text, wants_admet, wants_activity
+    from src.agent.contracts.generation_request import requests_structural_modification
     from src.agent.planning.comparison_request import COMPARISON_PROPERTY_TERMS
     positive = positive_intent_text(query)
     if (not re.search(r"比较|对比|\bcompare\b", positive, re.I)
             or not wants_activity(query)
+            or requests_structural_modification(positive)
             or re.search(r"生成|设计|优化|对接|反向|寻靶|靶点搜索|靶点检索|"
                          r"\b(?:generate|design|optimi\w*|dock\w*|reverse)\b", positive, re.I)):
         return ()
