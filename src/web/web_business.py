@@ -939,20 +939,11 @@ class WebTurnProjection:
             if endpoint_view.get('reused_evidence') is not None:
                 self.entry['candidate_evidence'] = deepcopy(endpoint_view.pop('reused_evidence'))
             return endpoint_view
-        batch_lipinski = property_comparison.batch_lipinski_followup(self.query, self.history, self.session_id)
-        if batch_lipinski is not None:
-            if batch_lipinski.get('pending') is not None:
-                self.entry['batch_lipinski_pending'] = deepcopy(batch_lipinski.pop('pending'))
-            if batch_lipinski.get('reused_evidence') is not None:
-                self.entry['batch_property_evidence'] = deepcopy(batch_lipinski.pop('reused_evidence'))
-                self.entry['batch_property_evidence_reused'] = True
-            return batch_lipinski
-        batch_logp = property_comparison.batch_logp_followup(self.query, self.history, self.session_id)
-        if batch_logp is not None:
-            if batch_logp.get('reused_evidence') is not None:
-                self.entry['batch_property_evidence'] = deepcopy(batch_logp.pop('reused_evidence'))
-                self.entry['batch_property_evidence_reused'] = True
-            return batch_logp
+        batch_followup = property_comparison.batch_property_followup(self.query, self.history, self.session_id)
+        if batch_followup is not None:
+            answer, history_update = batch_followup
+            self.entry.update(history_update)
+            return answer
         source_status_question = re.fullmatch(
             r'反向寻靶数据源的校验(?:现在)?进行到哪里[？?]\s*还要等多久[？?。]?\s*', self.query)
         if source_status_question:

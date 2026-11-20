@@ -1,11 +1,11 @@
 """Bounded, socket-local descriptor context; never infer numbers from prose.
 
-Only one validated molecule per turn can be reused. No shared cache, database
-search, model-generated value, or implicit molecular identity is consulted.
+Single-molecule and batch follow-ups use verified records from the prior turn.
 """
 import math
 import re
 from collections.abc import Mapping
+from copy import deepcopy
 
 from src.agent.planning.request_parsing import positive_intent_text, restricted_properties
 from src.agent.utils.validators import InputValidator
@@ -277,6 +277,23 @@ def accepted_batch_property_evidence(result, query, session_id):
     return {'session_id': session_id, 'trace_id': result['trace_id'],
             'evidence_id': sequence[0]['quality']['evidence_id'],
             'rows': [{'smiles': smiles, **rows[smiles]} for smiles in expected]}
+
+
+def batch_property_followup(query, history, session_id) -> tuple[dict, dict] | None:
+    """Return the visible answer and the evidence to save in this turn's history."""
+    reply = batch_lipinski_followup(query, history, session_id)
+    if reply is None:
+        reply = batch_logp_followup(query, history, session_id)
+    if reply is None:
+        return None
+
+    history_update = {}
+    if 'pending' in reply:
+        history_update['batch_lipinski_pending'] = deepcopy(reply['pending'])
+    if 'reused_evidence' in reply:
+        history_update['batch_property_evidence'] = deepcopy(reply['reused_evidence'])
+        history_update['batch_property_evidence_reused'] = True
+    return {'content': reply['content'], 'status': reply['status']}, history_update
 
 
 def batch_lipinski_followup(query, history, session_id):

@@ -1075,6 +1075,7 @@ def test_property_recall_does_not_hide_new_computation():
 @pytest.mark.parametrize(('selection', 'included', 'excluded'), [
     ('前两个。', ('CCO', 'CCN'), 'CCC'),
     ('第一个和第三个。', ('CCO', 'CCC'), 'CCN'),
+    ('第三个和第一个。', ('CCC', 'CCO'), 'CCN'),
     ('CCO 和 CCC。', ('CCO', 'CCC'), 'CCN'),
     ('OCC 和 CCC。', ('CCO', 'CCC'), 'CCN'),
 ])
@@ -1091,6 +1092,13 @@ def test_batch_lipinski_clarification_continues_with_selected_rows(web_handler, 
     assert all(value in complete['content'] for value in included)
     assert excluded not in complete['content']
     assert '生物利用度' in complete['content']
+    comparison, frames = run_web_turn(web_handler, '哪一个的 logP 更低？',
+                                      history=history, session=session)
+    assert comparison['status'] == 'completed'
+    content = comparison['content']
+    assert content.index(f'`{included[0]}`') < content.index(f'`{included[1]}`')
+    assert f'`{excluded}`' not in content
+    assert not any(frame.get('event', {}).get('event') == 'tool_started' for frame in frames)
 
 
 def test_natural_candidate_lipophilicity_followup_uses_previous_turn(web_handler):
