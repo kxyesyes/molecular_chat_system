@@ -44,6 +44,60 @@ async function pageFor(t, pathname, api) {
   return page;
 }
 
+test("same-name uploads remain distinguishable when selecting, asking and reviewing history", async t => {
+  const name = "测定记录 (复核).csv";
+  const older = {id:"doc-old", name, upload_number:null};
+  const newer = {id:"doc-new", name, upload_number:2};
+  const docs = [older];
+  const question = {name, project_name:"组一", upload_number:2, question:"哪一批？", answer:"夏季"};
+  const asked = [];
+  const page = await pageFor(t, "/", (route, url) => {
+    const reply = json => route.fulfill({json});
+    const base = "/api/workspace";
+    if (url.pathname === base + "/projects") return reply([{id:"p", name:"组一"}]);
+    if (url.pathname === base + "/projects/p") return reply({id:"p", documents:docs, questions:[question], bookmarks:[]});
+    if (url.pathname === base + "/documents/doc-new/questions") {
+      asked.push(route.request().postDataJSON().question);
+      return reply({answer:"夏季"});
+    }
+    if (url.pathname === base + "/questions") return reply([question]);
+    if (url.pathname === base + "/runs") return reply([]);
+    if (url.pathname === "/api/tasks") return reply({data:[]});
+    return route.fulfill({status:404, json:{}});
+  });
+  page.setDefaultTimeout(3000);
+  const dialog = page.locator("#workspaceDialog");
+  const chip = page.locator(".workspace-attachment");
+  async function open(title) {
+    await page.locator("#openSidebarBtn").click();
+    await page.getByRole("button",{name:title, exact:true}).first().click();
+    await dialog.waitFor();
+  }
+  await open("我的项目");
+  await dialog.getByRole("button",{name:"用此文档提问"}).click();
+  assert.equal(await chip.locator("span").innerText(), "提问文档 · " + name);
+  older.upload_number = 1;
+  docs.unshift(newer);
+  await open("我的项目");
+  const label = name + "（第 2 次上传）";
+  const row = dialog.locator(".workspace-row").filter({has: page.getByText(label,{exact:true})}).first();
+  await row.waitFor();
+  assert.match(await chip.locator("span").innerText(), /第 1 次上传/);
+  const download = row.getByRole("link",{name:"下载原件"});
+  assert.equal(await download.getAttribute("download"), name);
+  assert.match(await download.getAttribute("href"), /\/doc-new$/);
+  await row.getByRole("button",{name:"用此文档提问"}).click();
+  assert.equal(await chip.locator("span").innerText(), "提问文档 · " + label);
+  await page.getByRole("textbox",{name:"消息"}).fill(question.question);
+  await page.getByRole("button",{name:"发送消息"}).click();
+  await page.locator(".assistant-message").getByText("夏季").waitFor();
+  assert.deepEqual(asked, [question.question]);
+  await page.getByText(label + " · " + question.question,{exact:true}).waitFor();
+  await open("分析记录");
+  await dialog.getByText(question.question,{exact:true}).click();
+  await dialog.getByText("组一 · " + label,{exact:true}).waitFor();
+});
+
 test("sidebar project, document question, and analysis archive work at phone width", async t => {
   const base = "/api/workspace";
   let project, document, savedQuestion, bookmarked = false;

@@ -53,10 +53,14 @@ window.HomeWorkspace = (() => {
     items.append(node("h3", title));
     if (!count) items.append(node("p", "暂无记录"));
   }
+  function documentLabel(doc) {
+    return doc.upload_number ? doc.name + "（第 " + doc.upload_number + " 次上传）" : doc.name;
+  }
   function questionRow(q) {
     const details = node("details");
     details.className = "workspace-row";
-    details.append(node("summary", q.question), node("small", q.name), node("p", q.answer));
+    const source = q.project_name ? q.project_name + " · " + documentLabel(q) : documentLabel(q);
+    details.append(node("summary", q.question), node("small", source), node("p", q.answer));
     items.append(details);
   }
   function recordRow(kind, key, title, info, canAssign) {
@@ -121,7 +125,7 @@ window.HomeWorkspace = (() => {
   function setDocument(doc) {
     selected = doc;
     chip.hidden = !doc;
-    chip.firstChild.textContent = doc ? "提问文档 · " + doc.name : "";
+    chip.firstChild.textContent = doc ? "提问文档 · " + doc.label : "";
     onSelection();
   }
   async function render() {
@@ -135,7 +139,9 @@ window.HomeWorkspace = (() => {
     const project = await request(base + "/projects/" + select.value);
     section("项目文档", project.documents.length);
     for (const doc of project.documents) {
-      const el = row(doc.name);
+      const label = documentLabel(doc);
+      if (selected?.id === doc.id && selected.label !== label) setDocument({...doc, label, project:project.id});
+      const el = row(label);
       const download = node("a","下载原件");
       download.href = base + "/documents/" + encodeURIComponent(doc.id); download.download = doc.name;
       download.onclick = run(async () => {
@@ -154,7 +160,7 @@ window.HomeWorkspace = (() => {
       });
       el.append(download, button("用此文档提问", () => {
         if (!allowedToAttach()) throw new Error("请先结束当前聊天任务");
-        setDocument({...doc, project:project.id}); dialog.close();
+        setDocument({...doc, label, project:project.id}); dialog.close();
         document.querySelector(".fill textarea").focus();
       }));
     }
