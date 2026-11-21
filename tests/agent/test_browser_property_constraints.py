@@ -102,6 +102,8 @@ def test_batch_property_followup_reuses_evidence_after_lipinski():
     assert all(value in followup['content'] for value in ('CCO', 'CCN', '1.763'))
     assert WebTurnProjection(query, 'other', [turn.entry]).followup(enable_tools=True)['status'] == 'not_calculated'
     assert WebTurnProjection(query + '再预测活性。', 's', [turn.entry]).followup(enable_tools=True) is None
+    new_calculation = query + '再计算 CCC 的分子量。'
+    assert WebTurnProjection(new_calculation, 's', [turn.entry]).followup(enable_tools=True) is None
     natural = '刚才这两个分子哪个 LogP 更高，差值是多少？仅根据刚才的计算回答。'
     answer = WebTurnProjection(natural, 's', [turn.entry]).followup(enable_tools=True)
     assert answer['status'] == 'completed'
