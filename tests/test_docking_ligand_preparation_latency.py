@@ -38,7 +38,11 @@ def test_implicit_h_ligand_is_normalized_before_first_meeko_launch(ligand_case, 
         ligand = Chem.RWMol(molecule)
         hydrogen = next(atom for atom in ligand.GetAtomWithIdx(0).GetNeighbors() if atom.GetAtomicNum() == 1)
         ligand.RemoveAtom(hydrogen.GetIdx())
+        # Older RDKit AddHs marks this carbon as ineligible for implicit H.
+        # Model an omitted hydrogen in the upload, not a carbon radical.
+        ligand.GetAtomWithIdx(0).SetNoImplicit(False)
         Chem.SanitizeMol(ligand)
+        assert ligand.GetAtomWithIdx(0).GetNumImplicitHs() == 1
     else:
         ligand = Chem.RemoveHs(molecule)
     write_sdf(Chem, source, ligand)
