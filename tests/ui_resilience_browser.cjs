@@ -875,6 +875,148 @@ for (const firstRead of [true, false]) {
   }
 }
 
+test("training preview, confirmation and POST use the latest same-name file and confirmed fields", async t => {
+  const posts = [];
+  const page = await pageFor(t, "https://medchat.test/activity-prediction", async (route, url) => {
+    if (url.pathname === "/api/activity/train") {
+      const req = route.request();
+      const data = await new Response(req.postDataBuffer(), {headers: req.headers()}).formData();
+      const file = data.get("file");
+      data.delete("file");
+      posts.push({name: file.name, hash: createHash("sha256").update(Buffer.from(await file.arrayBuffer())).digest("hex"),
+        fields: Object.fromEntries(data)});
+      return route.fulfill({status: 503, json: {detail: "fixture failure"}});
+    }
+    return route.fulfill({json: {success: true, models: []}});
+  });
+  await activityTab(page, "train");
+  await page.evaluate(() => {
+    const read = FileReader.prototype.readAsText;
+    window.reads = [];
+    FileReader.prototype.readAsText = function (file) {
+      reads.push(fail => {
+        if (fail) { this.dispatchEvent(new Event("error")); return Promise.resolve(); }
+        return new Promise(resolve => {
+          this.addEventListener("loadend", resolve, {once: true}); read.call(this, file);
+        });
+      });
+    };
+  });
+  const picker = page.locator("#trainFile");
+  const choose = content => picker.setInputFiles({name: "dataset.csv", mimeType: "text/csv", buffer: Buffer.from(content)});
+  const release = (index, fail = false) => page.evaluate(([i, f]) => reads[i](f), [index, fail]);
+  const confirmPreview = page.locator('[onclick="confirmPreflight()"]');
+  const launch = page.locator("#trainBtn");
+  async function assertBlocked() {
+    await page.evaluate(() => { showLaunchModal(); confirmLaunch(); });
+    assert(await page.locator("#launch-modal").isHidden());
+    assert.equal(posts.length, 0);
+  }
+  const a = "smiles,label\nCO,1\n";
+  const b = '\ufeffcanonical_smiles,value,structure,measured,"sample,\tnote"\r\nCCO,2,CCN,7,"line 1\r\nline ""2"""\r\n';
+  await page.locator("#targetColumn").fill("measured");
+  await choose(a);
+  await choose(b);
+  await release(0);
+  assert(await page.locator("#preflight-modal").isHidden(), "obsolete read must not open a preview");
+  await assertBlocked();
+  await release(1);
+  const headers = ["canonical_smiles", "value", "structure", "measured", "sample,\tnote"];
+  assert.deepEqual(await page.locator("#preflight-preview th").allTextContents(), headers);
+  assert.deepEqual(await page.locator("#preflight-preview td").allTextContents(), ["CCO", "2", "CCN", "7", 'line 1\nline "2"']);
+  await confirmPreview.click();
+  assert.equal(await page.locator("#targetColumn").inputValue(), "measured");
+
+  await choose(a);
+  await choose(b);
+  await release(3);
+  await release(2, true);
+  assert.deepEqual(await page.locator("#preflight-preview th").allTextContents(), headers);
+  assert.equal(await page.locator("#trainHint").textContent(), "");
+  await confirmPreview.click();
+  assert.equal(await page.locator("#targetColumn").inputValue(), "measured");
+  await launch.click();
+  await page.locator('#launch-modal [onclick="closeLaunchModal()"]').last().click();
+  await page.evaluate(() => confirmLaunch());
+  assert.equal(posts.length, 0);
+
+  await choose(a);
+  await release(4, true);
+  await assertBlocked();
+  await choose("smiles\n");
+  await release(5);
+  await assertBlocked();
+  await choose(a);
+  await picker.setInputFiles([]);
+  await release(6);
+  assert(await page.locator("#preflight-modal").isHidden());
+  await assertBlocked();
+
+  await choose(b);
+  await release(7);
+  await confirmPreview.click();
+  await page.locator("#smilesColumn").fill("structure");
+  await page.locator("#trainTaskType").selectOption("classification");
+  await page.locator("details.advanced summary").click();
+  await page.locator("#classificationThreshold").fill("0");
+  await page.locator("#classificationDirection").selectOption("less_or_equal");
+  await page.locator("#epochs").fill("7");
+  await launch.click();
+  const summary = await page.locator("#launch-summary").innerText();
+  for (const text of ["dataset.csv", "structure", "measured", "分类", "7", "0", "≤"]) assert(summary.includes(text), text);
+  // A later DOM update must not silently alter a request already shown for confirmation.
+  await page.evaluate(() => { document.getElementById("epochs").value = "13"; });
+  const response = page.waitForResponse(r => r.url().endsWith("/api/activity/train"));
+  await page.locator("#confirmLaunchBtn").dblclick({delay: 40});
+  await response;
+  await page.evaluate(() => confirmLaunch());
+  assert.deepEqual(posts, [{name:"dataset.csv", hash:createHash("sha256").update(b).digest("hex"), fields:{
+    target_column:"measured", smiles_column:"structure", task_type:"classification", split_strategy:"scaffold", epochs:"7",
+    learning_rate:"0.001", batch_size:"64", dropout:"0.20", num_layers:"5", hidden_size:"256", weight_decay:"0.0001",
+    patience:"12", loss_metric:"MSE", lr_scheduler:"Cosine", classification_threshold:"0", classification_direction:"less_or_equal",
+  }}]);
+  // Retry as regression with a new file. Earlier manual columns survive and
+  // classification-only values left in the form are omitted from the request.
+  await choose(a);
+  const tabFile = "structure\tmeasured\r\nCCC\t6\r\n";
+  await choose(tabFile);
+  await release(9);
+  await release(8);
+  assert.deepEqual(await page.locator("#preflight-preview th").allTextContents(), ["structure", "measured"]);
+  await confirmPreview.click();
+  await page.locator("#trainTaskType").selectOption("regression");
+  await launch.click();
+  assert(!(await page.locator("#launch-summary").innerText()).includes("分类阈值"));
+  const second = page.waitForResponse(r => r.url().endsWith("/api/activity/train"));
+  await page.locator("#confirmLaunchBtn").click();
+  await second;
+  assert.equal(posts.length, 2);
+  const {classification_direction, classification_threshold, ...common} = posts[0].fields;
+  assert.deepEqual(posts[1], {name:"dataset.csv", hash:createHash("sha256").update(tabFile).digest("hex"),
+    fields:{...common, task_type:"regression", epochs:"13"}});
+  await page.locator("#targetColumn").fill("");
+  await choose(a);
+  await release(10);
+  await confirmPreview.click();
+  assert.equal(await page.locator("#targetColumn").inputValue(), "label");
+  await launch.click();
+  await choose(b);
+  assert(await page.locator("#launch-modal").isHidden());
+  await page.evaluate(() => confirmLaunch());
+  assert.equal(posts.length, 2);
+  await release(11);
+  await confirmPreview.click();
+  assert.equal(await page.locator("#targetColumn").inputValue(), "value");
+  await page.locator("#splitStrategy").selectOption("random");
+  await launch.click();
+  assert((await page.locator("#launch-summary").innerText()).includes("Random Split"));
+  const randomSplit = page.waitForResponse(r => r.url().endsWith("/api/activity/train"));
+  await page.locator("#confirmLaunchBtn").click();
+  await randomSplit;
+  assert.equal(posts.length, 3);
+  assert.equal(posts[2].fields.split_strategy, "random");
+});
+
 test("training file preflight, confirmation and failed submission stay usable at 320px", async t => {
   let posts = 0;
   const page = await pageFor(t, "/activity-prediction", route => {

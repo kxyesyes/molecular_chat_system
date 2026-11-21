@@ -456,7 +456,7 @@ def test_activity_api_uses_budgeted_isolated_execution_path(
     ]
 
 
-def test_training_api_and_frontend_forward_split_strategy(
+def test_training_api_forwards_split_strategy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -499,10 +499,3 @@ def test_training_api_and_frontend_forward_split_strategy(
     assert captured["smiles_column"] == "structure"
     assert captured["classification_threshold"] == 5
     assert captured["classification_direction"] == "greater_or_equal"
-
-    source = (
-        Path(__file__).parents[1]
-        / "src/web/static/js/activity_prediction/main.js"
-    ).read_text(encoding="utf-8")
-    assert 'formData.append("split_strategy"' in source
-    assert 'document.getElementById("splitStrategy").value' in source
