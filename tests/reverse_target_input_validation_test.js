@@ -35,13 +35,13 @@ function setup({valid = true, smiles = "CCO", maxRefine = "50", file = true, mod
     RtUI: {setSubmitEnabled() {}, showLoading() { calls.loading++; }, hideLoading() {},
       showError(message) { calls.errors.push(message); }},
     RtApi: {predict3D: request("3d"), predict2D: request("2d"), batchPredict: request("batch")},
-    RtResults: {displayResults() {}, displayBatchResults() {}},
+    RtResults: {clear() {}, display(query) { calls.query = query; }},
   };
   context.window = context;
   vm.createContext(context);
   vm.runInContext(source, context);
-  context._bindPredictForm();
-  context._bindBatchForm();
+  context.bindQueryForm("predictForm", false);
+  context.bindQueryForm("batchForm", true);
   return {calls, ids, context, submit: id => forms[id].submit({target: forms[id], preventDefault() {}})};
 }
 
@@ -52,7 +52,7 @@ for (const value of ["1.9", "0", "101"]) {
     assert.deepEqual(h.calls.requests, []);
     assert.deepEqual(h.calls.validation, ["predictForm"]);
     assert.equal(h.calls.loading, 0);
-    assert.equal(h.context.lastQuerySmiles, undefined);
+    assert.equal(h.calls.query, undefined);
   });
 }
 
@@ -108,10 +108,7 @@ test("valid batch and 2D forms still submit once", async () => {
 
 test("batch details retain the submitted threshold and organism independently of single searches", async () => {
   const h = setup();
-  h.context.lastOrganismFilter = "Human";
-  h.context.RtResults.displayBatchResults = (rows, options) => { h.calls.detailOptions = options; };
   h.ids.batchForm.fields = [["threshold", "0"]];
   await h.submit("batchForm");
-  assert.deepEqual({...h.calls.detailOptions}, {threshold: 0, organismFilter: ""});
-  assert.equal(h.context.lastOrganismFilter, "Human");
+  assert.deepEqual({...h.calls.query}, {mode: "batch", querySmiles: "", threshold: 0, organismFilter: ""});
 });

@@ -17,8 +17,6 @@ const RtUI = (() => {
     $("single-panel").style.display = tabName === "single" ? "block" : "none";
     $("batch-panel").style.display = tabName === "batch" ? "block" : "none";
 
-    // 重置结果和错误
-    $("results").classList.remove("show");
     $("error").style.display = "none";
   }
 
@@ -26,7 +24,6 @@ const RtUI = (() => {
   function showLoading() {
     $("loading").classList.add("show");
     $("error").style.display = "none";
-    $("results").classList.remove("show");
   }
 
   function hideLoading() {
@@ -140,10 +137,9 @@ const RtUI = (() => {
   }
 
   // ── CSV 导出 ──
-  function exportData() {
-    const data = window.currentBatchResults || window.currentSingleResults;
-    if (!data) return;
-    const rows = _flattenExportRows(data);
+  function exportData(result) {
+    if (!result) return;
+    const rows = _flattenExportRows(result.rows, result.querySmiles);
     if (!rows.length) {
       alert("暂无可导出的结果");
       return;
@@ -189,7 +185,7 @@ const RtUI = (() => {
     URL.revokeObjectURL(url);
   }
 
-  function _flattenExportRows(data) {
+  function _flattenExportRows(data, querySmiles) {
     if (!Array.isArray(data)) return [];
     const rows = [];
     data.forEach((item) => {
@@ -218,7 +214,7 @@ const RtUI = (() => {
         rows.push({
           row_index: item.row_index,
           original_row_index: item.original_row_index ?? item.row_index,
-          query_smiles: window.currentQuerySmiles || "",
+          query_smiles: querySmiles || "",
           status: item.status || "completed",
           error: item.error || "",
           ...item,

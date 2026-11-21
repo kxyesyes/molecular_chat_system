@@ -19,12 +19,12 @@ assert.match(
 );
 assert.match(
   template,
-  /<script\s+src="\/static\/js\/reverse_target\/main\.js\?v=20261111-query-details"><\/script>/,
+  /<script\s+src="\/static\/js\/reverse_target\/main\.js\?v=20261121-query-result"><\/script>/,
   'the local reverse-target entry point must invalidate batch detail changes',
 );
 assert.match(
   template,
-  /<script\s+src="\/static\/js\/reverse_target\/ui_manager\.js\?v=20261111-assay"><\/script>/,
+  /<script\s+src="\/static\/js\/reverse_target\/ui_manager\.js\?v=20261121-query-result"><\/script>/,
   'the reverse-target UI manager cache must invalidate assay export changes',
 );
 
