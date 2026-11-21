@@ -562,6 +562,128 @@ test("homepage retains zero temperature and opens one knowledge graph per click"
   assert.deepEqual(await page.evaluate(() => window.openedGraphUrls), ["./cadd_interactive_radial.html"]);
 });
 
+test("batch docking submits only the current ligand list or the ordered original files", async t => {
+  const posts = [], notices = [], alerts = [];
+  const digest = bytes => createHash("sha256").update(bytes).digest("hex");
+  const page = await pageFor(t, "https://medchat.test/molecular-docking", async (route, url) => {
+    if (url.pathname !== "/api/docking/batch_submit") return route.fulfill({status: 404, json: {}});
+    const req = route.request();
+    const form = await new Response(req.postDataBuffer(), {headers: req.headers()}).formData();
+    const files = [];
+    for (const [field, file] of form) {
+      if (typeof file !== "string") files.push([field, file.name, digest(Buffer.from(await file.arrayBuffer()))]);
+    }
+    posts.push({fields: Object.fromEntries([...form].filter(([,v]) => typeof v === "string")), files});
+    return route.fulfill({json: {total: 2, completed: 1, failed: 1, results: [
+      {index: 1, ligand_name: "first", input_type: "smiles", success: true, job_id: "batch-first"},
+      {index: 2, ligand_name: "second", input_type: "smiles", success: false, error: "fixture error"},
+    ]}});
+  });
+  page.on("dialog", async d => { alerts.push(d.message()); await d.dismiss(); });
+  await page.exposeFunction("recordBatchNotice", message => notices.push(message));
+  await page.evaluate(() => {
+    const toast = Utils.showToast;
+    Utils.showToast = (s, ...args) => { recordBatchNotice(s); return toast.call(Utils, s, ...args); };
+    const read = FileReader.prototype.readAsText;
+    window.batchReads = [];
+    FileReader.prototype.readAsText = function (file, ...args) {
+      if (file.name !== "batch.csv") return read.call(this, file, ...args);
+      batchReads.push(fail => {
+        if (fail) { this.dispatchEvent(new Event("error")); return; }
+        return new Promise(resolve => {
+          this.addEventListener("loadend", resolve, {once: true});
+          read.call(this, file, ...args);
+        });
+      });
+    };
+  });
+  const batch = page.locator("#batch-mode-btn"), single = page.locator("#single-mode-btn");
+  const list = page.locator("#batch-smiles-input"), picker = page.locator("#batch-smiles-file");
+  const start = page.locator("#start-btn");
+  const choose = value => picker.setInputFiles({name: "batch.csv", mimeType: "text/csv", buffer: Buffer.from(value)});
+  const release = (n, fail = false) => page.evaluate(([n, fail]) => batchReads[n](fail), [n, fail]);
+  const protein = Buffer.from("HEADER    TEST\r\nEND\r\n");
+  await batch.click();
+  await page.locator("#protein-file").setInputFiles({name: "batch.pdb", mimeType: "text/plain", buffer: protein});
+  await page.waitForFunction(() => AppState.currentProteinData?.includes("HEADER"));
+  await list.fill("CC draft");
+  await choose("CC old");
+  await choose("CO newest");
+  await release(1);
+  await release(0);
+  assert.equal(await list.inputValue(), "CO newest");
+
+  let readIndex = 2;
+  for (const action of ["replace", "edit", "clear", "mode", "reset"]) {
+    for (const fail of [false, true]) {
+      await list.fill("CCC draft");
+      await choose("CC obsolete");
+      const old = readIndex++;
+      let expected = "CCC draft";
+      if (action === "replace") { await choose("CO chosen"); await release(readIndex++); expected = "CO chosen"; }
+      if (action === "edit") { expected = "CN edited"; await list.fill(expected); }
+      if (action === "clear") { expected = ""; await list.fill(""); }
+      if (action === "mode") { await single.click(); await batch.click(); }
+      if (action === "reset") { expected = ""; await page.evaluate(() => resetDocking()); }
+      const before = notices.length;
+      await release(old, fail);
+      assert.equal(await list.inputValue(), expected);
+      assert.deepEqual(notices.slice(before), []);
+    }
+  }
+  await page.locator("#protein-file").setInputFiles({name: "batch.pdb", mimeType: "text/plain", buffer: protein});
+  await page.waitForFunction(() => AppState.currentProteinData?.includes("HEADER"));
+  const params = {center_x:"1.5", center_y:"-2", center_z:"3", size_x:"18", size_y:"22", size_z:"24",
+    exhaustiveness:"12", num_modes:"5", energy_range:"2.5"};
+  for (const [id, value] of Object.entries(params)) await page.locator("#"+id).fill(value);
+  await list.fill("CC draft");
+  await choose("CC old");
+  await choose("CO unreadable");
+  await release(readIndex++);
+  assert.equal(await list.inputValue(), "CC draft");
+  await start.click();
+  await release(readIndex++, true);
+  assert.match(await list.evaluate(el => el.validationMessage), /读取失败/);
+  await start.click();
+  assert.equal(posts.length, 0);
+  const imported = "  smiles,name\n# comment\nCC,first\n\ninvalid second\n";
+  await choose(imported);
+  await release(readIndex++);
+  assert.equal(await list.inputValue(), imported);
+  await start.dblclick();
+  await page.locator("#results-content tbody tr").first().waitFor();
+  // Multipart serializes textarea line breaks as CRLF, including the final newline.
+  assert.deepEqual(posts, [{fields: {batch_smiles: imported.replaceAll("\n", "\r\n"), ...params, manual_center:"true"},
+    files: [["protein_file", "batch.pdb", digest(protein)]]}]);
+  const rows = page.locator("#results-content tbody tr");
+  assert.deepEqual(await rows.locator("td:nth-child(2)").allTextContents(), ["first", "second"]);
+  assert.deepEqual(await rows.locator("td:nth-child(4)").allTextContents(), ["成功", "失败"]);
+
+  await choose("CC obsolete");
+  await list.fill("CN manual");
+  await release(readIndex++, true);
+  const manualResponse = page.waitForResponse(r => r.url().endsWith("/batch_submit"));
+  await start.click();
+  await manualResponse;
+  assert.equal(posts[1].fields.batch_smiles, "CN manual");
+
+  const ligandFiles = ["first\r\nEND\r\n", "second\nEND\n"].map(content => ({
+    name: "duplicate.pdbqt", mimeType: "text/plain", buffer: Buffer.from(content),
+  }));
+  await page.locator("#ligand-file").setInputFiles(ligandFiles);
+  await start.click();
+  assert.match(alerts.at(-1), /不能同时提供/);
+  assert.equal(posts.length, 2);
+  await list.fill("");
+  const response = page.waitForResponse(r => r.url().endsWith("/batch_submit"));
+  await start.click();
+  await response;
+  assert.deepEqual(posts.slice(2), [{fields:{...params, manual_center:"true"}, files:[
+    ["protein_file", "batch.pdb", digest(protein)],
+    ...ligandFiles.map(f => ["ligand_files", f.name, digest(f.buffer)]),
+  ]}]);
+});
+
 test("docking history remains reachable at phone and desktop widths", async t => {
   const page = await pageFor(t, "/molecular-docking");
   for (const width of widths) {

@@ -207,7 +207,7 @@
       </div>
 
       <!-- 提交按钮 -->
-      <button id="start-btn" class="submit-btn" onclick="startDocking()">
+      <button id="start-btn" class="submit-btn" onclick="startDocking(event)">
         开始分子对接分析
       </button>
       <button id="cancel-docking-btn" class="action-btn btn-secondary" type="button" onclick="cancelDockingTask()" disabled>
@@ -397,8 +397,8 @@
   <script src="/static/js/docking/interactions.js?v=20261112-pose-contacts-v3"></script>
   <script src="/static/js/docking/docking_box.js?v=20261012-box-confirmation-v1"></script>
   <script src="/static/js/docking/workspace.js?v=20261112-2"></script>
-    <script src="/static/js/docking/ui_manager.js?v=20261121-receptor-load"></script>
-    <script src="/static/js/docking/main.js?v=20261121-receptor-load"></script>
+    <script src="/static/js/docking/ui_manager.js?v=20261121-batch-input"></script>
+    <script src="/static/js/docking/main.js?v=20261121-batch-input"></script>
 </body>
 
 </html>
