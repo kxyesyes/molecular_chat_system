@@ -42,7 +42,8 @@ function pending() {
 }
 
 function createBrowser() {
-  const searches = [], details = [], elements = new Map();
+  const searches = [], details = [], handoffs = [], elements = new Map();
+  const location = { href: "/target-search" };
   function element(id) {
     if (!elements.has(id)) elements.set(id, {
       value: "", textContent: "", innerHTML: "", querySelector: () => null,
@@ -56,17 +57,55 @@ function createBrowser() {
     return request.promise;
   }
   const context = vm.createContext({
-    window: {}, document: {
+    window: { location }, document: {
       addEventListener() {}, getElementById: element, querySelectorAll: () => [],
       createElement: () => ({ appendChild() {} }),
     },
-    TargetSearchApi: { search: () => queue(searches), detail: () => queue(details) },
+    TargetSearchApi: {
+      search: () => queue(searches), detail: () => queue(details),
+      sendToDocking: () => queue(handoffs),
+    },
   });
   vm.runInContext(source, context);
-  return { app: vm.runInContext("TargetSearchApp", context), element, searches, details };
+  return { app: vm.runInContext("TargetSearchApp", context), element, searches, details, handoffs, location };
 }
 
 const settle = () => new Promise(resolve => setImmediate(resolve));
+
+const prepared = id => ({ file_format: "pdb", structure_db_id: id, preflight: { cache_status: "available" } });
+
+test("only the last structure selected for docking can navigate", async () => {
+  const { app, handoffs, location } = createBrowser();
+  const firstButton = {}, secondButton = {};
+  const first = app.sendToDocking(11, firstButton);
+  const second = app.sendToDocking(22, secondButton);
+  handoffs[0].resolve(prepared(11));
+  await first;
+  assert.equal(location.href, "/target-search");
+  assert.equal(firstButton.disabled, false);
+  assert.equal(secondButton.disabled, true);
+  handoffs[1].resolve(prepared(22));
+  await second;
+  assert.equal(location.href, "/molecular-docking?target_structure=22");
+});
+
+test("a superseded handoff cannot replace a failure or navigate after clearing the search", async () => {
+  const { app, handoffs, location, element } = createBrowser();
+  const first = app.sendToDocking(11, {});
+  const second = app.sendToDocking(22, {});
+  handoffs[1].reject(new Error("current failure"));
+  await second;
+  const message = element("targetMessage").textContent;
+  handoffs[0].reject(new Error("older failure"));
+  await first;
+  assert.match(message, /current failure/);
+  assert.equal(element("targetMessage").textContent, message);
+  const retry = app.sendToDocking(22, {});
+  app.searchPreset("");
+  handoffs[2].resolve(prepared(22));
+  await retry;
+  assert.equal(location.href, "/target-search");
+});
 
 test("an older query cannot publish results, errors, or release a newer query's loading state", async () => {
   const { app, element, searches } = createBrowser();

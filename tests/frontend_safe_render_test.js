@@ -144,7 +144,7 @@ assert(
   "Target search external links must use DOM APIs and the trusted URL policy",
 );
 assert(
-  targetSearchHtml.includes('/static/js/target_search/main.js?v=20261121-pdb-handoff'),
+  targetSearchHtml.includes('/static/js/target_search/main.js?v=20261121-structure-selection'),
   "Target search must invalidate the cached script after safety changes",
 );
 assert(
