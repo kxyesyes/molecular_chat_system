@@ -16,6 +16,7 @@ class Element {
   replaceChildren(...children) { this._text = ''; this.children = children; }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   getAttribute(name) { return this.attributes[name] ?? null; }
+  removeAttribute(name) { delete this.attributes[name]; }
   addEventListener(name, callback) { this.events[name] = callback; }
   focus() { this.focused = true; }
   async dispatch(name) { return this.events[name]?.({preventDefault() {}}); }
@@ -54,7 +55,7 @@ assert(template.includes('id="structure-file"'), 'provide a real file input');
 assert(template.includes('id="file-help"'), 'explain supported upload formats');
 assert(styles.includes('align-items: stretch'), 'keep both workspace columns at the same row height');
 assert(template.includes('/static/css/admet.css?v=20261005-38874c3'), 'bust stale ADMET stylesheet caches after layout changes');
-assert(template.includes('/static/js/admet.js?v=20261116-ui-feedback-v1'), 'bust stale ADMET script caches after behavior changes');
+assert(template.includes('/static/js/admet.js?v=20261121-current-input'), 'bust stale ADMET script caches after behavior changes');
 assert(!template.includes('置信度'), 'do not imply a confidence score that the API does not return');
 assert(styles.includes('max(460px, calc(100vh - 260px))'), 'fill the initial workspace with meaningful content');
 assert(!styles.includes('min-height: 620px'), 'do not force a large empty result panel');

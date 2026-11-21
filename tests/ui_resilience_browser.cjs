@@ -1025,3 +1025,153 @@ test("reverse target keeps ranks, details, CSV bytes and uploaded inputs with th
   assert.deepEqual(await reverseTargetCsv(other), otherCsv);
   assert.deepEqual(posts, ["predict_3d", "predict", "batch_predict"]);
 });
+
+test("ADMET ignores pending, unreadable and superseded file selections", async t => {
+  const posts = [];
+  const page = await pageFor(t, "https://medchat.test/admet", (route, url) => {
+    if (url.pathname === "/api/admet/predict") {
+      posts.push(route.request().postDataJSON().smiles);
+      return route.fulfill({json: {status: "unavailable", data: []}});
+    }
+    return route.fulfill({status: 404, body: ""});
+  });
+  await page.evaluate(() => {
+    const read = File.prototype.text;
+    File.prototype.text = async function () {
+      if (this.name === "slow.smi") {
+        await new Promise((resolve, reject) => {
+          window.finishFile = fail => fail ? reject(new Error("old file error")) : resolve();
+        });
+      }
+      return read.call(this);
+    };
+  });
+  const file = page.locator("#structure-file");
+  const choose = (name, data) => file.setInputFiles({name, mimeType: "text/plain", buffer: Buffer.from(data)});
+  const checkBlocked = async () => {
+    // Exercise the form handler even if the submit control is disabled.
+    await page.evaluate(async () => {
+      document.querySelector("#admet-form").requestSubmit();
+      document.querySelector("#rerun-admet").click();
+      await window.MedChatADMET.submit();
+    });
+    assert.equal(await page.locator("#run-admet").isDisabled(), true);
+    assert.equal(await page.locator("#rerun-admet").isDisabled(), true);
+    assert.equal(await page.locator("#structure-preview").isVisible(), false);
+    assert.deepEqual(posts, []);
+  };
+  async function startSlow() {
+    await page.evaluate(() => { delete window.finishFile; });
+    await choose("slow.smi", "CN old");
+    await page.waitForFunction(() => !!window.finishFile);
+  }
+  async function release(fail) {
+    await page.evaluate(async fail => {
+      window.finishFile(fail);
+      await new Promise(r => setTimeout(r, 0));
+    }, fail);
+  }
+  const preview = page.locator("#structure-preview-image");
+  const previewSmiles = async () => new URL(await preview.getAttribute("src"), page.url()).searchParams.get("smiles");
+  await page.locator("#smiles-input").fill("CCO");
+  await page.locator("#file-mode").click();
+  await startSlow();
+  await checkBlocked();
+  await choose("empty.csv", "smiles\n");
+  await page.getByText("文件中没有可读取的 SMILES", {exact: true}).first().waitFor();
+  await checkBlocked();
+  await release(false);
+  await checkBlocked();
+
+  await startSlow();
+  await choose("current.smi", "CCN second");
+  await page.waitForFunction(() => !document.getElementById("run-admet").disabled);
+  await release(true);
+  assert.equal(await previewSmiles(), "CCN");
+  assert.equal(await page.locator("#file-name").textContent(), "current.smi");
+  assert.match(await page.locator("#file-status").textContent(), /已读取/);
+
+  await startSlow();
+  await page.locator("#smiles-mode").click();
+  await release(false);
+  assert.equal(await page.locator("#smiles-input").inputValue(), "CCO");
+  assert.equal(await previewSmiles(), "CCO");
+
+  await page.evaluate(() => { delete window.finishFile; });
+  await page.locator("#file-mode").click();
+  await page.waitForFunction(() => !!window.finishFile);
+  await page.locator("#reset-admet").click();
+  await release(false);
+  assert.equal(await page.locator("#smiles-input").inputValue(), "");
+  assert.equal(await file.evaluate(el => el.files.length), 0);
+  assert.equal(await page.locator("#structure-preview").isVisible(), false);
+  assert.equal(await page.locator("#results-panel").getAttribute("data-state"), "not_calculated");
+  assert.deepEqual(posts, []);
+});
+
+test("ADMET evaluates the active input once and keeps file bytes, model evidence and sessions separate", async t => {
+  const raw = Buffer.from('\ufeffname,canonical_smiles\r\n"first, ""quoted""",CCN\r\nsecond,CN\r\n');
+  async function openSession(tag) {
+    const posts = [], previews = [];
+    const page = await pageFor(t, "https://medchat.test/admet", (route, url) => {
+      if (url.pathname === "/api/utils/smiles_to_image") {
+        previews.push(url.searchParams.get("smiles"));
+        return route.fulfill({contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>'});
+      }
+      if (url.pathname !== "/api/admet/predict") return route.fulfill({status: 404});
+      const payload = route.request().postDataJSON();
+      posts.push(payload);
+      // Synthetic transport values for checking the renderer, not model output.
+      const provenance = {tool_name: "admet_predictor", model_name: tag, model_version: "fixture-v1"};
+      return route.fulfill({json: {status: "succeeded", provenance, data: [{
+        ...payload, status: "succeeded", admet: {prediction_method: "admet_ai", model_name: tag,
+          model_version: "fixture-v1", weights_id: "fixture-weights-" + tag, demo_mode: false, fallback_used: false,
+          endpoints: {fixture: {value: 0, unit: "fixture-unit", source: "admet_ai_model"}}},
+      }]}});
+    });
+    return {page, posts, previews};
+  }
+  async function evaluate(session, button, smiles, expectedCount) {
+    const {page, posts, previews} = session;
+    await page.locator(button).dblclick({delay: 120});
+    await page.waitForFunction(s => document.querySelector(".smiles-record")?.textContent === s &&
+      document.getElementById("results-panel").dataset.state === "succeeded", smiles);
+    assert.equal(posts.length, expectedCount);
+    assert.deepEqual(posts.at(-1), {smiles, molecule_id: "molecule-001"});
+    await page.waitForFunction(expected => {
+      const image = document.getElementById("structure-preview-image");
+      return image.currentSrc && image.naturalWidth > 0 && !image.hidden &&
+        new URL(image.currentSrc).searchParams.get("smiles") === expected;
+    }, smiles);
+    assert(previews.includes(smiles));
+    assert.equal(await page.locator(".endpoint-value").textContent(), "0");
+    assert.equal(await page.locator(".endpoint-unit").textContent(), "fixture-unit");
+    assert.equal(await page.locator(".endpoint-source").textContent(), "模型预测");
+  }
+  const a = await openSession("session-A"), b = await openSession("session-B");
+  await a.page.locator("#smiles-input").fill("CO");
+  await a.page.locator("#file-mode").click();
+  await a.page.locator("#structure-file").setInputFiles({name: "input.csv", mimeType: "text/csv", buffer: raw});
+  await a.page.getByText(/已读取第一个结构/).waitFor();
+  const bytes = await a.page.locator("#structure-file").evaluate(async el => {
+    const digest = await crypto.subtle.digest("SHA-256", await el.files[0].arrayBuffer());
+    return [el.files[0].name, Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("")];
+  });
+  assert.deepEqual(bytes, ["input.csv", createHash("sha256").update(raw).digest("hex")]);
+  await evaluate(a, "#run-admet", "CCN", 1);
+  const evidence = await a.page.locator("#evidence-panel").textContent();
+  assert.match(evidence, /session-A/);
+  assert.match(evidence, /fixture-v1/);
+  assert.match(evidence, /fixture-weights-session-A/);
+
+  await b.page.locator("#smiles-input").fill("CCC");
+  await evaluate(b, "#rerun-admet", "CCC", 1);
+  assert.match(await b.page.locator("#evidence-panel").textContent(), /fixture-weights-session-B/);
+  assert.equal(await a.page.locator("#evidence-panel").textContent(), evidence);
+  await a.page.locator("#smiles-mode").click();
+  assert.equal(await a.page.locator("#smiles-input").inputValue(), "CO");
+  await evaluate(a, "#rerun-admet", "CO", 2);
+  await a.page.locator("#file-mode").click();
+  await evaluate(a, "#rerun-admet", "CCN", 3);
+  assert.equal(await b.page.locator(".smiles-record").textContent(), "CCC");
+});

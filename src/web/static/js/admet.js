@@ -318,10 +318,20 @@
   let inFlight = false;
   let activeGroup = "";
   let activeInputMode = "smiles";
-  function updateSmilesCount() {
+  let fileSelection = null;
+  function currentSmiles() {
+    if (activeInputMode === "smiles") return get("smiles-input").value.trim();
+    return fileSelection?.smiles || "";
+  }
+  function refreshInput() {
     const input = get("smiles-input");
     const counter = get("smiles-count");
     if (input && counter) counter.textContent = String(input.value.length) + "/" + String(input.maxLength || 8192);
+    const smiles = currentSmiles();
+    updatePreview(smiles);
+    const blocked = inFlight || (activeInputMode === "file" && !smiles);
+    get("run-admet").disabled = blocked;
+    get("rerun-admet").disabled = blocked;
   }
   function activateInputMode(mode) {
     const smilesMode = get("smiles-mode");
@@ -338,27 +348,31 @@
     if (label) label.textContent = isFile ? "文件" : "SMILES";
     const input = get("smiles-input");
     if (input) input.required = !isFile;
+    // A completed file can be reused. A read abandoned on a tab switch cannot.
+    if (!isFile && !fileSelection?.smiles) fileSelection = null;
+    const file = get("structure-file").files?.[0];
+    if (isFile && file && file !== fileSelection?.file) readSelectedFile();
+    else refreshInput();
   }
-  async function handleFileChange(event) {
-    if (inFlight) return;
-    const file = event && event.target && event.target.files && event.target.files[0];
+  async function readSelectedFile() {
+    const file = get("structure-file").files?.[0];
+    const selection = file ? {file, smiles: ""} : null;
+    fileSelection = selection;
     const status = get("file-status");
-    const name = get("file-name");
+    get("file-name").textContent = file ? file.name : "选择结构文件";
+    status.textContent = file ? "正在读取结构文件…" : "文件中的第一个结构将用于本次评估。";
+    refreshInput();
     if (!file) return;
-    if (name) name.textContent = file.name || "已选择文件";
     try {
       const content = await file.text();
+      if (selection !== fileSelection) return;
       const smiles = extractUploadedSmiles(file.name, content);
       if (!smiles) throw new Error("文件中没有可读取的 SMILES");
-      const input = get("smiles-input");
-      if (input) input.value = smiles;
-      updateSmilesCount();
-      updatePreview(smiles);
-      if (status) status.textContent = "已读取第一个结构，可直接运行评估。";
+      selection.smiles = smiles;
+      status.textContent = "已读取第一个结构，可直接运行评估。";
+      refreshInput();
     } catch (error) {
-      if (status) status.textContent = error && error.message ? error.message : "文件读取失败，请检查文件格式。";
-      setStatus("invalid_input", "文件输入无效。");
-      setError(status ? status.textContent : "文件读取失败，请检查文件格式。");
+      if (selection === fileSelection) status.textContent = error.message || "文件读取失败，请检查文件格式。";
     }
   }
   function updatePreview(smiles) {
@@ -366,38 +380,27 @@
     const image = get("structure-preview-image");
     const message = get("structure-preview-message");
     if (!preview || !image) return;
-    const value = String(smiles || "").trim();
-    if (!value) { preview.hidden = true; return; }
-    image.setAttribute("src", "/api/utils/smiles_to_image?smiles=" + encodeURIComponent(value) + "&width=300&height=180");
-    image.addEventListener("error", () => {
-      preview.hidden = false;
-      image.hidden = true;
-      if (message) { message.hidden = false; message.textContent = "无法生成结构预览，请检查 SMILES。"; }
-    }, { once: true });
-    image.addEventListener("load", () => {
-      image.hidden = false;
-      if (message) message.hidden = true;
-    }, { once: true });
-    preview.hidden = false;
+    preview.hidden = !smiles;
+    if (!smiles) { image.removeAttribute("src"); return; }
+    const src = "/api/utils/smiles_to_image?smiles=" + encodeURIComponent(smiles) + "&width=300&height=180";
+    if (image.getAttribute("src") === src) return;
+    image.hidden = true;
+    if (message) message.hidden = true;
+    image.setAttribute("src", src);
   }
   function setInFlight(value) {
     inFlight = value;
-    ["run-admet", "rerun-admet", "reset-admet", "load-example", "load-example-caffeine", "load-example-ibuprofen", "smiles-mode", "file-mode", "structure-file", "smiles-input"].forEach(id => {
+    ["reset-admet", "load-example", "load-example-caffeine", "load-example-ibuprofen", "smiles-mode", "file-mode", "structure-file", "smiles-input"].forEach(id => {
       const element = get(id);
       if (element) element.disabled = value;
     });
+    refreshInput();
   }
   async function submit(event) {
     if (event) event.preventDefault();
     if (inFlight) return;
-    const input = get("smiles-input");
-    const value = input ? input.value.trim() : "";
-    const fileInput = get("structure-file");
-    if (activeInputMode === "file" && !(fileInput && fileInput.files && fileInput.files[0])) {
-      setStatus("invalid_input", "请选择一个结构文件。");
-      setError("未选择结构文件，未调用 ADMET 工具。");
-      return;
-    }
+    const value = currentSmiles();
+    if (activeInputMode === "file" && !value) return;
     if (!value) {
       setStatus("invalid_input", "请输入一个完整的 SMILES 结构。");
       setError("缺少 SMILES，未调用 ADMET 工具。");
@@ -414,7 +417,6 @@
     const empty = get("empty-state");
     if (empty) empty.hidden = true;
     activeGroup = "";
-    updatePreview(value);
     setStatus("running", "正在调用本地 ADMET 工具，等待结构化结果。");
     try {
       const response = await fetch("/api/admet/predict", {
@@ -462,26 +464,21 @@
     if (tabs) tabs.hidden = true;
     const fileInput = get("structure-file");
     if (fileInput) fileInput.value = "";
-    const fileName = get("file-name");
-    if (fileName) fileName.textContent = "选择结构文件";
-    const fileStatus = get("file-status");
-    if (fileStatus) fileStatus.textContent = "文件中的第一个结构将用于本次评估。";
+    readSelectedFile();
     activateInputMode("smiles");
     const empty = get("empty-state");
     if (empty) empty.hidden = false;
-    updatePreview("");
     const completedAt = get("completed-at");
     if (completedAt) completedAt.textContent = "尚未运行";
     const evidence = get("evidence-panel");
     clear(evidence);
     if (evidence) appendText(evidence, "p", "尚无运行记录。完成调用后，这里会保留工具、模型版本、权重标识和警告。", "evidence-empty");
-    updateSmilesCount();
     setStatus("not_calculated", "输入与结果已清空。");
   }
   function loadExample(smiles) {
     if (inFlight) return;
     const input = get("smiles-input");
-    if (input) { input.value = smiles || EXAMPLE_SMILES; updateSmilesCount(); updatePreview(input.value); input.focus(); }
+    if (input) { input.value = smiles || EXAMPLE_SMILES; refreshInput(); input.focus(); }
   }
   function init() {
     const form = get("admet-form");
@@ -489,7 +486,6 @@
     const caffeine = get("load-example-caffeine");
     const ibuprofen = get("load-example-ibuprofen");
     const resetButton = get("reset-admet");
-    const rerunButton = get("rerun-admet");
     const input = get("smiles-input");
     const smilesMode = get("smiles-mode");
     const fileMode = get("file-mode");
@@ -499,11 +495,23 @@
     if (caffeine) caffeine.addEventListener("click", () => loadExample("Cn1c(=O)c2c(ncn2C)n(C)c1=O"));
     if (ibuprofen) ibuprofen.addEventListener("click", () => loadExample("CC(C)Cc1ccc(cc1)[C@@H](C)C(=O)O"));
     if (resetButton) resetButton.addEventListener("click", reset);
-    if (rerunButton) rerunButton.addEventListener("click", () => submit());
+    for (const button of [get("run-admet"), get("rerun-admet")]) {
+      button.addEventListener("click", event => {
+        if (event.detail > 1) event.preventDefault();
+      });
+    }
     if (smilesMode) smilesMode.addEventListener("click", () => activateInputMode("smiles"));
     if (fileMode) fileMode.addEventListener("click", () => activateInputMode("file"));
-    if (fileInput) fileInput.addEventListener("change", handleFileChange);
-    if (input) { input.addEventListener("input", updateSmilesCount); updateSmilesCount(); }
+    if (fileInput) fileInput.addEventListener("change", readSelectedFile);
+    if (input) input.addEventListener("input", refreshInput);
+    const image = get("structure-preview-image");
+    const message = get("structure-preview-message");
+    image.addEventListener("load", () => { image.hidden = false; message.hidden = true; });
+    image.addEventListener("error", () => {
+      image.hidden = true;
+      message.hidden = false;
+      message.textContent = "无法生成结构预览，请检查 SMILES。";
+    });
     activateInputMode("smiles");
   }
   const api = { init, renderResponse, submit, reset, extractUploadedSmiles };
