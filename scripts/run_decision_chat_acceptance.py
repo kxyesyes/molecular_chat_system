@@ -275,7 +275,10 @@ def execute(mode, provider='cloud'):
                         finally:
                             await finish_on_cancel(model.close())
                     async with httpx.AsyncClient(timeout=90, follow_redirects=False, trust_env=False) as client:
-                        model = OpenAICompatibleModel(key, name, base, client=client)
+                        try:
+                            model = OpenAICompatibleModel(key, name, base, client=client)
+                        except ValueError:
+                            return {'status': 'failed', 'reason': 'decision_endpoint_rejected', 'cases': []}
                         return await run_acceptance(model, mode)
                 report = asyncio.run(request())
             except Exception as exc:
