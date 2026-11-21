@@ -235,6 +235,7 @@ assert(
 
 const homeFormatters = read("src/web/static/js/home/formatters.js");
 const homeMain = read("src/web/static/js/home/main.js");
+const homeWorkspace = read("src/web/static/js/home/workspace.js");
 const homeProtocol = read("src/web/static/js/home/protocol.js");
 const homeChatRenderer = read("src/web/static/js/home/chat_renderer.js");
 const homeMoleculeCandidates = read(
@@ -319,12 +320,13 @@ assert(
   "Homepage markdown links must not inject raw href attributes",
 );
 assert(
-  !homeMain.includes("<strong>${file.name}</strong>"),
-  "Homepage file manager must not inject raw file.name into innerHTML",
+  ["render", "row", "node"].every(name => !extractFunction(homeWorkspace, name).includes(".innerHTML")),
+  "Workspace document rows must not parse filenames as HTML",
 );
 assert(
-  homeMain.includes("fileName.textContent = file.name"),
-  "Homepage file manager must render file.name through textContent",
+  extractFunction(homeWorkspace, "node").includes("el.textContent = text") &&
+    extractFunction(homeWorkspace, "row").includes('node("strong", label)'),
+  "Workspace row labels must render as text nodes",
 );
 assert(
   !homeMain.includes("notification.innerHTML = `<span>${icons[type]}</span><span>${message}</span>`"),

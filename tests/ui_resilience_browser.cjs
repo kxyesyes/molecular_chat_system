@@ -45,7 +45,7 @@ async function pageFor(t, pathname, api) {
 }
 
 test("same-name uploads remain distinguishable when selecting, asking and reviewing history", async t => {
-  const name = "测定记录 (复核).csv";
+  const name = "测定记录 <br> (复核).csv";
   const older = {id:"doc-old", name, upload_number:null};
   const newer = {id:"doc-new", name, upload_number:2};
   const docs = [older];
@@ -82,6 +82,8 @@ test("same-name uploads remain distinguishable when selecting, asking and review
   const label = name + "（第 2 次上传）";
   const row = dialog.locator(".workspace-row").filter({has: page.getByText(label,{exact:true})}).first();
   await row.waitFor();
+  assert.equal(await row.locator("strong").textContent(), label);
+  assert.equal(await row.locator("strong br").count(), 0);
   assert.match(await chip.locator("span").innerText(), /第 1 次上传/);
   const download = row.getByRole("link",{name:"下载原件"});
   assert.equal(await download.getAttribute("download"), name);
