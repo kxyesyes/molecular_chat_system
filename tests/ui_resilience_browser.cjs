@@ -45,7 +45,7 @@ async function pageFor(t, pathname, api) {
 }
 
 test("same-name uploads remain distinguishable when selecting, asking and reviewing history", async t => {
-  const name = "测定记录 (复核).csv";
+  const name = "测定记录 <br> (复核).csv";
   const older = {id:"doc-old", name, upload_number:null};
   const newer = {id:"doc-new", name, upload_number:2};
   const docs = [older];
@@ -82,6 +82,8 @@ test("same-name uploads remain distinguishable when selecting, asking and review
   const label = name + "（第 2 次上传）";
   const row = dialog.locator(".workspace-row").filter({has: page.getByText(label,{exact:true})}).first();
   await row.waitFor();
+  assert.equal(await row.locator("strong").textContent(), label);
+  assert.equal(await row.locator("strong br").count(), 0);
   assert.match(await chip.locator("span").innerText(), /第 1 次上传/);
   const download = row.getByRole("link",{name:"下载原件"});
   assert.equal(await download.getAttribute("download"), name);
@@ -136,6 +138,9 @@ test("sidebar project, document question, and analysis archive work at phone wid
   });
   page.setDefaultTimeout(3000);
   const dialog = page.locator("#workspaceDialog");
+  const legacyFiles = JSON.stringify([{id:"legacy-1", name:"previous.txt", size:12, lastModified:1}]);
+  await page.evaluate(value => localStorage.setItem("medchatManagedFiles", value), legacyFiles);
+  await page.reload();
   async function open(label) {
     const entry = page.getByRole("button",{name:label,exact:true}).first();
     await page.locator("#openSidebarBtn").click();
@@ -170,6 +175,7 @@ test("sidebar project, document question, and analysis archive work at phone wid
   await open("我的项目");
   await dialog.getByRole("button",{name:"查看记录"}).click();
   await dialog.getByText(/已完成测试/).waitFor();
+  assert.equal(await page.evaluate(() => localStorage.getItem("medchatManagedFiles")), legacyFiles);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
 });
 

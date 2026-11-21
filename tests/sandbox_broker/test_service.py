@@ -3723,6 +3723,7 @@ async def _run_hung_create_case(
     sdk: _HungCreateClient,
     config: BrokerConfig,
     *,
+    terminal_observer_timeout: float | None = None,
     after_started: Callable[[], None] | None = None,
 ) -> tuple[object, _HungCreateClient, list[str]]:
     service._create_hard_timeout_seconds = 0.03
@@ -3735,7 +3736,7 @@ async def _run_hung_create_case(
         if after_started is not None:
             after_started()
         terminal = await asyncio.wait_for(
-            service.wait_terminal(job.job_id), timeout=0.5
+            service.wait_terminal(job.job_id), timeout=terminal_observer_timeout
         )
         with pytest.raises(StopIncomplete, match="shutdown is incomplete"):
             await service.stop(timeout=0.05)
@@ -3771,7 +3772,7 @@ def test_hung_create_hits_hard_deadline_and_never_claims_cleanup_success(
     async def scenario() -> tuple[object, _HungCreateClient, list[str]]:
         sdk = _HungCreateClient()
         service, _, config = _service(tmp_path, sdk)
-        return await _run_hung_create_case(service, sdk, config)
+        return await _run_hung_create_case(service, sdk, config, terminal_observer_timeout=0.5)
 
     terminal, sdk, leaked = asyncio.run(scenario())
     assert terminal.status is BrokerJobStatus.FAILED
@@ -3865,7 +3866,7 @@ async def _observe_hung_create_cleanup(
     try:
         if cleanup_fault:
             monkeypatch.setattr(service, "stop", stop_then_fail)
-        # Regression-only deadlock guard; original observer stays at .5s.
+        # Bound the whole cleanup probe. Only the deadline test times terminal observation.
         await asyncio.wait_for(
             _run_hung_create_case(
                 service, sdk, config,
