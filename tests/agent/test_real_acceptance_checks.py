@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from scripts.run_agent_acceptance import (
     _test_external_model,
@@ -1510,13 +1513,36 @@ def test_replay_mode_reads_existing_structured_report_without_running_tools(tmp_
     assert replay["metrics"]["case_count"] == 1
 
 
+def test_replay_cli_preserves_source_across_repeated_runs(tmp_path, monkeypatch):
+    from scripts import run_agent_acceptance as cli
+
+    source = tmp_path / "acceptance.json"
+    source_bytes = b'{"mode":"real","real_cases":{"results":[{"case_id":"saved","status":"failed"}]}}\n'
+    source.write_bytes(source_bytes)
+    monkeypatch.setattr(cli, "DEFAULT_OUTPUT", source)
+    for args in ([], ["--output", str(source)]):
+        monkeypatch.setattr(sys, "argv", ["acceptance", "--mode", "replay", *args])
+        assert cli.main() == 1
+        assert source.read_bytes() == source_bytes
+        replay = json.loads((tmp_path / "acceptance-replay.json").read_text(encoding="utf-8"))
+        assert [r["case_id"] for r in replay["reports"][0]["results"]] == ["saved"]
+
+    monkeypatch.setattr(sys, "argv", ["acceptance", "--mode", "replay",
+                                     "--replay-input", str(source), "--output", str(source)])
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2
+    assert source.read_bytes() == source_bytes
+
+
 def test_real_mode_resolves_diverse_case_set_without_touching_golden_dataset() -> None:
     dataset = _resolve_real_dataset(case_set="diverse", dataset=None)
 
     assert dataset.name == "diverse_scientific_cases.jsonl"
 
 
-def test_run_real_accepts_case_set_argument(monkeypatch) -> None:
+@pytest.mark.parametrize("case_status", ["passed", "partial", "failed"])
+def test_run_real_reports_selected_case_set_status(monkeypatch, case_status) -> None:
     captured = {}
 
     async def fake_external_model():
@@ -1528,7 +1554,7 @@ def test_run_real_accepts_case_set_argument(monkeypatch) -> None:
 
         def run(self, repeat=1):
             return {
-                "status": "passed",
+                "status": case_status,
                 "case_count": 0,
                 "results": [],
                 "stability": {"run_count": repeat},
@@ -1561,6 +1587,6 @@ def test_run_real_accepts_case_set_argument(monkeypatch) -> None:
 
     report = run_real(repeat=2, case_set="diverse", dataset=None)
 
-    assert report["status"] == "passed"
+    assert report["status"] == case_status
     assert captured["dataset_path"].name == "diverse_scientific_cases.jsonl"
     assert report["stability"]["run_count"] == 2
