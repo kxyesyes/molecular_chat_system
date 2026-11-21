@@ -28,6 +28,8 @@ function renderCases(candidates, singleCandidate) {
   return all(box).filter(node => node.tag === "details");
 }
 const one = {candidate_id: "candidate-1", canonical_smiles: "CCO"};
+const oversized = Array.from({length: 33}, (_, i) => ({candidate_id: "candidate-" + i, canonical_smiles: "C".repeat(i + 1)}));
+assert.equal(renderCases(oversized, false).length, 32, "a single batch must display at most 32 SMILES cards");
 assert.equal(renderCases([one], true)[0].open, true, "single candidate SMILES should be visible");
 assert.notEqual(renderCases([one, {...one, candidate_id: "candidate-2", canonical_smiles: "CCN"}], false)[0].open, true,
   "multiple candidates should retain compact cards");

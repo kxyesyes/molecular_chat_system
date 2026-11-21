@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const fs = require("node:fs");
 const { chromium } = require("playwright");
+const candidateEvent = require("./fixtures/molecule_candidate_event.cjs");
 
 const web = path.join(__dirname, "../src/web");
 const widths = [320, 375, 430, 768, 1280];
@@ -12,7 +13,7 @@ let browser;
 before(async () => { browser = await chromium.launch({ channel: "chrome" }); });
 after(async () => { if (browser) await browser.close(); });
 
-async function pageFor(t, pathname, api) {
+async function pageFor(t, pathname, api, onSocket = () => {}) {
   const page = await browser.newPage({ viewport: { width: 320, height: 812 }, isMobile: true });
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -22,7 +23,7 @@ async function pageFor(t, pathname, api) {
   });
   // Use the shipped pages and assets, with isolated responses for failures and
   // model data. No requests reach configured scientific or model services.
-  await page.routeWebSocket("**/*", () => {});
+  await page.routeWebSocket("**/*", onSocket);
   await page.route("**/*", route => {
     const url = new URL(route.request().url());
     if (url.hostname !== "medchat.test") return route.abort();
@@ -40,9 +41,76 @@ async function pageFor(t, pathname, api) {
     return fs.existsSync(file) && fs.statSync(file).isFile()
       ? route.fulfill({ path: file }) : route.fulfill({ status: 404, body: "" });
   });
-  await page.goto("http://medchat.test" + pathname);
+  await page.goto(new URL(pathname, "http://medchat.test").href);
   return page;
 }
+
+test("molecule carousels keep batch numbering, references and last-card clipboard actions", {timeout: 20000}, async t => {
+  const origin = "https://medchat.test";
+  const chains = Array.from({length: 16}, (_, i) => "C".repeat(i + 1));
+  const first = candidateEvent(chains);
+  const second = candidateEvent(chains.map(s => s + "O"), "22222222-2222-4222-8222-222222222222", "second");
+  const overflow = candidateEvent(["COF"], "33333333-3333-4333-8333-333333333333");
+  const retrieved = ["CCCl", "CCBr", "CCF"];
+  const confirmed = [];
+  const followup = Promise.withResolvers();
+  const page = await pageFor(t, origin, (route, url) => {
+    if (url.pathname.endsWith("/references/confirm")) {
+      confirmed.push(route.request().postDataJSON());
+      return route.fulfill({json: {success: true, data: {confirmed: true}}});
+    }
+    return route.fulfill({status: 404, json: {}});
+  }, socket => socket.onMessage(raw => {
+    const message = JSON.parse(raw);
+    const send = frame => socket.send(JSON.stringify(frame));
+    if (message.type === "ping") send({type: "connection_ready"});
+    if (message.type !== "chat") return;
+    if (message.message === "继续分析所选候选") { followup.resolve(message); return; }
+    [first, second, overflow].forEach(send);
+    send({type: "message", message: "生成候选"});
+    send({type: "rag_info", molecules: retrieved.map(smiles => ({smiles}))});
+  }));
+  page.setDefaultTimeout(5000);
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {origin});
+  const ask = async question => {
+    await page.getByRole("textbox", {name: "消息"}).fill(question);
+    await page.getByRole("button", {name: "发送消息"}).click();
+  };
+  await page.getByText(/传输已连接/).first().waitFor({state: "attached"});
+  await ask("显示两批候选");
+  await page.getByText("存在多个候选集合，请点击具体卡片选择要继续计算的分子。").waitFor();
+  assert.deepEqual(confirmed.map(r => r.presentation_id).sort(), [first, second].map(e => e.reference.presentation_id));
+  const grids = page.locator(".molecules-carousel");
+  const generated = grids.locator(".molecule-card");
+  assert.equal(await grids.count(), 2);
+  assert.deepEqual(await generated.getByText(/^候选 \d+$/).allTextContents(),
+    Array.from({length: 32}, (_, i) => "候选 " + (i + 1)));
+  assert.deepEqual(await generated.evaluateAll(cards => cards.map(c => [c.dataset.observationId, c.dataset.candidateId])),
+    [...first.reference.ordered_keys, ...second.reference.ordered_keys]);
+
+  async function copyLast(grid, expected) {
+    assert.ok(await grid.evaluate(el => {
+      el.scrollTo({left: el.scrollWidth, behavior: "instant"});
+      return el.scrollLeft > 0 && el.scrollWidth - el.clientWidth - el.scrollLeft < 2;
+    }));
+    const last = grid.locator(".molecule-card").last();
+    await last.getByRole("button", {name: "复制 SMILES"}).click();
+    await page.waitForFunction(async value => await navigator.clipboard.readText() === value, expected);
+    return last;
+  }
+  const rag = page.locator(".rag-molecules-carousel");
+  assert.equal(await rag.locator(".molecule-card").count(), retrieved.length);
+  await copyLast(rag, retrieved.at(-1));
+  const last = await copyLast(grids.last(), second.candidate_set.candidates.at(-1).canonical_smiles);
+  await last.getByRole("button", {name: "选择此分子"}).click();
+  await last.getByRole("button", {name: "已选择"}).waitFor();
+  await ask("继续分析所选候选");
+  const outgoing = await followup.promise;
+  const {ordered_keys, ...pointer} = second.reference;
+  const [observation_id, candidate_id] = ordered_keys.at(-1);
+  assert.deepEqual(outgoing.reference, pointer);
+  assert.deepEqual(outgoing.selection, {observation_id, candidate_id});
+});
 
 test("same-name uploads remain distinguishable when selecting, asking and reviewing history", async t => {
   const name = "测定记录 <br> (复核).csv";
