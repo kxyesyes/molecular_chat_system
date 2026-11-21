@@ -1,4 +1,4 @@
-// Standalone Chromium regression. Run with Playwright on Node's module path:
+// Run in the project Python environment with Playwright on Node's module path:
 // node --test tests/ui_resilience_browser.cjs
 const { after, before, test } = require("node:test");
 const assert = require("node:assert/strict");
@@ -45,6 +45,126 @@ async function pageFor(t, pathname, api, onSocket = () => {}) {
   await page.goto(new URL(pathname, "http://medchat.test").href);
   return page;
 }
+
+test("design substitutions keep first card numbers, latest properties and every CSV row", async t => {
+  const histories = [], saves = [];
+  let pausePath, resume, substitutions = 0;
+  const page = await pageFor(t, "https://medchat.test/molecular-design", async (route, url) => {
+    const endpoint = url.pathname.split("/").pop();
+    const data = route.request().postDataJSON();
+    if (endpoint === "save_molecule") {
+      saves.push(data);
+      return route.fulfill({json: {success: true}});
+    }
+    if (endpoint === pausePath) {
+      pausePath = null;
+      await new Promise(resolve => { resume = resolve; });
+    }
+    if (endpoint === "fragments") return route.fulfill({json: {success: true, fragments: [], total: 0}});
+    if (endpoint === "detect_sites") return route.fulfill({json: {success: true, sites: [0]}});
+    if (endpoint === "substitute") {
+      substitutions++;
+      return route.fulfill({json: {success: true, new_smiles: data.fragment_smiles === "[*]N" ? "CN" : "CF"}});
+    }
+    if (endpoint === "properties") {
+      // Distinct fixture snapshots make a stale first or overwritten third row observable.
+      const mw = data.smiles === "CN" ? 31.06 : 34.03;
+      const properties = {mw: substitutions === 1 && data.smiles === "CN" ? null : mw};
+      return route.fulfill({json: {success: true, properties}});
+    }
+    if (endpoint === "export_history") {
+      histories.push(data.history);
+      // Exercise the same pandas/RDKit serializer used by the download route.
+      const csv = require("node:child_process").execFileSync("python", ["-c", [
+        "import json, sys",
+        "from pathlib import Path",
+        "from src.molecular_design.storage import DesignStorage",
+        "_, csv = DesignStorage(Path.cwd()).export_history_csv(json.load(sys.stdin))",
+        "sys.stdout.buffer.write(csv.encode('utf-8'))",
+      ].join("\n")], {input: JSON.stringify(data.history)});
+      return route.fulfill({contentType: "text/csv", body: csv});
+    }
+    return route.fulfill({status: 404});
+  });
+  await page.setViewportSize({width: 1200, height: 900});
+  await page.waitForFunction(() => DesignState.ketcherReady);
+  // Track the handler's completion even when a newer action has hidden its overlay.
+  await page.evaluate(() => {
+    const run = window.execSubstitute;
+    window.execSubstitute = () => (window.substitutionDone = run());
+  });
+  async function prepare(fragment) {
+    await page.locator('[onclick="showImport()"]').click();
+    await page.locator("#importInput").fill("C[*]");
+    await page.locator('[onclick="confirmImport()"]').click();
+    await page.locator("#importModal").waitFor({state: "hidden"});
+    await page.locator('.common-chip').filter({hasText: fragment}).first().click();
+    await page.locator('[onclick="detectSites()"]').click();
+    await page.waitForFunction(() => !document.querySelector("#subBtn").disabled);
+  }
+  const cards = page.locator(".candidate-row");
+  for (const [i, fragment] of ["-NH₂", /^-F$/, "-NH₂"].entries()) {
+    await prepare(fragment);
+    await page.locator("#subBtn").click();
+    await page.evaluate(() => window.substitutionDone);
+    assert.equal(await page.locator("#iterCount").textContent(), String(i + 1));
+    if (!i) assert.equal(await cards.first().locator(".metric-value").nth(2).textContent(), "—");
+  }
+  assert.equal(substitutions, 3);
+  assert.deepEqual(await cards.locator(".candidate-row-top strong").allTextContents(), ["#1 -NH₂", "#2 -F"]);
+  assert.deepEqual(await cards.locator(".candidate-smiles").allTextContents(), ["CN", "CF"]);
+  assert.equal(await cards.first().locator(".metric-value").nth(2).textContent(), "31.06");
+
+  async function downloadHistory() {
+    const download = page.waitForEvent("download");
+    await page.locator('[onclick="exportAll()"]').click();
+    return fs.readFileSync(await (await download).path());
+  }
+  const csv = await downloadHistory();
+  assert.deepEqual(histories[0], [
+    {step: 1, smi: "CN", props: {mw: null}}, {step: 2, smi: "CF", props: {mw: 34.03}},
+    {step: 3, smi: "CN", props: {mw: 31.06}},
+  ]);
+  // Download captured on main before consolidating iteration history.
+  const baseline = [
+    "step,smiles,prop_mw,prop_logp,prop_qed,prop_tpsa,prop_hbd,prop_hba,prop_rotbonds,prop_sa_score,prop_morgan_similarity",
+    "1,CN,,,,,,,,,", "2,CF,34.03,,,,,,,,", "3,CN,31.06,,,,,,,,", "",
+  ].join(require("node:os").EOL);
+  assert.deepEqual(csv, Buffer.from(baseline));
+  for (const action of ["restore", "clear"]) {
+    for (const endpoint of ["substitute", "properties"]) {
+      if (action === "clear" && endpoint === "properties") {
+        await prepare("-NH₂");
+        await page.locator("#subBtn").click();
+        await page.evaluate(() => window.substitutionDone);
+      }
+      await prepare("-NH₂");
+      pausePath = endpoint;
+      const sent = page.waitForRequest(req => req.url().endsWith("/" + endpoint));
+      await page.locator("#subBtn").click();
+      await sent;
+      if (action === "restore") await cards.nth(1).getByRole("button").click();
+      else await page.locator('[onclick="clearCanvas()"]').click();
+      await page.waitForFunction(expected => DesignState.propsSmiles === expected && !DesignState.editorWriteInFlight,
+        action === "restore" ? "CF" : "");
+      resume();
+      await page.evaluate(() => window.substitutionDone);
+      if (action === "restore") {
+        assert.equal(await page.locator("#iterCount").textContent(), "3");
+        assert.equal(await cards.count(), 2);
+        assert.deepEqual(await downloadHistory(), csv);
+      } else {
+        assert.equal(await cards.count(), 0);
+        assert.equal(await page.locator("#iterCount").textContent(), "0");
+        const before = histories.length;
+        await page.locator('[onclick="exportAll()"]').click();
+        await page.getByText("历史记录为空", {exact: true}).first().waitFor();
+        assert.equal(histories.length, before);
+      }
+    }
+  }
+  assert.deepEqual(saves, []);
+});
 
 test("design imports use the last selection and preserve the committed structure on parse failure", async t => {
   const properties = [], saves = [], exports = [];
@@ -116,7 +236,7 @@ test("design imports use the last selection and preserve the committed structure
       await choose("slowA.smi", "CO obsolete");
       if (action === "paste") await paste("CCC");
       if (action === "candidate") {
-        await page.evaluate(() => MoleculeEditor.addCandidateComparison({}, {mw: 12}, "CN", "fixture"));
+        await page.evaluate(() => HistoryManager.recordSubstitution("CN", {mw: 12}, {}, "fixture"));
         await page.locator("#candidateCompare button").first().click();
       }
       if (action === "clear") await page.locator('[onclick="clearCanvas()"]').click();
@@ -132,7 +252,7 @@ test("design imports use the last selection and preserve the committed structure
   }
   await paste("CCO");
   await settled("CCO");
-  await page.evaluate(() => { DesignState.iter = 1; HistoryManager.addHist("CN", {mw: 12}); });
+  await page.evaluate(() => HistoryManager.recordSubstitution("CN", {mw: 12}, {}, "fixture"));
   const start = properties.length;
   for (const [name, contents] of [["input.csv", "smiles\n"], ["input.smi", "C1(CCC"]]) {
     const before = await page.evaluate(() => importMessages.length);

@@ -189,13 +189,14 @@
   }
 
   async function exportAll() {
-    if (!S.history || S.history.length === 0) {
+    var history = Hist.exportRows();
+    if (!history.length) {
       UI.toast("历史记录为空", "error");
       return;
     }
 
     try {
-      var r = await Api.exportHistory(S.history);
+      var r = await Api.exportHistory(history);
       if (r.ok) {
         var blob = await r.blob();
         var url = window.URL.createObjectURL(blob);
@@ -241,7 +242,7 @@
   window.applyOptimizationCommand = applyOptimizationCommand;
 
   window.clearHist = Hist.clearHist;
-  window.restoreHist = Hist.restoreHist;
+  window.restoreHist = Editor.restoreCandidate;
 
   window.handleUpload = handleUpload;
   window.saveMol = saveMol;

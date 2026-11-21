@@ -15,7 +15,7 @@ assert.ok(template.includes('id="candidateCompare"'), "candidate result area mus
 assert.ok(!template.includes('class="ai-bar"'), "the primary design flow must not expose a redundant AI control bar");
 assert.ok(!template.includes('id="aiInput"'), "AI free-form reply input must not crowd the design workspace");
 assert.ok(template.includes('id="optimizationInput"'), "explicit optimization goals must remain available without an AI reply panel");
-assert.ok(template.includes('molecule_editor.js?v=20261121-import'), "combined editor import fixes must not be hidden by browser cache");
+assert.ok(template.includes('molecule_editor.js?v=20261121-iterations'), "combined editor import fixes must not be hidden by browser cache");
 assert.ok(template.includes('properties_panel.js?v=20261112-scaffold-v1'), "result status reset fix must not be hidden by browser cache");
 assert.ok(!template.includes('class="props-panel"'), "the old persistent third property column must be removed");
 assert.ok(!template.includes("<footer>"), "the design workspace must not reserve a giant unrelated footer");
@@ -47,9 +47,8 @@ assert.ok(properties.includes("UI.escText(item.label || \"\")"), "optimization g
 assert.ok(!properties.includes("<span>\" + item.label + \"</span>"), "optimization goal labels must not be inserted raw");
 assert.ok(!properties.includes("p.logp ?? 0"), "missing LogP must not be rendered as zero");
 assert.ok(!properties.includes("p.qed ?? 0"), "missing QED must not be rendered as zero");
-assert.ok(!editor.includes("candidateScore"), "candidate board must not use a fixed weighted score");
-assert.ok(!editor.includes("candidates.sort"), "candidate order must remain generation order");
-assert.ok(history.includes("props: props || {}"), "history must preserve unavailable properties without coercing them to zero");
+assert.ok(!history.includes("candidateScore"), "candidate board must not use a fixed weighted score");
+assert.ok(!history.includes("candidates.sort"), "candidate order must remain generation order");
 
 console.log("molecular design frontend contract passed");
 
