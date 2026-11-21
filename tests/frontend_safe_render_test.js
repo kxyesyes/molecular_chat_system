@@ -693,8 +693,8 @@ assert(
 );
 [
   "Safe.escapeHtml(file.name",
-  "Safe.escapeInlineJsString(inputId",
-  "Safe.escapeInlineJsString(displayId",
+  "Safe.escapeInlineJsString(input.id)",
+  "Safe.escapeInlineJsString(display.id)",
   "Safe.escapeHtml(item.job_id",
   "Safe.escapeAttr(item.job_id",
   "Safe.escapeInlineJsString(item.job_id",

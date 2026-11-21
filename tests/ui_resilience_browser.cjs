@@ -759,3 +759,110 @@ test("PDB handoff retries offline, prepares the selected receptor once and prese
   assert.deepEqual(reads.slice(4), Array(2).fill([["GET", 21, "preflight", "pdb"], ["GET", 21, "download", "pdb"]]).flat());
   assert.deepEqual(creates, []);
 });
+
+test("a failed receptor link survives refresh until its file has been read", async t => {
+  const link = "https://medchat.test/molecular-docking?target_structure_id=32&keep=yes#viewer";
+  const pdb = "HEADER    2BBB\nEND\n";
+  const submissions = [];
+  let failDownload = true;
+  const page = await pageFor(t, link, (route, url) => {
+    if (url.pathname === "/api/target-db/structures/32/preflight") return route.fulfill({json: {can_download: true, structure_id: "2BBB"}});
+    if (url.pathname === "/api/target-db/structures/32/download") {
+      return failDownload ? route.abort("internetdisconnected") : route.fulfill({body: pdb});
+    }
+    if (url.pathname === "/api/docking/cavities") return route.fulfill({json: {cavities: []}});
+    if (route.request().method() === "POST") submissions.push(url.pathname);
+    return route.fulfill({status: 404, json: {}});
+  });
+  await page.getByText(/靶点结构未能自动载入/).waitFor();
+  assert.equal(page.url(), link);
+  failDownload = false;
+  await page.addInitScript(() => {
+    const text = File.prototype.text;
+    File.prototype.text = async function () {
+      if (this.name === "target-2BBB.pdb") {
+        await new Promise((resolve, reject) => {
+          window.finishRead = resolve;
+          window.failRead = () => reject(new Error("read failed"));
+        });
+      }
+      return text.call(this);
+    };
+  });
+  await page.reload();
+  await page.waitForFunction(() => !!window.failRead);
+  assert.equal(await page.getByText(/已加载 2BBB/).count(), 0);
+  assert.equal(page.url(), link);
+  await page.evaluate(() => window.failRead());
+  await page.getByText(/靶点结构未能自动载入/).waitFor();
+  assert.equal(page.url(), link);
+  await page.reload();
+  await page.waitForFunction(() => !!window.finishRead);
+  await page.evaluate(() => window.finishRead());
+  await page.getByText(/已加载 2BBB/).waitFor();
+  assert.equal(await page.evaluate(() => AppState.currentProteinData), pdb);
+  assert.equal(new URL(page.url()).search + new URL(page.url()).hash, "?keep=yes#viewer");
+  await page.reload();
+  assert.deepEqual(submissions, []);
+});
+
+test("manual receptor selection supersedes a slow demo and preserves the demo ligand and cavity workflow on retry", async t => {
+  const samples = path.resolve(__dirname, "../data/samples");
+  const receptorName = "PDE4A_apo_6FG5.pdb";
+  const ligandName = "roflumilast.pdbqt";
+  const manual = "HEADER    MANUAL\nEND\n";
+  const cavities = [];
+  const submits = [];
+  const page = await pageFor(t, "https://medchat.test/molecular-docking", (route, url) => {
+    if (url.pathname.endsWith("/demo/pde4a-apo")) return route.fulfill({path: path.join(samples, receptorName)});
+    if (url.pathname.endsWith("/demo/roflumilast.pdbqt")) return route.fulfill({path: path.join(samples, ligandName)});
+    if (url.pathname === "/api/docking/cavities") {
+      const form = route.request().postDataBuffer().toString();
+      cavities.push(form.includes(receptorName) ? receptorName : "manual.pdb");
+      return route.fulfill({json: {cavities: [{volume: 100, center: [3, 4, 5], size: [16, 18, 20]}]}});
+    }
+    if (route.request().method() === "POST") submits.push(url.pathname);
+    return route.fulfill({status: 404, json: {}});
+  });
+  await page.evaluate(name => {
+    const text = File.prototype.text;
+    File.prototype.text = async function () {
+      if (this.name === name && !window.releaseDemoRead) {
+        await new Promise(resolve => { window.releaseDemoRead = resolve; });
+      }
+      return text.call(this);
+    };
+  }, receptorName);
+  await page.locator("#center_x").fill("12");
+  await page.locator("#smiles-input").fill("CCO");
+  await page.locator("#docking-demo-btn").click();
+  await page.waitForFunction(() => !!window.releaseDemoRead);
+  await page.locator("#protein-file").setInputFiles({name: "manual.pdb", mimeType: "chemical/x-pdb", buffer: Buffer.from(manual)});
+  await page.waitForFunction(text => AppState.currentProteinData === text, manual);
+  await page.evaluate(() => window.releaseDemoRead());
+  await page.waitForFunction(() => !document.getElementById("docking-demo-btn").disabled);
+  assert.equal(await page.evaluate(() => AppState.currentProteinData), manual);
+  assert.equal(await page.locator("#protein-file").evaluate(input => input.files[0].name), "manual.pdb");
+  assert.equal(await page.locator("#ligand-file").evaluate(input => input.files.length), 0);
+  assert.equal(await page.locator("#smiles-input").inputValue(), "CCO");
+  assert.equal(await page.locator("#center_x").inputValue(), "12");
+  assert.equal(await page.getByText(/已载入曼氏血吸虫/).count(), 0);
+
+  await page.locator("#docking-demo-btn").click();
+  await page.getByText(/已载入曼氏血吸虫/).waitFor();
+  for (const [selector, name] of [["#protein-file", receptorName], ["#ligand-file", ligandName]]) {
+    const actual = await page.locator(selector).evaluate(async input => {
+      const file = input.files[0];
+      const hash = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      return [file.name, Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, "0")).join("")];
+    });
+    assert.deepEqual(actual, [name, createHash("sha256").update(fs.readFileSync(path.join(samples, name))).digest("hex")]);
+  }
+  assert.equal(await page.evaluate(() => AppState.currentProteinData), fs.readFileSync(path.join(samples, receptorName), "utf8"));
+  assert.equal(await page.locator("#smiles-input").inputValue(), "");
+  assert.deepEqual(await page.evaluate(() => ["exhaustiveness", "num_modes", "energy_range"].map(id => document.getElementById(id).value)), ["24", "20", "3"]);
+  await page.locator("#cavity-choice").selectOption("0");
+  assert.deepEqual(await page.evaluate(() => ["center_x", "center_y", "center_z", "size_x", "size_y", "size_z"].map(id => Number(document.getElementById(id).value))), [3, 4, 5, 16, 18, 20]);
+  assert.deepEqual(cavities, ["manual.pdb", receptorName]);
+  assert.deepEqual(submits, []);
+});
