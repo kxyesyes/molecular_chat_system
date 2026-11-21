@@ -112,6 +112,9 @@ Node.js 最低 **22.19.0**，推荐 **24.15.0**；在仓库根目录用
 | 回看对接结果或后台任务 | [对接历史索引](../src/docking/history_index.py) 保存任务归属，[任务管理器](../src/task_runtime/manager.py) 绑定提交者 | [对接历史测试](../tests/test_docking_history_ownership.py) 核对列表和直接读取；[任务归属测试](../tests/test_agent_task_ownership.py) 核对旧记录和不同会话的可见性 |
 | 在聊天里询问论文的测定结果 | [全文分析](../src/literature/fulltext.py) 绑定文献、段落和支持结论的原文 | [全文证据测试](../tests/agent/test_literature_fulltext.py) 检查文献不符、数字无依据以及原文引句 |
 | 保存主模型配置并重启 | [用户模型配置](../src/web/user_llm_config.py) 负责持久化 | [配置测试](../tests/test_user_llm_config.py) 核对新进程读回配置，以及替换文件失败时旧配置仍可用 |
+| 提交训练任务后刷新页面 | [训练监视器](../src/web/static/js/activity_prediction/training_monitor.js) 用已保存的任务 ID 恢复进度；[训练状态服务](../src/activity/trainer.py) 核对提交者 | [浏览器刷新用例](../tests/ui_resilience_browser.cjs) 检查进行中的任务恢复到原轮次、训练按钮禁用；[归属测试](../tests/test_activity_training_ownership.py) 覆盖查询和取消 |
+| 在聊天里准备对接，再确认执行 | [确认路由](../src/web/routes/docking_consent_routes.py) 按当前预览核对确认凭据；[对接运行手册](runbooks/c4a_retention_acceptance.md) 说明何时可以释放执行资源 | [聊天对接测试](../tests/agent/test_web_docking_consent.py) 验证预检与执行权限；[执行回归](../tests/task_runtime/test_docking_consent.py) 检查重复提交和取消 |
+| 通过工作流 API 提交任务，再切换模型 | [工作流路由](../src/web/routes/agent_workflow_routes.py) 提交后台任务，[模型请求门控](../src/web/model_lifecycle.py) 将模型使用期延续到执行线程结束 | [模型生命周期测试](../tests/test_model_request_lifecycle.py) 构造任务记录已取消而线程仍在使用模型的场景，检查切换必须等待线程退出 |
 
 判断一段看似重复的逻辑能否删除，可以先从失败场景找依据。例如两个页面都显示任务历史，各自的入口仍需落实会话归属。追溯该行为时可用 `git log -S '函数名' -- 文件路径` 找到引入或删除它的提交，再用同一用户操作比较变更前后的结果、错误状态和历史记录。
 
@@ -381,6 +384,7 @@ Get-ChildItem src/web/static/js -Recurse -Filter *.js -File |
 
 - Bug 修复先增加失败测试；
 - 测试名称说明行为，不只说明函数名；
+- 为改动选一个具体用户操作，指出负责该行为的入口、原设计保护的场景，以及能判定结果正确的断言。涉及已保存数据时，用临时目录里的旧记录或第二个会话验证读回结果和归属。可从[操作定位表](#从用户操作找到修改位置)选已有用例；
 - 优先测试真实代码，非必要不 mock；
 - 时间、随机数和外部服务必须可控；
 - 测试不得写入正式数据目录；

@@ -148,7 +148,8 @@ python -m pytest -q tests/agent/test_scientific_reference_execution.py::test_hom
 - 权威对象：[scientific_references.py](../src/agent/contracts/scientific_references.py)；专用原子存储：[persistence/scientific_references.py](../src/agent/persistence/scientific_references.py)。确认的展示顺序、来源观察、修订和归属共同定位候选，固定24小时，不随恢复/重放续期。
 - Web投影及解析：[web/scientific_references.py](../src/web/scientific_references.py)；确认/恢复路由：[scientific_reference_routes.py](../src/web/routes/scientific_reference_routes.py)。来源版本变化、失效、跨会话、协议损坏失败关闭，不从客户端SMILES或聊天历史重建事实。
 - 首页：[scientific_references.js](../src/web/static/js/home/scientific_references.js) 只在标签页保存不透明指针；实际挂载与严格顺序ACK之后才可引用。刷新恢复有效数据时需先进入可见聊天模式，多集合需明确选择，清除选择不删除科研历史。
-- 实际输入：[resolved_molecule.py](../src/agent/contracts/resolved_molecule.py) → Supervisor/AgentContext/Planner → Session。新SMILES优先，改靶点只继承结构、不继承旧分数；工具分发和checkpoint复用前再次复核来源，不跨长工具持有SQLite锁。
+- 网页追问由 [prepare_web_request](../src/web/web_request.py) 把已解析的分子放入 `AgentContext.resolved_molecule`。[Web 工具参数绑定](../src/agent/scientific_session/web_bindings.py) 重新核对会话内的来源后取出 `canonical_smiles`。这是第二次核对的原因：在页面确认到工具执行之间，来源可能已经失效。可用 [迫使来源失效的回归](../tests/agent/test_scientific_reference_execution.py) 查证工具调用次数。
+- 直接调用 [SupervisorAgent.execute](../src/agent/supervisor.py) 的确定性工作流也接受同一[分子引用契约](../src/agent/contracts/resolved_molecule.py)。修改网页追问时从上一条的 Web 路径入手。新 SMILES 优先；改靶点时只继承结构，旧靶点的分数仍归原记录。
 - 验收入口：`tests/agent/test_scientific_reference_*.py`、`tests/home_scientific_references_test.js`；显式离线浏览器夹具 `python -B -m tests.scientific_reference_browser_lab --state-dir <本任务临时目录> --port 6017`。夹具不是生产启动方式，不读取用户模型配置；生成是合成候选，性质调用真实RDKit。
 
 取消等待方会先排空已开始的科学worker，再释放请求租约；这不是强制停止外部计算进程的保证。浏览器服务进程重启验证针对空闲时中断与持久化恢复，不等于运行中任意点硬崩溃后恰好执行一次。完整证据和保留限制见[第三增量交接](handoff/scientific-reference-acceptance.md)。
