@@ -595,11 +595,14 @@ function getDockingParams() {
 }
 
 function startBatchDocking() {
+  const startBtn = document.getElementById("start-btn");
+  const batchSmilesInput = document.getElementById("batch-smiles-input");
+  if (startBtn.disabled || !batchSmilesInput.reportValidity()) return;
+
   const proteinFile = document.getElementById("protein-file").files[0];
   const ligandInput = document.getElementById("ligand-file");
   const ligandFiles = ligandInput ? Array.from(ligandInput.files || []) : [];
-  const batchSmilesInput = document.getElementById("batch-smiles-input");
-  const batchSmiles = batchSmilesInput ? batchSmilesInput.value.trim() : "";
+  const batchSmiles = batchSmilesInput.value.trim() ? batchSmilesInput.value : "";
 
   if (!proteinFile || (ligandFiles.length === 0 && !batchSmiles)) {
     alert("请上传蛋白质文件，并提供多个配体文件或多行 SMILES");
@@ -611,13 +614,10 @@ function startBatchDocking() {
   }
   const batchProtein = loadedDockingProteinFile === proteinFile ? (AppState.currentProteinData || null) : null;
 
-  const startBtn = document.getElementById("start-btn");
-  if (startBtn && !startBtn.disabled) {
-    startBtn.disabled = true;
-    startBtn.setAttribute("data-original-text", startBtn.textContent || "开始批量分子对接");
-    startBtn.innerHTML =
-      '<span class="spinner" aria-hidden="true"></span> 正在批量对接...';
-  }
+  leaveDockingHistory();
+  startBtn.disabled = true;
+  startBtn.setAttribute("data-original-text", startBtn.textContent || "开始批量分子对接");
+  startBtn.innerHTML = '<span class="spinner" aria-hidden="true"></span> 正在批量对接...';
 
   const statusIndicators = document.querySelectorAll(".status-indicator");
   statusIndicators.forEach((indicator) => {
@@ -690,13 +690,9 @@ function startBatchDocking() {
       Utils.showToast(error.message, "error");
     })
     .finally(() => {
-      if (startBtn) {
-        const originalText =
-          startBtn.getAttribute("data-original-text") || "开始批量分子对接";
-        startBtn.disabled = false;
-        startBtn.innerHTML = originalText;
-        startBtn.removeAttribute("data-original-text");
-      }
+      startBtn.disabled = false;
+      startBtn.textContent = startBtn.getAttribute("data-original-text") || "开始批量分子对接";
+      startBtn.removeAttribute("data-original-text");
       setResultsMinHeightToLeft();
     });
 }
@@ -1213,16 +1209,20 @@ function resumeDockingTaskIfPresent(record) {
   else pollDockingTask(taskId).catch(handleDockingTaskError);
 }
 
-// 开始对接分析
-function startDocking() {
+function leaveDockingHistory() {
   historyReceptor = null;
   durableHistoryRestoreSequence++;
   beginDockingView();
   historicalDockingTaskId = null;
+}
+
+// 开始对接分析
+function startDocking(event) {
   if (AppState.dockingMode === "batch") {
-    startBatchDocking();
-    return;
+    if (event?.detail > 1) return;
+    return startBatchDocking();
   }
+  leaveDockingHistory();
 
   const proteinFile = document.getElementById("protein-file").files[0];
   const ligandInput = document.getElementById("ligand-file");
@@ -1924,7 +1924,10 @@ function resetDocking(options = {}) {
   AppState.currentJobId = null;
   AppState.currentBatchResults = [];
   const batchSmilesInput = document.getElementById("batch-smiles-input");
-  if (batchSmilesInput && !preserveInputs) batchSmilesInput.value = "";
+  if (batchSmilesInput && !preserveInputs) {
+    batchSmilesInput.value = "";
+    batchSmilesInput.dispatchEvent(new Event("input"));
+  }
 
   const allButtons = document.querySelectorAll(".action-btn");
   allButtons.forEach((btn) => btn.classList.remove("active"));

@@ -90,6 +90,8 @@ class DockingAgentArchitectureTests(unittest.TestCase):
 
         route_thread_ids = []
         service_thread_ids = []
+        service_owners = []
+        file_jobs = {b"first\r\nEND\r\n": "file-1", b"second\nEND\n": "file-2"}
 
         async def recording_run_in_threadpool(func, *args, **kwargs):
             route_thread_ids.append(threading.get_ident())
@@ -98,8 +100,15 @@ class DockingAgentArchitectureTests(unittest.TestCase):
         class FakeDockingService:
             async def perform_docking(self, **kwargs):
                 service_thread_ids.append(threading.get_ident())
+                service_owners.append(kwargs["owner_session_id"])
                 asyncio.get_running_loop()
                 await asyncio.sleep(0)
+                if kwargs["input_type"] == "file":
+                    ligand = Path(kwargs["ligand_input"]).read_bytes()
+                    job_id = file_jobs[ligand]
+                    return {"success": job_id == "file-1", "job_id": job_id}
+                if kwargs["ligand_input"] == "invalid":
+                    return {"success": False, "error": "invalid ligand fixture"}
                 return {
                     "success": True,
                     "job_id": f"job-{len(service_thread_ids)}",
@@ -126,13 +135,31 @@ class DockingAgentArchitectureTests(unittest.TestCase):
                 batch = client.post(
                     "/api/docking/batch_submit",
                     files={"protein_file": ("protein.pdbqt", b"ATOM\n", "text/plain")},
-                    data={"batch_smiles": "CCO ligand-one\nCCC ligand-two"},
+                    data={"batch_smiles": "  smiles,name\r\n# comment\r\nCCO,first\r\n\r\ninvalid second\r\n"},
                 )
+                files_batch = client.post("/api/docking/batch_submit", files=[
+                    ("protein_file", ("protein.pdbqt", b"ATOM\n", "text/plain")),
+                    ("ligand_files", ("duplicate.pdbqt", b"first\r\nEND\r\n", "text/plain")),
+                    ("ligand_files", ("duplicate.pdbqt", b"second\nEND\n", "text/plain")),
+                ])
+                owner = app.state.test_session_store.resolve(client.cookies.get("medchat_agent_session"))
 
         self.assertEqual(direct.status_code, 200, direct.text)
         self.assertEqual(batch.status_code, 200, batch.text)
-        self.assertEqual(len(service_thread_ids), 3)
-        self.assertEqual(len(route_thread_ids), 3)
+        result = batch.json()
+        self.assertEqual((result["completed"], result["failed"]), (1, 1))
+        self.assertEqual([(r["index"], r["ligand_name"], r["success"]) for r in result["results"]],
+                         [(1, "first", True), (2, "second", False)])
+        self.assertEqual(result["results"][1]["error"], "invalid ligand fixture")
+        self.assertEqual(files_batch.status_code, 200, files_batch.text)
+        self.assertEqual(
+            [(r["index"], r["ligand_name"], r["job_id"], r["success"]) for r in files_batch.json()["results"]],
+            [(1, "duplicate.pdbqt", "file-1", True), (2, "duplicate.pdbqt", "file-2", False)],
+        )
+        self.assertTrue(owner)
+        self.assertEqual(service_owners, [owner] * 5)
+        self.assertEqual(len(service_thread_ids), 5)
+        self.assertEqual(len(route_thread_ids), 5)
         self.assertTrue(all(worker_id not in route_thread_ids for worker_id in service_thread_ids))
 
     def test_molecule_utility_rdkit_operations_run_in_worker_threads(self):

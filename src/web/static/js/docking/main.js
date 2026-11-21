@@ -260,7 +260,13 @@ function initDockingModeToggle() {
   const uploadText = document.getElementById("ligand-upload-text");
   const startBtn = document.getElementById("start-btn");
 
+  function discardBatchImport() {
+    batchSmilesFile.value = "";
+    batchSmilesInput.setCustomValidity("");
+  }
+
   const setMode = (mode) => {
+    if (mode !== AppState.dockingMode) discardBatchImport();
     AppState.dockingMode = mode;
     const isBatch = mode === "batch";
     if (singleBtn) singleBtn.classList.toggle("active", !isBatch);
@@ -283,18 +289,31 @@ function initDockingModeToggle() {
 
   if (singleBtn) singleBtn.addEventListener("click", () => setMode("single"));
   if (batchBtn) batchBtn.addEventListener("click", () => setMode("batch"));
-  if (batchSmilesInput) {
-    batchSmilesInput.addEventListener("input", updateButtonStates);
-  }
   if (batchSmilesFile && batchSmilesInput) {
-    batchSmilesFile.addEventListener("change", (event) => {
-      const file = event.target.files && event.target.files[0];
-      if (!file) return;
+    batchSmilesInput.addEventListener("input", () => {
+      discardBatchImport();
+      updateButtonStates();
+    });
+    batchSmilesFile.addEventListener("change", () => {
+      const file = batchSmilesFile.files[0];
+      if (!file) {
+        discardBatchImport();
+        return;
+      }
+      batchSmilesInput.setCustomValidity("正在读取配体清单，请稍候。");
       const reader = new FileReader();
-      reader.onload = (e) => {
-        batchSmilesInput.value = e.target.result || "";
-        updateButtonStates();
+      reader.onload = () => {
+        if (batchSmilesFile.files[0] !== file) return;
+        batchSmilesInput.value = reader.result;
+        batchSmilesInput.dispatchEvent(new Event("input"));
         Utils.showToast(`已导入 ${file.name}`, "success");
+      };
+      reader.onerror = () => {
+        if (batchSmilesFile.files[0] !== file) return;
+        batchSmilesFile.value = "";
+        const message = "配体清单读取失败，请重新选择文件或编辑文本。";
+        batchSmilesInput.setCustomValidity(message);
+        Utils.showToast(message, "warning");
       };
       reader.readAsText(file);
     });
