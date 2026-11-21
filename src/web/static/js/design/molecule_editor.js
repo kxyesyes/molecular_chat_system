@@ -133,111 +133,6 @@ var MoleculeEditor = (function () {
     }
   }
 
-  function formatProp(value) {
-    var n = PropertiesPanel.numeric(value);
-    return n === null ? "—" : n.toFixed(2);
-  }
-
-  function metricDelta(beforeProps, afterProps, key) {
-    var beforeValue = PropertiesPanel.numeric(beforeProps && beforeProps[key]);
-    var afterValue = PropertiesPanel.numeric(afterProps && afterProps[key]);
-    var hasDelta = beforeValue !== null && afterValue !== null;
-    return hasDelta ? afterValue - beforeValue : null;
-  }
-
-  function renderDelta(label, beforeProps, afterProps, key) {
-    var afterValue = afterProps && afterProps[key];
-    var delta = metricDelta(beforeProps, afterProps, key);
-    var hasDelta = delta !== null;
-    return (
-      '<div class="candidate-metric">' +
-      '<span class="metric-label">' +
-      label +
-      "</span>" +
-      '<strong class="metric-value">' +
-      formatProp(afterValue) +
-      "</strong>" +
-      (hasDelta
-        ? '<span class="metric-delta">' + (delta >= 0 ? "+" : "") + delta.toFixed(2) + "</span>"
-        : '<span class="metric-delta">—</span>') +
-      "</div>"
-    );
-  }
-
-  function renderCandidateComparison(beforeProps, afterProps, smiles, fragmentLabel) {
-    addCandidateComparison(beforeProps, afterProps, smiles, fragmentLabel);
-  }
-
-  function renderCandidateBoard() {
-    var box = document.getElementById("candidateCompare");
-    if (!box) return;
-    var candidates = S.candidates || [];
-    var header =
-      '<div class="candidate-compare-title">' +
-      "<span>候选分子对比</span><small>按生成顺序</small>" +
-      "</div>";
-    if (!candidates.length) {
-      box.innerHTML =
-        header +
-        '<div class="candidate-compare-empty">执行一次取代后，这里会显示新旧分子的关键属性变化。</div>';
-      return;
-    }
-    box.innerHTML =
-      header +
-      '<div class="candidate-list">' +
-      candidates
-        .map(function (c) {
-          return (
-            '<div class="candidate-row">' +
-            '<div class="candidate-row-main">' +
-            '<div class="candidate-row-top"><strong>#' +
-            c.step +
-            " " +
-            UI.escText(c.fragmentLabel || "fragment") +
-            "</strong>" +
-            '<button class="ghost-mini" onclick="restoreCandidate(\'' +
-            UI.escInlineJs(c.smiles) +
-            "')\">恢复</button></div>" +
-            '<div class="candidate-smiles">' +
-            UI.escText(c.smiles || "") +
-            "</div>" +
-            '<div class="candidate-metrics">' +
-            renderDelta("QED", c.beforeProps, c.props, "qed") +
-            renderDelta("LogP", c.beforeProps, c.props, "logp") +
-            renderDelta("MW", c.beforeProps, c.props, "mw") +
-            renderDelta("TPSA", c.beforeProps, c.props, "tpsa") +
-            "</div></div>"
-          );
-        })
-        .join("") +
-      "</div>";
-  }
-
-  function addCandidateComparison(beforeProps, afterProps, smiles, fragmentLabel) {
-    if (!afterProps) return;
-    S.candidates = S.candidates || [];
-    var existingIndex = S.candidates.findIndex(function (candidate) {
-      return candidate.smiles === smiles;
-    });
-    if (existingIndex >= 0) {
-      // A repeated structure is not a new design result. Refresh its
-      // evidence in place so the list remains unique and generation-ordered.
-      S.candidates[existingIndex].beforeProps = beforeProps || {};
-      S.candidates[existingIndex].props = Object.assign({}, afterProps);
-      S.candidates[existingIndex].fragmentLabel = fragmentLabel;
-      renderCandidateBoard();
-      return;
-    }
-    S.candidates.push({
-      step: S.iter,
-      smiles: smiles,
-      fragmentLabel: fragmentLabel,
-      beforeProps: beforeProps || {},
-      props: Object.assign({}, afterProps),
-    });
-    renderCandidateBoard();
-  }
-
   async function loadStructure(source, successMessage) {
     if (!source) return;
     var mutationToken = ++S.mutationSeq;
@@ -286,11 +181,6 @@ var MoleculeEditor = (function () {
     if (!isCurrent() || !result || result.stale || !result.success) return;
     UI.setFeedback(successMessage || "已恢复候选分子，可继续选择片段做下一轮设计。", "success");
     return true;
-  }
-
-  function resetCandidateComparison() {
-    S.candidates = [];
-    renderCandidateBoard();
   }
 
   /* ── 位点检测 ── */
@@ -382,11 +272,7 @@ var MoleculeEditor = (function () {
           UI.setFeedback("结构取代已完成，但属性计算失败；该候选未加入历史，请检查计算工具后重试。", "warn");
           return;
         }
-        S.iter++;
-        var iterEl = document.getElementById("iterCount");
-        if (iterEl) iterEl.textContent = S.iter;
-        HistoryManager.addHist(productSmiles, S.curProps);
-        renderCandidateComparison(beforeProps, S.curProps, productSmiles, fragment.label);
+        HistoryManager.recordSubstitution(productSmiles, S.curProps, beforeProps, fragment.label);
         resetConnectionState();
         UI.setFeedback("取代完成，候选分子的属性变化已更新。", "success");
         UI.toast("取代成功", "success");
@@ -443,7 +329,6 @@ var MoleculeEditor = (function () {
     HistoryManager.clearHist();
     document.getElementById("curSmiles").textContent = "等待绘制...";
     PropertiesPanel.clearPropsUI();
-    resetCandidateComparison();
     UI.setFeedback("", "info");
     await setSMILES("");
   }
@@ -453,8 +338,6 @@ var MoleculeEditor = (function () {
     getSMILES: getSMILES,
     setSMILES: setSMILES,
     resetConnectionState: resetConnectionState,
-    addCandidateComparison: addCandidateComparison,
-    renderCandidateComparison: renderCandidateComparison,
     loadStructure: loadStructure,
     restoreCandidate: loadStructure,
     detectSites: detectSites,
