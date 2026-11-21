@@ -17,6 +17,8 @@ function setup() {
         addEventListener() {},
         contentWindow: { ketcher: {
           smiles: "",
+          editor: {options: () => ({})},
+          structService: {layout: async ({struct}) => ({struct})},
           async setMolecule(value) { this.smiles = value; },
           async getSmiles() { return this.smiles; },
         } },
@@ -332,17 +334,34 @@ test("clear invalidates properties, goals, history and in-flight responses", asy
   assert.equal(S.history.length, 0);
 });
 
-test("restore clears prior properties immediately and binds refreshed values to SMILES", async () => {
+test("restore keeps prior properties during parsing and binds refreshed values to SMILES", async () => {
   const { E, requests, S } = setup();
   S.smiles = "CC";
   S.curProps = { mw: 30 };
   const restore = E.restoreCandidate("CCO");
-  assert.equal(S.curProps, null);
+  assert.equal(S.curProps.mw, 30);
   for (let i = 0; i < 30 && !requests.length; i++) await Promise.resolve();
+  assert.equal(S.curProps, null);
   requests[0]({ success: true, properties: { mw: 46 } });
   await restore;
   assert.equal(S.propsSmiles, "CCO");
   assert.equal(S.curProps.mw, 46);
+});
+
+test("choosing a file retires an earlier property response before the new read finishes", async () => {
+  const { E, requests, S } = setup();
+  const first = E.restoreCandidate("CO");
+  for (let i = 0; i < 30 && !requests.length; i++) await Promise.resolve();
+  assert.equal(requests.length, 1);
+  let rejectRead;
+  const second = E.loadStructure({text: () => new Promise((_, reject) => { rejectRead = reject; })});
+  requests[0]({success: true, properties: {mw: 32}});
+  await first;
+  assert.equal(S.curProps, null);
+  await E.clearCanvas();
+  rejectRead(new Error("superseded file"));
+  await second;
+  assert.equal(S.smiles, "");
 });
 
 test("unavailable status overrides a legacy numeric placeholder", async () => {

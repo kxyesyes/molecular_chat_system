@@ -46,6 +46,124 @@ async function pageFor(t, pathname, api, onSocket = () => {}) {
   return page;
 }
 
+test("design imports use the last selection and preserve the committed structure on parse failure", async t => {
+  const properties = [], saves = [], exports = [];
+  const page = await pageFor(t, "https://medchat.test/molecular-design", (route, url) => {
+    if (url.pathname === "/api/design/fragments") return route.fulfill({json: {success: true, fragments: [], total: 0}});
+    if (url.pathname === "/api/design/properties") {
+      properties.push(route.request().postDataJSON().smiles);
+      return route.fulfill({json: {success: true, properties: {mw: 12}}});
+    }
+    if (url.pathname === "/api/design/save_molecule") {
+      saves.push(route.request().postDataJSON());
+      return route.fulfill({json: {success: true}});
+    }
+    if (url.pathname === "/api/design/export_history") {
+      exports.push(route.request().postDataJSON().history);
+      return route.fulfill({contentType: "text/csv", body: "step,SMILES,mw\n1,CN,12\n"});
+    }
+    return route.fulfill({status: 404});
+  });
+  await page.setViewportSize({width: 1200, height: 900});
+  await page.waitForFunction(() => DesignState.ketcherReady);
+  await page.evaluate(() => {
+    const read = File.prototype.text;
+    window.pendingReads = new Map();
+    window.importMessages = [];
+    const toast = DesignUI.toast;
+    DesignUI.toast = (text, type) => { importMessages.push([text, type]); toast(text, type); };
+    File.prototype.text = async function () {
+      if (this.name.startsWith("slow")) await new Promise((resolve, reject) => {
+        pendingReads.set(this.name, {resolve, reject});
+      });
+      return read.call(this);
+    };
+  });
+  async function choose(name, content) {
+    await page.locator("#uploadInput").setInputFiles({name, mimeType: "text/plain", buffer: Buffer.from(content)});
+  }
+  async function release(name, fail = false) {
+    await page.evaluate(async ([name, fail]) => {
+      const gate = pendingReads.get(name);
+      pendingReads.delete(name);
+      fail ? gate.reject(new Error("test read failure")) : gate.resolve();
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }, [name, fail]);
+  }
+  async function settled(smiles) {
+    await page.waitForFunction(expected => DesignState.propsSmiles === expected && !DesignState.editorWriteInFlight, smiles);
+    assert.equal(await page.evaluate(() => MoleculeEditor.getSMILES()), smiles);
+  }
+  const paste = async smiles => {
+    await page.locator('[onclick="showImport()"]').click();
+    await page.locator("#importInput").fill(smiles);
+    await page.locator('[onclick="confirmImport()"]').click();
+    await page.locator("#importModal").waitFor({state: "hidden"});
+  };
+  for (const first of ["slowA.smi", "slowB.csv"]) {
+    const start = properties.length;
+    await choose("slowA.smi", "CO old");
+    await choose("slowB.csv", "label,canonical_smiles\r\n\"first, row\",CCN\r\nother,CCO");
+    await release(first);
+    if (first === "slowB.csv") await settled("CCN");
+    await release(first === "slowA.smi" ? "slowB.csv" : "slowA.smi");
+    await page.waitForFunction(n => importMessages.filter(([s]) => s === "已导入分子").length === n, start + 1);
+    await settled("CCN");
+    assert.deepEqual(properties.slice(start), ["CCN"]);
+  }
+  for (const action of ["paste", "candidate", "clear"]) {
+    for (const fail of [false, true]) {
+      await choose("slowA.smi", "CO obsolete");
+      if (action === "paste") await paste("CCC");
+      if (action === "candidate") {
+        await page.evaluate(() => MoleculeEditor.addCandidateComparison({}, {mw: 12}, "CN", "fixture"));
+        await page.locator("#candidateCompare button").first().click();
+      }
+      if (action === "clear") await page.locator('[onclick="clearCanvas()"]').click();
+      const expected = {paste: "CCC", candidate: "CN", clear: ""}[action];
+      await settled(expected);
+      const before = await page.evaluate(() => [designFeedback.textContent, importMessages.length]);
+      const count = properties.length;
+      await release("slowA.smi", fail);
+      await settled(expected);
+      assert.deepEqual(await page.evaluate(() => [designFeedback.textContent, importMessages.length]), before);
+      assert.equal(properties.length, count);
+    }
+  }
+  await paste("CCO");
+  await settled("CCO");
+  await page.evaluate(() => { DesignState.iter = 1; HistoryManager.addHist("CN", {mw: 12}); });
+  const start = properties.length;
+  for (const [name, contents] of [["input.csv", "smiles\n"], ["input.smi", "C1(CCC"]]) {
+    const before = await page.evaluate(() => importMessages.length);
+    await choose(name, contents);
+    await page.waitForFunction(n => importMessages.slice(n).some(([,type]) => type === "error"), before);
+    await settled("CCO");
+    assert.deepEqual(await page.evaluate(() => DesignState.curProps), {mw: 12});
+  }
+  assert.equal(properties.length, start);
+  const raw = Buffer.from("\ufeffN[C@@H](C)O first\r\nCC second\r\n");
+  await page.evaluate(() => document.getElementById("uploadInput").addEventListener("change",
+    e => { window.originalFile = e.target.files[0]; }, {capture: true, once: true}));
+  await choose("input.smi", raw);
+  await settled("N[C@H](O)C");
+  const digest = await page.evaluate(async () => Array.from(new Uint8Array(await crypto.subtle.digest(
+    "SHA-256", await originalFile.arrayBuffer())), n => n.toString(16).padStart(2, "0")).join(""));
+  assert.equal(digest, createHash("sha256").update(raw).digest("hex"));
+  await choose("template.smi", "C[*] first\nCC second");
+  await page.waitForFunction(() => DesignState.propsSmiles.includes("_R1"));
+  const template = await page.evaluate(() => MoleculeEditor.getSMILES());
+  assert.equal(properties.at(-1), template);
+  assert.deepEqual(saves, []);
+  await page.locator("#saveMolBtn").click();
+  await page.getByText("分子已成功保存", {exact: true}).waitFor();
+  assert.deepEqual(saves, [{smiles: template, properties: {mw: 12}}]);
+  const download = page.waitForEvent("download");
+  await page.locator('[onclick="exportAll()"]').click();
+  assert.match((await download).suggestedFilename(), /\.csv$/);
+  assert.deepEqual(exports, [[{step: 1, smi: "CN", props: {mw: 12}}]]);
+});
+
 test("molecule carousels keep batch numbering, references and last-card clipboard actions", {timeout: 20000}, async t => {
   const origin = "https://medchat.test";
   const chains = Array.from({length: 16}, (_, i) => "C".repeat(i + 1));
