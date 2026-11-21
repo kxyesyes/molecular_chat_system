@@ -380,6 +380,36 @@ def durable_artifact(api):
     return task_id, pose
 
 
+def test_restoring_saved_docking_files_is_read_only_and_owner_scoped(api):
+    import hashlib
+
+    task_id, pose = durable_artifact(api)
+    task_dir = api.runtime.config.staging_root / task_id
+    legacy = history(api, 'old-result')
+    files = [
+        task_dir / 'input_manifest.json', task_dir / 'completion_manifest.json',
+        task_dir / 'inputs/receptor.pdb', task_dir / 'artifacts/docking_pose.pdbqt',
+        api.work / 'docking_history_index.json', legacy / 'result.pdbqt',
+    ]
+    before = [hashlib.sha256(path.read_bytes()).digest() for path in files]
+    task = api.runtime.store.get(task_id)
+    events = api.runtime.store.events(task_id)
+    for path, expected in [
+        (f'/api/docking/tasks/{task_id}/receptor', (task_dir / 'inputs/receptor.pdb').read_bytes()),
+        (f'/api/docking/result/{task_id}', pose),
+        (f'/api/docking/pose_sdf/{task_id}?pose=2', b'4.000'),
+        ('/api/docking/result/old-result', (legacy / 'result.pdbqt').read_bytes()),
+    ]:
+        saved = api.client.get(path)
+        assert saved.status_code == 200
+        assert expected in saved.content
+        assert api.foreign.get(path).status_code == 404
+        assert api.client.get(path).content == saved.content
+    assert api.runtime.store.get(task_id) == task
+    assert api.runtime.store.events(task_id) == events
+    assert [hashlib.sha256(path.read_bytes()).digest() for path in files] == before
+
+
 @pytest.mark.parametrize('same_database', [False, True])
 def test_real_durable_non_c_result_and_pose_remain_available(api, monkeypatch, same_database):
     from src.docking import interaction_analysis

@@ -216,11 +216,14 @@ test("cancel acknowledgement stays pending and confirmed cancellation never rend
   assert.equal(get("start-btn").disabled, false);
 });
 test("reopening a canceled task shows its own terminal state and progress", async () => {
-  const { context: c, get } = harness();
-  c.fetch = async () => response({ ...record("canceled"), task_type: "docking" });
-  await c.restoreDurableDockingTask("task-1");
-  assert.match(get("results-content").textContent, /已取消/);
-  assert.equal(get("docking-progress").style.width, "50%");
+  for (const status of ["canceled", "cancelled"]) {
+    const { context: c, get, timers } = harness();
+    c.fetch = async () => response({ ...record(status), task_type: "docking" });
+    await c.restoreDurableDockingTask("task-1");
+    assert.match(get("results-content").textContent, /已取消/);
+    assert.equal(get("docking-progress").style.width, "50%");
+    assert.equal(timers.size, 0);
+  }
 });
 test("poll disconnect holds task lock and schedules reconnect", async () => {
   const { context: c, get, timers } = harness();
@@ -433,12 +436,21 @@ test("a resumed running historical task stays isolated from the current receptor
   assert.doesNotMatch(get("results-content").innerHTML, /loadComplexStructure/);
   assert.match(get("results-content").innerHTML, /蛋白/);
 });
-test("a resumed historical task with a failed poll unlocks and reports the failure", async () => {
-  const { context: c, get } = harness();
+test("history shows its verified record before the next poll and unlocks on a later read failure", async () => {
+  const { context: c, get, timers } = harness();
   const running = {...record("running"), task_type: "docking"};
   let calls = 0;
   c.fetch = async () => ++calls === 1 ? response(running) : ({ok: false, json: async () => ({success: false, message: "read failed"})});
   await c.restoreDurableDockingTask("task-1");
+  assert.equal(calls, 1);
+  assert.equal(get("docking-progress").style.width, "50%");
+  assert.equal(get("start-btn").disabled, true);
+  assert.equal(timers.size, 1);
+  const [nextPoll] = timers.values();
+  assert.equal(nextPoll.ms, 500);
+  nextPoll.fn();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 2);
   assert.equal(get("start-btn").disabled, false);
   assert.match(get("results-content").innerHTML, /read failed/);
 });
@@ -551,12 +563,16 @@ test("a poll failure allows retrying the same remembered task without creating a
   assert.equal(c.readRememberedDockingTask(), null);
 });
 test("restoring a running task initializes the progress manager on a fresh page", async () => {
-  const { context: c } = harness();
+  const { context: c, timers } = harness();
   c.stepManager = null;
   c.DockingStepManager = class { reset() {} show() {} startStep() {} completeStep() {} updateStepProgress() {} errorStep() {} };
   let calls = 0;
   c.fetch = async () => response(++calls === 1 ? {...record(), task_type: "docking"} : {...success(), task_type: "docking"});
   await c.restoreDurableDockingTask("task-1");
+  assert.equal(c.readRememberedDockingTask(), "task-1");
+  const [nextPoll] = timers.values();
+  nextPoll.fn();
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(c.readRememberedDockingTask(), null);
 });
 
