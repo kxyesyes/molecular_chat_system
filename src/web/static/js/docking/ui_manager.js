@@ -14,6 +14,7 @@ function receptorForView(jobId) {
     format: AppState.currentProteinFormat || "pdb"};
 }
 let loadedDockingProteinFile = null;
+let receptorSelection = 0;
 const batchDockingProteins = new Map();
 function beginDockingView() {
   renderedInteractionPose = null;
@@ -373,20 +374,18 @@ function handleFileUpload(inputId, displayId, fileType) {
   input.addEventListener("change", function (e) {
     const files = Array.from(e.target.files);
     renderSelectedFiles(input, display, files);
-
-    files.forEach((file) => {
-      if (
-        fileType === "protein" &&
-        (file.name.toLowerCase().endsWith(".pdb") ||
-          file.name.toLowerCase().endsWith(".pdbqt"))
-      ) {
-        void loadProteinFile(file).catch((error) => {
-          Utils.showToast(`受体文件加载失败：${error.message || "未知错误"}`, "warning");
+    if (fileType === "protein") {
+      const selection = ++receptorSelection;
+      const file = files[0];
+      if (file && /\.pdb(qt)?$/i.test(file.name)) {
+        loadProteinFile(file, selection).catch(error => {
+          if (selection === receptorSelection) Utils.showToast(`受体文件加载失败：${error.message}`, "warning");
         });
       }
-
+      return;
+    }
+    files.forEach((file) => {
       if (
-        fileType === "ligand" &&
         AppState.dockingMode !== "batch" &&
         (file.name.toLowerCase().endsWith(".sdf") ||
           file.name.toLowerCase().endsWith(".mol") ||
@@ -399,7 +398,19 @@ function handleFileUpload(inputId, displayId, fileType) {
 }
 
 // 加载蛋白质文件
-function loadProteinFile(file) {
+async function loadProteinFile(file, selection = ++receptorSelection) {
+  if (selection !== receptorSelection) return false;
+  const pdbData = await file.text();
+  if (selection !== receptorSelection) return false;
+
+  const input = document.getElementById("protein-file");
+  if (input.files[0] !== file) {
+    if (typeof DataTransfer === "undefined") throw new Error("请手动上传受体文件。");
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    input.files = transfer.files;
+    renderSelectedFiles(input, document.getElementById("protein-files"), [file]);
+  }
   beginDockingView();
   const replacingProtein = loadedDockingProteinFile !== null && loadedDockingProteinFile !== file;
   if (replacingProtein) AppState.dockingBoxCenterTouched = false;
@@ -407,68 +418,59 @@ function loadProteinFile(file) {
   if (typeof setCurrentJobId === "function") setCurrentJobId(null);
   AppState.currentComplexData = null;
   if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
-  return new Promise((resolve, reject) => {
-    historyReceptor = null;
-    if (typeof clearDockingCavities === "function") clearDockingCavities();
-    const reader = new FileReader();
-    reader.onload = function (e) {
-      beginDockingView();
-      loadedDockingProteinFile = file;
-      const pdbData = e.target.result;
-      currentProteinData = pdbData;
-      AppState.currentProteinFormat = file.name.toLowerCase().endsWith(".pdbqt")
-        ? "pdbqt"
-        : "pdb";
-      loadMolecule(pdbData, "protein", file.name);
+  historyReceptor = null;
+  if (typeof clearDockingCavities === "function") clearDockingCavities();
+  loadedDockingProteinFile = file;
+  currentProteinData = pdbData;
+  AppState.currentProteinFormat = file.name.toLowerCase().endsWith(".pdbqt")
+    ? "pdbqt"
+    : "pdb";
+  loadMolecule(pdbData, "protein", file.name);
 
-      try {
-        const cxEl = document.getElementById("center_x");
-        const cyEl = document.getElementById("center_y");
-        const czEl = document.getElementById("center_z");
-        const sxEl = document.getElementById("size_x");
-        const syEl = document.getElementById("size_y");
-        const szEl = document.getElementById("size_z");
+  try {
+    const cxEl = document.getElementById("center_x");
+    const cyEl = document.getElementById("center_y");
+    const czEl = document.getElementById("center_z");
+    const sxEl = document.getElementById("size_x");
+    const syEl = document.getElementById("size_y");
+    const szEl = document.getElementById("size_z");
 
-        const cx = cxEl ? parseFloat(cxEl.value || "0") : 0;
-        const cy = cyEl ? parseFloat(cyEl.value || "0") : 0;
-        const cz = czEl ? parseFloat(czEl.value || "0") : 0;
-        const sx = sxEl ? parseFloat(sxEl.value || "20") : 20;
-        const sy = syEl ? parseFloat(syEl.value || "20") : 20;
-        const sz = szEl ? parseFloat(szEl.value || "20") : 20;
+    const cx = cxEl ? parseFloat(cxEl.value || "0") : 0;
+    const cy = cyEl ? parseFloat(cyEl.value || "0") : 0;
+    const cz = czEl ? parseFloat(czEl.value || "0") : 0;
+    const sx = sxEl ? parseFloat(sxEl.value || "20") : 20;
+    const sy = syEl ? parseFloat(syEl.value || "20") : 20;
+    const sz = szEl ? parseFloat(szEl.value || "20") : 20;
 
-        const isDefaultCenter =
-          Math.abs(cx) < 1e-6 && Math.abs(cy) < 1e-6 && Math.abs(cz) < 1e-6;
-        const isDefaultSize =
-          Math.abs(sx - 20) < 1e-6 &&
-          Math.abs(sy - 20) < 1e-6 &&
-          Math.abs(sz - 20) < 1e-6;
+    const isDefaultCenter =
+      Math.abs(cx) < 1e-6 && Math.abs(cy) < 1e-6 && Math.abs(cz) < 1e-6;
+    const isDefaultSize =
+      Math.abs(sx - 20) < 1e-6 &&
+      Math.abs(sy - 20) < 1e-6 &&
+      Math.abs(sz - 20) < 1e-6;
 
-        if (replacingProtein || (isDefaultCenter && isDefaultSize)) {
-          autoSetBoxToLigand(true);
-        }
-      } catch (e) {
-        console.warn("自动定位默认对接盒失败:", e);
-      }
+    if (replacingProtein || (isDefaultCenter && isDefaultSize)) {
+      autoSetBoxToLigand(true);
+    }
+  } catch (e) {
+    console.warn("自动定位默认对接盒失败:", e);
+  }
 
-      const statusIndicators = document.querySelectorAll(".status-indicator");
-      statusIndicators.forEach((indicator) => {
-        if (indicator.textContent.includes("等待输入")) {
-          indicator.className = "status-indicator status-completed";
-          indicator.textContent = "已加载";
-        }
-      });
-
-      updateButtonStates();
-      setResultsMinHeightToLeft();
-      const detectButton = document.getElementById("detect-cavities-btn");
-      if (detectButton && typeof detectDockingCavities === "function") {
-        void detectDockingCavities(detectButton, AppState.dockingBoxCenterTouched);
-      }
-      resolve(pdbData);
-    };
-    reader.onerror = () => reject(new Error("受体文件读取失败"));
-    reader.readAsText(file);
+  const statusIndicators = document.querySelectorAll(".status-indicator");
+  statusIndicators.forEach((indicator) => {
+    if (indicator.textContent.includes("等待输入")) {
+      indicator.className = "status-indicator status-completed";
+      indicator.textContent = "已加载";
+    }
   });
+
+  updateButtonStates();
+  setResultsMinHeightToLeft();
+  const detectButton = document.getElementById("detect-cavities-btn");
+  if (detectButton && typeof detectDockingCavities === "function") {
+    void detectDockingCavities(detectButton, AppState.dockingBoxCenterTouched);
+  }
+  return true;
 }
 
 // 加载配体文件
@@ -566,18 +568,11 @@ function removeFile(index, inputId, displayId) {
   });
 
   input.files = dt.files;
-  if (inputId === "protein-file" && typeof clearDockingCavities === "function") clearDockingCavities();
-  display.innerHTML = "";
-
-  Array.from(input.files).forEach((file, i) => {
-    const fileItem = document.createElement("div");
-    fileItem.className = "file-item";
-    fileItem.innerHTML = `
-      <span class="file-name">${Safe.escapeHtml(file.name)} (${(file.size / 1024).toFixed(1)} KB)</span>
-      <button class="file-remove" onclick="removeFile(${i}, '${Safe.escapeInlineJsString(inputId)}', '${Safe.escapeInlineJsString(displayId)}')">删除</button>
-    `;
-    display.appendChild(fileItem);
-  });
+  if (inputId === "protein-file") {
+    receptorSelection++;
+    clearDockingCavities();
+  }
+  renderSelectedFiles(input, display, Array.from(input.files));
 }
 
 function getDockingParams() {
@@ -1883,6 +1878,7 @@ function resetDocking(options = {}) {
   beginDockingView();
   const preserveInputs = options.preserveInputs === true;
   if (!preserveInputs) {
+    receptorSelection++;
     if (typeof clearDockingCavities === "function") clearDockingCavities();
     document.getElementById("protein-file").value = "";
     document.getElementById("ligand-file").value = "";
@@ -2109,6 +2105,7 @@ async function restoreDurableDockingTask(taskId) {
   }
   const sequence = ++durableHistoryRestoreSequence;
   const view = beginDockingView();
+  receptorSelection++;
   historyReceptor = null;
   boundDockingProtein = null;
   if (typeof setCurrentJobId === "function") setCurrentJobId(null);
@@ -2220,6 +2217,7 @@ function loadHistoryJob(jobId, poseIndex) {
   }
   const sequence = ++durableHistoryRestoreSequence;
   const viewSequence = beginDockingView();
+  receptorSelection++;
   fetch(`/api/docking/result/${jobId}`)
     .then((r) => {
       if (!r.ok) throw new Error("无法获取对接结果");

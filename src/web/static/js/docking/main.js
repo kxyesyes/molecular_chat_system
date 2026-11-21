@@ -158,6 +158,7 @@ async function loadDockingDemo() {
   if (!button || !proteinInput || !ligandInput || !smilesInput) return;
 
   button.disabled = true;
+  const selection = ++receptorSelection;
   const originalText = button.textContent;
   button.textContent = "正在载入示例…";
   try {
@@ -169,14 +170,7 @@ async function loadDockingDemo() {
       fetchDockingDemoFile("/api/docking/demo/pde4a-apo", "PDE4A_apo_6FG5.pdb"),
       fetchDockingDemoFile("/api/docking/demo/roflumilast.pdbqt", "roflumilast.pdbqt"),
     ]);
-    const transfer = new DataTransfer();
-    transfer.items.add(file);
-    proteinInput.files = transfer.files;
-    const proteinDisplay = document.getElementById("protein-files");
-    if (proteinDisplay && typeof renderSelectedFiles === "function") {
-      renderSelectedFiles(proteinInput, proteinDisplay, [file]);
-    }
-    await loadProteinFile(file);
+    if (!await loadProteinFile(file, selection)) return;
 
     const singleModeButton = document.getElementById("single-mode-btn");
     if (singleModeButton && typeof singleModeButton.click === "function") {
@@ -193,7 +187,7 @@ async function loadDockingDemo() {
     document.getElementById("energy_range").value = "3";
     Utils.showToast("已载入曼氏血吸虫 PDE4A apo（6FG5）和罗氟司特。可在搜索区域中选择空腔或调整坐标。", "success", 6000);
   } catch (error) {
-    Utils.showToast(`示例载入失败：${error.message || "未知错误"}`, "warning", 7000);
+    if (selection === receptorSelection) Utils.showToast(`示例载入失败：${error.message || "未知错误"}`, "warning", 7000);
   } finally {
     button.disabled = false;
     button.textContent = originalText;
@@ -206,6 +200,7 @@ async function loadTargetStructureFromQuery() {
   if (!rawId || !/^\d+$/.test(rawId)) return;
 
   const structureId = encodeURIComponent(rawId);
+  const selection = ++receptorSelection;
   try {
     Utils.showToast("正在加载靶点结构到分子对接流程…", "info");
     const preflightResponse = await fetch(
@@ -234,30 +229,22 @@ async function loadTargetStructureFromQuery() {
     const blob = await fileResponse.blob();
     const filename = `target-${preflight.structure_id || rawId}.pdb`;
     const file = new File([blob], filename, { type: "chemical/x-pdb" });
-    const input = document.getElementById("protein-file");
-    if (!input || typeof DataTransfer === "undefined") {
-      throw new Error("当前浏览器不支持自动载入受体结构，请手动上传 PDB 文件。");
-    }
-    const transfer = new DataTransfer();
-    transfer.items.add(file);
-    input.files = transfer.files;
-    input.dispatchEvent(new Event("change", { bubbles: true }));
+    if (!await loadProteinFile(file, selection)) return;
     Utils.showToast(
       `已加载 ${preflight.structure_id || rawId}；请提供配体并确认对接盒后再提交任务。`,
       "success",
       6000,
     );
-  } catch (error) {
-    Utils.showToast(
-      `靶点结构未能自动载入：${error.message || "未知错误"}。请手动上传受体文件。`,
-      "warning",
-      7000,
-    );
-  } finally {
     const cleanUrl = new URL(window.location.href);
     cleanUrl.searchParams.delete("target_structure");
     cleanUrl.searchParams.delete("target_structure_id");
-    window.history.replaceState({}, "", cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
+    window.history.replaceState(window.history.state, "", cleanUrl.pathname + cleanUrl.search + cleanUrl.hash);
+  } catch (error) {
+    if (selection === receptorSelection) Utils.showToast(
+      `靶点结构未能自动载入：${error.message || "未知错误"}。可刷新重试或手动上传受体文件。`,
+      "warning",
+      7000,
+    );
   }
 }
 

@@ -78,17 +78,19 @@ test("a replacement receptor cannot inherit a completed pose table or a confirme
   const {context: c, get} = harness();
   c.loadMolecule = () => {};
   c.setResultsMinHeightToLeft = () => {};
-  c.FileReader = class {
-    readAsText(file) { this.onload({target: {result: file.name}}); }
-  };
+  async function select(name) {
+    const file = {name, size: name.length, text: async () => name};
+    get("protein-file").files = [file];
+    await c.loadProteinFile(file);
+  }
   get("center_x").value = "17.32";
-  await c.loadProteinFile({name: "first.pdb"});
+  await select("first.pdb");
   c.AppState.dockingBoxCenterTouched = true;
   c.AppState.currentJobId = "previous-result";
   get("results-content").innerHTML = "结构编号 Pose 1";
   get("pose-select").children.push({value: "1"});
   get("progress-log").style.display = "block";
-  await c.loadProteinFile({name: "second.pdb"});
+  await select("second.pdb");
   assert.equal(c.AppState.dockingBoxCenterTouched, false);
   assert.doesNotMatch(get("results-content").innerHTML, /Pose 1/);
   assert.equal(get("pose-select").children.length, 0);
@@ -364,10 +366,14 @@ test("history errors are not presented as an empty history", async () => {
 });
 test("history restoration rechecks the owned record and avoids another receptor", async () => {
   const { context: c, get } = harness();
+  const read = Promise.withResolvers();
+  const pendingReceptor = c.loadProteinFile({name: "previous.pdb", text: () => read.promise});
   const r = success(); r.task_type = "docking"; r.result.data.result_job_id = "task-1"; r.result.data.best_pose.pose = 1;
   c.fetch = async (url) => { assert.equal(url, "/api/tasks/task-1"); return response(r); };
   get("interaction-status").textContent = "Pose 1：上一受体缺少显式氢";
   await c.restoreDurableDockingTask("task-1");
+  read.resolve("previous receptor");
+  assert.equal(await pendingReceptor, false);
   assert.equal(get("interaction-status").textContent, "", "a new result must clear the prior receptor's diagnosis");
   assert.match(get("results-content").innerHTML, /-8\.400/);
   assert.doesNotMatch(get("results-content").innerHTML, /loadComplexStructure/);
