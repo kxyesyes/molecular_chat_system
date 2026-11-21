@@ -160,7 +160,7 @@ async function actualMain(frames, {failReport = false, failProperties = false, f
   const readiness = section('function setAgentReadiness(readiness)', '    function invalidateAgentReadinessRequests()');
   const handler = new Function("window", "document", "moleculeCandidateLifecycle", "evidenceReportLifecycle", "evidenceReportViews", "scientificReferences", "box", `
     const elements = {chatContainer: {querySelector: selector => selector.includes("typing") ? null : box}};
-    const HomeFormatters = {formatContent: v => v}; const HomeState = {}; const currentMessages = [];
+    const HomeFormatters = {formatContent: v => v};
     const HomeChatRenderer = {showNotification() {}};
     const authoritativeAgentModelName = 'offline-frame-fixture';
     const agentConfigInputVersion = 0, agentConfigSavedInputVersion = 0;
