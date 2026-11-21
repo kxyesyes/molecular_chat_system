@@ -679,6 +679,53 @@ def test_safe_torch_load_uses_weights_only_when_supported(
     load.assert_called_once_with(checkpoint, map_location="cpu", weights_only=True)
 
 
+def test_training_status_reads_preserve_session_ownership_and_saved_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tempfile
+    from src.activity import trainer
+    from src.web.routes.api_routes import setup_api_routes
+
+    models_dir = tmp_path / "models"
+    monkeypatch.setenv("ACTIVITY_MODEL_DIR", str(models_dir))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(trainer, "training_jobs", {})
+    monkeypatch.setattr(trainer, "ActivityTrainer", Mock())
+    weights = _write_weights(models_dir)
+    registry = ActivityModelRegistry(models_dir)
+    registry.register(_metadata("saved-model", weights.name))
+    registry.select("saved-model")
+    files = [registry.state_path, models_dir / "saved-model_info.json", weights]
+    before = [file.read_bytes() for file in files]
+
+    app = FastAPI()
+    app.add_middleware(AgentSessionMiddleware, store=AgentSessionStore(tmp_path / "sessions.sqlite"))
+    setup_api_routes(app)
+    with (
+        TestClient(app, base_url="https://localhost") as owner,
+        TestClient(app, base_url="https://localhost") as other,
+    ):
+        models = owner.get("/api/activity/models").json()
+        assert models["current_model"] == "saved-model"
+        submitted = owner.post(
+            "/api/activity/train",
+            data={"target_column": "label"},
+            files={"file": ("train.csv", b"smiles,label\nCCO,1\n")},
+        )
+        assert submitted.status_code == 200
+        job_id = submitted.json()["job_id"]
+        status_url = f"/api/activity/train/status/{job_id}"
+        status = owner.get(status_url).json()["status"]
+        assert status["job_id"] == job_id
+        assert "owner_session_id" not in status
+        assert other.get(status_url).status_code == 404
+        assert owner.get(status_url).json()["status"] == status
+        assert other.get("/api/activity/train/jobs").json()["jobs"] == []
+        assert [job["job_id"] for job in owner.get("/api/activity/train/jobs").json()["jobs"]] == [job_id]
+        assert owner.get("/api/activity/models").json() == models
+    assert [file.read_bytes() for file in files] == before
+
+
 def test_activity_model_api_uses_model_ids_and_rejects_path_payloads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

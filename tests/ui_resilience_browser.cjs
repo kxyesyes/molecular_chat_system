@@ -378,16 +378,47 @@ test("knowledge graph keeps topic details available on mobile when its CDN is of
   assert(await page.locator("#detail-modal").isHidden());
 });
 
-test("reloading a running training job restores progress and prevents a second launch", async t => {
+test("a submitted training job survives refresh and offline retries with one POST", async t => {
+  let submissions = 0;
+  let offline = false;
+  const statusPath = "/api/activity/train/status/fixture";
+  const failedReads = [];
   let state = "running";
   const page = await pageFor(t, "/activity-prediction", (route, url) => {
-    if (url.pathname === "/api/activity/train/status/fixture") {
+    if (url.pathname === "/api/activity/train" && route.request().method() === "POST") {
+      submissions++;
+      return route.fulfill({json: {success: true, job_id: "fixture"}});
+    }
+    if (url.pathname === statusPath && route.request().method() === "GET") {
+      if (offline) return route.continue();
       return route.fulfill({json:{success:true,status:{state,epoch:2,progress:50}}});
     }
     return route.fulfill({status:503,json:{detail:"服务暂不可用"}});
   });
-  await page.evaluate(() => localStorage.setItem("activeTrainJobId", JSON.stringify({jobId:"fixture", totalEpochs:4})));
+  page.on("requestfailed", request => {
+    if (new URL(request.url()).pathname === statusPath) failedReads.push(request.failure().errorText);
+  });
+  await page.locator('[onclick*="switchTab"][onclick*="train"]').click();
+  await page.locator("#trainFile").setInputFiles({
+    name: "training.csv", mimeType: "text/csv", buffer: Buffer.from("smiles,label\nCCO,1\n"),
+  });
+  await page.locator('[onclick="confirmPreflight()"]').click();
+  await page.locator("#epochs").fill("4");
+  await page.locator("#trainBtn").click();
+  await page.locator("#confirmLaunchBtn").click();
+  await page.waitForFunction(() => JSON.parse(localStorage.getItem("activeTrainJobId"))?.jobId === "fixture");
+  const saved = await page.evaluate(() => localStorage.getItem("activeTrainJobId"));
+  assert.equal(submissions, 1);
+  offline = true;
+  await page.context().setOffline(true);
   await page.reload();
+  await page.getByText("状态暂不可用，正在重试").waitFor();
+  await page.waitForEvent("requestfailed", request => new URL(request.url()).pathname === statusPath);
+  assert(failedReads.length >= 2 && failedReads.every(error => error.includes("INTERNET_DISCONNECTED")));
+  assert.equal(await page.evaluate(() => localStorage.getItem("activeTrainJobId")), saved);
+  assert(await page.locator("#trainBtn").isDisabled());
+  await page.context().setOffline(false);
+  offline = false;
   await page.waitForFunction(() => document.querySelector("#dock-epoch-text").textContent === "Epoch 2/4");
   assert(await page.locator("#trainBtn").isDisabled());
   await page.locator(".dock-view-btn").click();
@@ -397,7 +428,58 @@ test("reloading a running training job restores progress and prevents a second l
   state = "failed";
   await page.waitForFunction(() => localStorage.getItem("activeTrainJobId") === null);
   assert(await page.locator("#trainBtn").isEnabled());
+  assert.equal(submissions, 1);
 });
+
+for (const firstRead of [true, false]) {
+  for (const [end, refreshLabel, pollLabel] of [
+    ["completed", "Idle", "Model Ready"],
+    ["failed", "Idle", "Failed"],
+    ["canceled", "训练已取消", "训练已取消"],
+    ["missing", "Idle", "Idle"],
+  ]) {
+    test(`training ${firstRead ? "refresh" : "poll"} handles ${end} with the existing model selected`, async t => {
+      const statusReads = [];
+      let modelReads = 0;
+      const writes = [];
+      const model = {model_id: "saved-model", name: "已保存模型", task_type: "regression", target: "label"};
+      const page = await pageFor(t, "/activity-prediction", (route, url) => {
+        if (route.request().method() !== "GET") writes.push(url.pathname);
+        if (url.pathname === "/api/activity/models") {
+          modelReads++;
+          return route.fulfill({json: {success: true, models: [model], current_model: model.model_id}});
+        }
+        if (url.pathname === "/api/activity/train/status/legacy-job") {
+          const state = firstRead || statusReads.length ? end : "running";
+          statusReads.push(state);
+          if (state === "missing") return route.fulfill({status: 404, json: {}});
+          return route.fulfill({json: {success: true, status: {
+            state, epoch: 2, best_epoch: 2, logs: ["epoch 2"], error: "fixture error",
+          }}});
+        }
+        return route.fulfill({status: 503, json: {}});
+      });
+      await page.locator('#modelSelector option[value="saved-model"]').waitFor({state: "attached"});
+      await page.evaluate(() => localStorage.setItem("activeTrainJobId", JSON.stringify({jobId: "legacy-job", totalEpochs: 4})));
+      await page.reload();
+      await page.waitForFunction(() => localStorage.getItem("activeTrainJobId") === null);
+      const completedLive = !firstRead && end === "completed";
+      assert.equal(await page.locator("#trainBtn").textContent(), "🚀 重新训练");
+      assert(await page.locator("#trainBtn").isEnabled());
+      assert.equal(await page.locator("#train-dock").isVisible(), !firstRead || end === "canceled");
+      assert.equal(await page.locator("#statusStat").textContent(), firstRead ? refreshLabel : pollLabel);
+      assert.equal(await page.locator("#trainResultArea").evaluate(el => getComputedStyle(el).display !== "none"), completedLive);
+      if (completedLive) assert.equal(await page.locator("#resBestEpoch").textContent(), "2");
+      if (end === "canceled") assert.equal(await page.locator("#d-status").textContent(), "训练已取消");
+      if (!firstRead && end === "missing") assert.equal(await page.locator("#dock-status-text").textContent(), "任务不存在");
+      if (!firstRead && end === "failed") assert.match(await page.locator("#trainLog").textContent(), /epoch 2\s+\[Error\] fixture error/);
+      assert.deepEqual(statusReads, firstRead ? [end] : ["running", end]);
+      assert.equal(modelReads, completedLive ? 3 : 2);
+      assert.equal(await page.locator("#modelSelector").inputValue(), model.model_id);
+      assert.deepEqual(writes, []);
+    });
+  }
+}
 
 test("training file preflight, confirmation and failed submission stay usable at 320px", async t => {
   let posts = 0;

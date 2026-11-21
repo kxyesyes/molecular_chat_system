@@ -189,165 +189,132 @@ window.ActivityTraining = (function () {
     activeTimer = null;
   }
 
-  function finishCanceled(callbacks) {
-    stopPolling();
-    localStorage.removeItem("activeTrainJobId");
-    ActivityUtils.setText("dock-status-text", "训练已取消");
-    ActivityUtils.setText("d-status", "训练已取消");
-    const dot = document.getElementById("dock-dot");
-    if (dot) dot.className = "dock-dot";
-    callbacks?.onFinish?.("canceled");
+  function renderPolledStatus(status, totalEpochs, elapsed) {
+    const rawProgress = Number(status.progress ?? 0);
+    const progress = Number.isFinite(rawProgress)
+      ? Math.max(0, Math.min(100, rawProgress))
+      : 0;
+    const progressBar = document.getElementById("drawerProgressBar");
+    if (progressBar) progressBar.style.width = `${progress}%`;
+
+    const etaSec =
+      progress > 2 ? Math.round((elapsed / progress) * (100 - progress)) : null;
+    let eta = etaSec
+      ? etaSec > 60
+        ? `${Math.floor(etaSec / 60)}m ${etaSec % 60}s`
+        : `${etaSec}s`
+      : null;
+
+    let metric = ActivityCharts.buildMetricSummary(status.metrics) || "—";
+
+    if (status.metrics) {
+      ActivityCharts.updateMetricsChart(
+        status.epoch,
+        status.metrics,
+        status.best_epoch,
+        status.best_metrics,
+      );
+    }
+
+    const logBox = document.getElementById("trainLog");
+    if (logBox && status.logs?.length) {
+      logBox.textContent = status.logs.join("\n");
+      logBox.scrollTop = 99999;
+    }
+
+    let epoch = status.epoch ?? 0;
+    let displayState = "running";
+    if (status.state === "completed") {
+      if (logBox) logBox.textContent += "\n[Done] 训练完成!";
+      renderTrainingSummary(status, elapsed);
+      epoch = totalEpochs;
+      metric = ActivityCharts.buildMetricSummary(status.best_metrics || status.metrics) || metric;
+      eta = null;
+      displayState = "done";
+    } else if (status.state === "failed") {
+      if (logBox) logBox.textContent += `\n[Error] ${status.error || "训练失败"}`;
+      metric = null;
+      eta = null;
+      displayState = "error";
+    }
+    updateDrawerStats(epoch, totalEpochs, metric, eta, displayState);
+    updateDock(epoch, totalEpochs, metric, eta, displayState);
   }
 
-  function startPolling(jobId, totalEpochs, callbacks) {
-    const options = callbacks || {};
-    const startTime = Date.now();
-
+  async function startPolling(jobId, totalEpochs, callbacks, recovering = false) {
     stopPolling();
-
-    activeTimer = setInterval(async function () {
+    let startTime;
+    async function checkStatus(firstRead) {
+      let status = null;
       try {
-        const res = await fetch(`/api/activity/train/status/${jobId}`);
-        if (res.status === 404) {
-          stopPolling();
-          localStorage.removeItem("activeTrainJobId");
-          ActivityUtils.setText("dock-status-text", "任务不存在");
-          if (options.onFinish) options.onFinish("failed");
-          return;
+        const response = await fetch(`/api/activity/train/status/${jobId}`);
+        if (response.status !== 404) {
+          const payload = response.ok && await response.json();
+          if (!payload?.success || !payload.status) throw new Error("状态暂不可用");
+          status = payload.status;
         }
-        const payload = await res.json();
-        if (!res.ok || !payload.success || !payload.status) {
-          ActivityUtils.setText("dock-status-text", "状态暂不可用，正在重试");
-          return;
-        }
-
-        const status = payload.status;
-        if (status.state === "canceled") {
-          finishCanceled(options);
-          return;
-        }
-        const rawProgress = Number(status.progress ?? 0);
-        const progress = Number.isFinite(rawProgress)
-          ? Math.max(0, Math.min(100, rawProgress))
-          : 0;
-        const progressBar = document.getElementById("drawerProgressBar");
-        if (progressBar) progressBar.style.width = `${progress}%`;
-
-        const elapsed = (Date.now() - startTime) / 1000;
-        const etaSec =
-          progress > 2 ? Math.round((elapsed / progress) * (100 - progress)) : null;
-        const etaStr = etaSec
-          ? etaSec > 60
-            ? `${Math.floor(etaSec / 60)}m ${etaSec % 60}s`
-            : `${etaSec}s`
-          : null;
-
-        const metricStr = ActivityCharts.buildMetricSummary(status.metrics) || "—";
-
-        updateDrawerStats(
-          status.epoch ?? 0,
-          totalEpochs,
-          metricStr,
-          etaStr,
-          "running",
-        );
-        updateDock(status.epoch ?? 0, totalEpochs, metricStr, etaStr, "running");
-
-        if (status.metrics) {
-          ActivityCharts.updateMetricsChart(
-            status.epoch,
-            status.metrics,
-            status.best_epoch,
-            status.best_metrics,
-          );
-        }
-
-        if (status.logs && status.logs.length) {
-          const logBox = document.getElementById("trainLog");
-          if (logBox) {
-            logBox.textContent = status.logs.join("\n");
-            logBox.scrollTop = 99999;
-          }
-        }
-
-        if (status.state === "completed" || status.state === "failed") {
-          stopPolling();
-          localStorage.removeItem("activeTrainJobId");
-
-          if (options.onFinish) options.onFinish(status.state);
-
-          if (status.state === "completed") {
-            const logBox = document.getElementById("trainLog");
-            if (logBox) logBox.textContent += "\n[Done] 训练完成!";
-
-            renderTrainingSummary(status, elapsed);
-            const bestMetric =
-              ActivityCharts.buildMetricSummary(status.best_metrics || status.metrics) ||
-              metricStr;
-            updateDrawerStats(totalEpochs, totalEpochs, bestMetric, null, "done");
-            updateDock(totalEpochs, totalEpochs, bestMetric, null, "done");
-
-            if (options.onCompleted) options.onCompleted();
-          } else {
-            const logBox = document.getElementById("trainLog");
-            if (logBox) logBox.textContent += `\n[Error] ${status.error || "训练失败"}`;
-
-            updateDrawerStats(status.epoch ?? 0, totalEpochs, null, null, "error");
-            updateDock(status.epoch ?? 0, totalEpochs, null, null, "error");
-
-            if (options.onFailed) options.onFailed(status.error || "训练失败");
-          }
-        }
-      } catch (err) {
+      } catch {
         ActivityUtils.setText("dock-status-text", "状态暂不可用，正在重试");
-        console.error("Polling error:", err);
+        return false;
       }
-    }, 1000);
+
+      const state = status?.state;
+      const finished = !status || ["completed", "failed", "canceled"].includes(state);
+      if (finished) {
+        stopPolling();
+        localStorage.removeItem("activeTrainJobId");
+        callbacks?.onFinish?.(state || "failed");
+      }
+      if (state === "canceled") {
+        ActivityUtils.setText("dock-status-text", "训练已取消");
+        ActivityUtils.setText("d-status", "训练已取消");
+        const dot = document.getElementById("dock-dot");
+        if (dot) dot.className = "dock-dot";
+      } else if (firstRead) {
+        if (finished) {
+          const dock = document.getElementById("train-dock");
+          if (dock) dock.style.display = "none";
+        } else {
+          updateDock(status.epoch ?? 0, totalEpochs, null, null, "running");
+        }
+      } else if (status) {
+        renderPolledStatus(status, totalEpochs, (Date.now() - startTime) / 1000);
+        if (state === "completed") callbacks?.onCompleted?.();
+        if (state === "failed") callbacks?.onFailed?.(status.error || "训练失败");
+      } else {
+        ActivityUtils.setText("dock-status-text", "任务不存在");
+      }
+
+      return finished;
+    }
+
+    if (recovering && await checkStatus(true)) return;
+    startTime = Date.now();
+    activeTimer = setInterval(() => checkStatus(false), 1000);
   }
 
   function initRecovery(callbacks) {
     const saved = localStorage.getItem("activeTrainJobId");
     if (!saved) return;
 
+    let jobId, totalEpochs;
     try {
-      const parsed = JSON.parse(saved);
-      if (!parsed.jobId) return;
-
-      const trainBtn = document.getElementById("trainBtn");
-      if (trainBtn) {
-        trainBtn.disabled = true;
-        trainBtn.textContent = "正在恢复训练任务…";
-      }
-      const dock = document.getElementById("train-dock");
-      if (dock) dock.style.display = "flex";
-      ActivityUtils.setText("dock-status-text", "Reconnecting...");
-
-      fetch(`/api/activity/train/status/${parsed.jobId}`)
-        .then(async function (response) {
-          const payload = response.ok ? await response.json() : null;
-          if (payload?.success && payload.status?.state === "canceled") {
-            finishCanceled(callbacks);
-            return;
-          }
-          if (response.status === 404 || (payload?.success &&
-              ["completed", "failed"].includes(payload.status?.state))) {
-            localStorage.removeItem("activeTrainJobId");
-            if (dock) dock.style.display = "none";
-            callbacks?.onFinish?.(payload?.status?.state || "failed");
-            return;
-          }
-
-          if (!payload?.success || !payload.status) throw new Error("状态暂不可用");
-          updateDock(payload.status.epoch ?? 0, parsed.totalEpochs, null, null, "running");
-          startPolling(parsed.jobId, parsed.totalEpochs, callbacks);
-        })
-        .catch(function () {
-          ActivityUtils.setText("dock-status-text", "状态暂不可用，正在重试");
-          startPolling(parsed.jobId, parsed.totalEpochs, callbacks);
-        });
-    } catch (err) {
+      ({jobId, totalEpochs} = JSON.parse(saved));
+    } catch {
       localStorage.removeItem("activeTrainJobId");
+      return;
     }
+    if (!jobId) return;
+
+    const trainBtn = document.getElementById("trainBtn");
+    if (trainBtn) {
+      trainBtn.disabled = true;
+      trainBtn.textContent = "正在恢复训练任务…";
+    }
+    const dock = document.getElementById("train-dock");
+    if (dock) dock.style.display = "flex";
+    ActivityUtils.setText("dock-status-text", "Reconnecting...");
+    startPolling(jobId, totalEpochs, callbacks, true);
   }
 
   return {
