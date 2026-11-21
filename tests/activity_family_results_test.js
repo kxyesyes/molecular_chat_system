@@ -53,7 +53,7 @@ function setup() {
   const calls = {histogram: [], model: 0, alerts: [], chartClears: 0, requests: []};
   let frame = 0;
   const context = {
-    document: {createElement: tag => new Element(tag), getElementById: id => ids[id] || null},
+    document: {createElement: tag => new Element(tag), getElementById: id => ids[id] || null, querySelectorAll: () => []},
     echarts: {getInstanceByDom: () => ({clear: () => calls.chartClears++})},
     requestAnimationFrame: callback => callback(++frame * 2000),
     ActivityModels: {
@@ -496,6 +496,7 @@ test("single and batch requests display partial/failed/empty payloads and releas
         return {ok: true, json: async () => payload};
       };
       const button = endpoint === "predict" ? "submitBtn" : "batchSubmitBtn";
+      if (endpoint === "batch_predict") h.context.ActivityMain.switchTab("batch");
       await h.context.ActivityMain.handlePredict("/api/activity/" + endpoint, form, button);
       assert.equal(h.calls.alerts.length, 0, "Scientific failure must remain an inspectable report");
       assert.equal(h.ids.resultsBody.children.length, payload.results.length);
@@ -541,6 +542,7 @@ test("main renders actual conflict partial success-false responses for single an
       calls++;
       return {ok: true, json: async () => ({success: false, status: "partial", results: [row]})};
     };
+    if (endpoint === "batch_predict") h.context.ActivityMain.switchTab("batch");
     await h.context.ActivityMain.handlePredict("/api/activity/" + endpoint,
       new Map([["target", "PDE5A"]]), endpoint === "predict" ? "submitBtn" : "batchSubmitBtn");
     assert.equal(calls, 1);
@@ -564,6 +566,7 @@ test("registered submit handlers pass each form's own target and file/smiles", a
   h.ids.predictForm.fields = [["target", "PDE"], ["smiles", "CCO"]];
   h.ids.batchForm.fields = [["target", "BuChE"], ["file", file]];
   for (const id of ["predictForm", "batchForm"]) {
+    if (id === "batchForm") h.context.ActivityMain.switchTab("batch");
     let prevented = false;
     h.ids[id].listeners.submit({target: h.ids[id], preventDefault: () => { prevented = true; }});
     assert.ok(prevented);
