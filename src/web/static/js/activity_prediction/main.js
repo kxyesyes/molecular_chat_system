@@ -181,6 +181,24 @@ window.ActivityMain = (function () {
     input.click();
   }
 
+  const trainingCallbacks = {
+    onFinish: function (state) {
+      if (state === "canceled") setStatus("训练已取消");
+      const trainBtn = document.getElementById("trainBtn");
+      if (trainBtn) {
+        trainBtn.disabled = false;
+        trainBtn.textContent = "🚀 重新训练";
+      }
+    },
+    onCompleted: async function () {
+      setStatus("Model Ready");
+      await ActivityModels.loadModels();
+    },
+    onFailed: function () {
+      setStatus("Failed");
+    },
+  };
+
   async function startTraining() {
     const trainFile =
       document.getElementById("trainFile").files &&
@@ -272,22 +290,7 @@ window.ActivityMain = (function () {
       if (trainBtn) trainBtn.textContent = "⏳ 训练中...";
       setStatus("Training");
 
-      ActivityTraining.startPolling(data.job_id, totalEpochs, {
-        onFinish: function (state) {
-          if (state === "canceled") setStatus("训练已取消");
-          if (trainBtn) {
-            trainBtn.disabled = false;
-            trainBtn.textContent = "🚀 重新训练";
-          }
-        },
-        onCompleted: async function () {
-          setStatus("Model Ready");
-          await ActivityModels.loadModels();
-        },
-        onFailed: function () {
-          setStatus("Failed");
-        },
-      });
+      ActivityTraining.startPolling(data.job_id, totalEpochs, trainingCallbacks);
     } catch (e) {
       alert("训练错误: " + e.message);
       if (trainBtn) {
@@ -351,23 +354,7 @@ window.ActivityMain = (function () {
         );
       });
 
-    ActivityTraining.initRecovery({
-      onFinish: function (state) {
-        if (state === "canceled") setStatus("训练已取消");
-        const trainBtn = document.getElementById("trainBtn");
-        if (trainBtn) {
-          trainBtn.disabled = false;
-          trainBtn.textContent = "🚀 重新训练";
-        }
-      },
-      onCompleted: async function () {
-        setStatus("Model Ready");
-        await ActivityModels.loadModels();
-      },
-      onFailed: function () {
-        setStatus("Failed");
-      },
-    });
+    ActivityTraining.initRecovery(trainingCallbacks);
 
     bridgeGlobals();
   }
