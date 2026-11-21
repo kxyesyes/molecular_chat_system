@@ -176,9 +176,11 @@ window.ActivityMain = (function () {
           if (cfg.dropout) document.getElementById("dropout").value = cfg.dropout;
           if (cfg.target_column) {
             document.getElementById("targetColumn").value = cfg.target_column;
+            delete document.getElementById("targetColumn").dataset.suggested;
           }
           if (cfg.smiles_column) {
             document.getElementById("smilesColumn").value = cfg.smiles_column;
+            delete document.getElementById("smilesColumn").dataset.suggested;
           }
           if (cfg.classification_threshold !== undefined) {
             document.getElementById("classificationThreshold").value = cfg.classification_threshold;
@@ -218,29 +220,13 @@ window.ActivityMain = (function () {
   };
 
   async function startTraining() {
-    const trainFile =
-      document.getElementById("trainFile").files &&
-      document.getElementById("trainFile").files[0];
-    const targetColumn = document.getElementById("targetColumn").value.trim();
-    const totalEpochs = Math.max(
-      1,
-      parseInt(document.getElementById("epochs").value || "50", 10),
-    );
-    const taskType = document.getElementById("trainTaskType").value;
-    const splitStrategy = normalizeSplitStrategy(
-      document.getElementById("splitStrategy").value,
-    );
-
-    if (!trainFile || !targetColumn) {
-      alert("请先上传训练数据并填写目标列名。");
-      return;
-    }
-
+    const formData = ActivityPreflight.takeLaunch();
     const trainBtn = document.getElementById("trainBtn");
-    if (trainBtn) {
-      trainBtn.disabled = true;
-      trainBtn.textContent = "⏳ 提交中...";
-    }
+    if (!formData || trainBtn.disabled) return;
+    const totalEpochs = Number(formData.get("epochs"));
+    const taskType = formData.get("task_type");
+    trainBtn.disabled = true;
+    trainBtn.textContent = "⏳ 提交中...";
     setTrainingStatus("Starting Train...");
 
     ActivityCharts.resetMetricsChartState(taskType);
@@ -258,34 +244,6 @@ window.ActivityMain = (function () {
     }
     ActivityTraining.updateDrawerStats(0, totalEpochs, null, null, "running");
     ActivityTraining.openDrawer();
-
-    const formData = new FormData();
-    formData.append("file", trainFile);
-    formData.append("target_column", targetColumn);
-    formData.append("smiles_column", document.getElementById("smilesColumn").value.trim());
-    formData.append("task_type", taskType);
-    const classificationThreshold = document.getElementById("classificationThreshold").value.trim();
-    const classificationDirection = document.getElementById("classificationDirection").value;
-    if (taskType === "classification" && classificationThreshold !== "") {
-      formData.append("classification_threshold", classificationThreshold);
-    }
-    if (taskType === "classification" && classificationDirection !== "") {
-      formData.append("classification_direction", classificationDirection);
-    }
-    formData.append("split_strategy", splitStrategy);
-    formData.append("epochs", totalEpochs);
-    formData.append("learning_rate", document.getElementById("learningRate").value);
-    formData.append("batch_size", document.getElementById("batchSize").value);
-    formData.append("dropout", document.getElementById("dropout").value);
-    formData.append("num_layers", document.getElementById("trainLayers").value);
-    formData.append("hidden_size", document.getElementById("trainHidden").value);
-    formData.append(
-      "weight_decay",
-      document.getElementById("trainWeightDecay").value,
-    );
-    formData.append("patience", document.getElementById("trainPatience").value);
-    formData.append("loss_metric", document.getElementById("trainLoss").value);
-    formData.append("lr_scheduler", document.getElementById("trainScheduler").value);
 
     try {
       const response = await fetch("/api/activity/train", {

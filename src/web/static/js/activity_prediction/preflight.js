@@ -2,7 +2,18 @@
 
 window.ActivityPreflight = (function () {
   let preflightData = null;
+  let pendingLaunch = null;
   let bound = false;
+  const columnAliases = {
+    smilesColumn: ["smiles", "canonical_smiles", "molecule"],
+    targetColumn: ["pic50", "label", "activity", "target", "value"],
+  };
+
+  function previewColumn(id) {
+    const input = document.getElementById(id);
+    if (input.value && input.value !== input.dataset?.suggested) return input.value.trim();
+    return preflightData.headers.find(header => columnAliases[id].includes(header.toLowerCase())) || input.defaultValue || "";
+  }
 
   function setData(data) {
     preflightData = data;
@@ -57,14 +68,8 @@ window.ActivityPreflight = (function () {
     const headers = preflightData.headers;
     const rows = preflightData.rows;
     const total = preflightData.total;
-    const smilesGuess = document
-      .getElementById("smilesColumn")
-      .value.trim()
-      .toLowerCase();
-    const labelGuess = document
-      .getElementById("targetColumn")
-      .value.trim()
-      .toLowerCase();
+    const smilesGuess = previewColumn("smilesColumn").toLowerCase();
+    const labelGuess = previewColumn("targetColumn").toLowerCase();
 
     document.getElementById("preflight-meta").replaceChildren(
       createMetaItem("行数", total),
@@ -80,19 +85,10 @@ window.ActivityPreflight = (function () {
       let badgeClass = "other";
       let badgeText = "COL";
 
-      if (
-        lower === smilesGuess ||
-        lower === "smiles" ||
-        lower === "canonical_smiles"
-      ) {
+      if (lower === smilesGuess) {
         badgeClass = "smiles";
         badgeText = "SMILES";
-      } else if (
-        lower === labelGuess ||
-        lower === "pic50" ||
-        lower === "label" ||
-        lower === "activity"
-      ) {
+      } else if (lower === labelGuess) {
         badgeClass = "label";
         badgeText = "LABEL";
       }
@@ -142,22 +138,13 @@ window.ActivityPreflight = (function () {
 
   function confirm() {
     if (preflightData) {
-      const headers = preflightData.headers;
-      const smilesEl = document.getElementById("smilesColumn");
-      const labelEl = document.getElementById("targetColumn");
-      const smilesMatch = headers.find(function (header) {
-        return ["smiles", "canonical_smiles", "molecule"].includes(
-          header.toLowerCase(),
-        );
-      });
-      const labelMatch = headers.find(function (header) {
-        return ["pic50", "label", "activity", "target", "value"].includes(
-          header.toLowerCase(),
-        );
-      });
-
-      if (smilesMatch && !smilesEl.value) smilesEl.value = smilesMatch;
-      if (labelMatch && !labelEl.value) labelEl.value = labelMatch;
+      for (const id of Object.keys(columnAliases)) {
+        const input = document.getElementById(id);
+        if (!input.value || input.value === input.dataset.suggested) {
+          input.value = previewColumn(id);
+          input.dataset.suggested = input.value;
+        }
+      }
 
       setTrainHint(
         `✅ 解析成功：${preflightData.total} 条分子, ${preflightData.headers.length} 列`,
@@ -169,68 +156,82 @@ window.ActivityPreflight = (function () {
   }
 
   function showLaunchModal() {
-    const file = document.getElementById("trainFile").files &&
-      document.getElementById("trainFile").files[0];
-    if (!file) {
-      alert("请先上传训练数据集。");
-      return;
+    const file = document.getElementById("trainFile").files[0];
+    if (!preflightData || preflightData.file !== file || document.getElementById("trainBtn").disabled) return;
+    const form = document.getElementById("trainForm");
+    const data = new FormData(form);
+    for (const key of ["target_column", "smiles_column", "classification_threshold"]) {
+      data.set(key, data.get(key).trim());
     }
-
-    const target = document.getElementById("targetColumn").value.trim();
-    if (!target) {
+    if (!data.get("target_column")) {
       alert("请填写目标列名。");
       return;
     }
-
-    const task = document.getElementById("trainTaskType").value;
-    const epochs = document.getElementById("epochs").value;
-    const lr = document.getElementById("learningRate").value;
-    const bs = document.getElementById("batchSize").value;
-    const dr = document.getElementById("dropout").value;
-    const split = document.getElementById("splitStrategy").value;
-    const layers = document.getElementById("trainLayers").value;
-    const hidden = document.getElementById("trainHidden").value;
-    const decay = document.getElementById("trainWeightDecay").value;
-    const patience = document.getElementById("trainPatience").value;
-    const loss = document.getElementById("trainLoss").value;
-    const scheduler = document.getElementById("trainScheduler").value;
-
+    data.set("epochs", Math.max(1, parseInt(data.get("epochs") || "50", 10)));
+    for (const key of ["classification_threshold", "classification_direction"]) {
+      if (data.get("task_type") !== "classification" || data.get(key) === "") data.delete(key);
+    }
     const summaryGrid = document.createElement("div");
     summaryGrid.className = "summary-grid";
     [
-      ["数据文件", file.name],
-      ["目标列 (Label)", target],
-      [
-        "任务类型",
-        task === "regression" ? "回归 Regression" : "分类 Classification",
-      ],
-      ["划分策略", split],
-      ["Epochs", epochs],
-      ["Learning Rate", lr],
-      ["Batch Size", bs],
-      ["Dropout", dr],
-      ["Layers", layers],
-      ["Hidden Size", hidden],
-      ["Weight Decay", decay],
-      ["Patience", patience],
-      ["Loss Fn", loss],
-      ["Scheduler", scheduler],
-    ].forEach(function (entry) {
-      summaryGrid.appendChild(createSummaryItem(entry[0], entry[1]));
+      ["数据文件", "file"], ["SMILES 列名", "smiles_column"], ["目标列 (Label)", "target_column"],
+      ["任务类型", "task_type"], ["分类阈值", "classification_threshold"], ["阈值方向", "classification_direction"],
+      ["划分策略", "split_strategy"], ["Epochs", "epochs"], ["Learning Rate", "learning_rate"],
+      ["Batch Size", "batch_size"], ["Dropout", "dropout"], ["Layers", "num_layers"], ["Hidden Size", "hidden_size"],
+      ["Weight Decay", "weight_decay"], ["Patience", "patience"], ["Loss Fn", "loss_metric"], ["Scheduler", "lr_scheduler"],
+    ].forEach(function ([label, key]) {
+      if (!data.has(key)) return;
+      const field = form.elements.namedItem(key);
+      const value = key === "file" ? file.name : (field.selectedOptions?.[0]?.textContent ?? data.get(key));
+      summaryGrid.appendChild(createSummaryItem(label, value));
     });
     document.getElementById("launch-summary").replaceChildren(summaryGrid);
+    pendingLaunch = data;
     document.getElementById("launch-modal").style.display = "flex";
   }
 
   function closeLaunchModal() {
+    pendingLaunch = null;
     document.getElementById("launch-modal").style.display = "none";
   }
 
-  function confirmLaunch() {
+  function takeLaunch() {
+    const data = pendingLaunch;
     closeLaunchModal();
-    if (window.ActivityMain && typeof window.ActivityMain.startTraining === "function") {
-      window.ActivityMain.startTraining();
+    return data && preflightData?.file === document.getElementById("trainFile").files[0] ? data : null;
+  }
+
+  function previewFile(file, text) {
+    const lines = text.trim().split(/\r\n?|\n/);
+    const sep = lines[0].replace(/"(?:[^"]|"")*"/g, "").includes("\t") ? "\t" : ",";
+    let headers, total = 0;
+    const rows = [];
+    let row = [], field = "", quoted = false;
+    for (const line of lines) {
+      if (!quoted && !line.trim()) continue;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"' && (quoted || !field)) {
+          if (quoted && line[i + 1] === '"') { field += '"'; i++; }
+          else quoted = !quoted;
+        } else if (ch === sep && !quoted) {
+          row.push(field.trim());
+          field = "";
+        } else field += ch;
+      }
+      if (quoted) { field += "\n"; continue; }
+      row.push(field.trim());
+      if (!headers) headers = row;
+      else {
+        total++;
+        if (rows.length < 5) rows.push(row);
+      }
+      row = [];
+      field = "";
     }
+    if (quoted) throw new Error("文件的引号未闭合，请检查格式。");
+    if (!total) throw new Error("⚠️ 文件行数不足，请检查格式。");
+    return {file, headers, rows, sep, total};
   }
 
   function init() {
@@ -238,37 +239,47 @@ window.ActivityPreflight = (function () {
 
     const trainFileInput = document.getElementById("trainFile");
     if (!trainFileInput) return;
+    for (const id of Object.keys(columnAliases)) {
+      const input = document.getElementById(id);
+      input.dataset.suggested = input.defaultValue;
+      input.addEventListener("input", () => { delete input.dataset.suggested; });
+    }
 
     trainFileInput.addEventListener("change", function () {
-      const file = this.files && this.files[0];
-      if (!file) return;
+      const file = this.files[0];
+      setData(null);
+      close();
+      closeLaunchModal();
+      for (const id of Object.keys(columnAliases)) {
+        const input = document.getElementById(id);
+        if (input.value === input.dataset.suggested) {
+          input.value = input.defaultValue;
+          input.dataset.suggested = input.value;
+        }
+      }
+      setTrainHint(file ? "正在读取训练文件…" : "");
+      if (!file) {
+        document.getElementById("trainFileInfo").textContent = "未选择训练集";
+        return;
+      }
 
       document.getElementById("trainFileInfo").textContent = `${file.name}  (${(
         file.size / 1024
       ).toFixed(1)} KB)`;
 
       const reader = new FileReader();
-      reader.onload = function (e) {
-        const text = e.target.result;
-        const lines = text.trim().split("\n").filter(Boolean);
-        if (lines.length < 2) {
-          setTrainHint("⚠️ 文件行数不足，请检查格式。", "warn");
+      reader.onerror = () => {
+        if (this.files[0] === file) setTrainHint("文件读取失败，请重新选择。", "warn");
+      };
+      reader.onload = function () {
+        if (trainFileInput.files[0] !== file) return;
+        try {
+          setData(previewFile(file, reader.result));
+        } catch (error) {
+          setTrainHint(error.message, "warn");
           return;
         }
-
-        const sep = lines[0].includes("\t") ? "\t" : ",";
-        const headers = lines[0]
-          .split(sep)
-          .map(function (header) {
-            return header.trim().replace(/"/g, "");
-          });
-        const rows = lines.slice(1, 6).map(function (line) {
-          return line.split(sep).map(function (cell) {
-            return cell.trim().replace(/"/g, "");
-          });
-        });
-
-        setData({ headers: headers, rows: rows, sep: sep, total: lines.length - 1 });
+        setTrainHint("");
         open();
       };
       reader.readAsText(file);
@@ -286,7 +297,8 @@ window.ActivityPreflight = (function () {
     confirm: confirm,
     showLaunchModal: showLaunchModal,
     closeLaunchModal: closeLaunchModal,
-    confirmLaunch: confirmLaunch,
+    confirmLaunch() { return window.ActivityMain.startTraining(); },
+    takeLaunch: takeLaunch,
     init: init,
   };
 })();

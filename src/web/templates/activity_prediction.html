@@ -225,18 +225,18 @@
               <div class="grid-3" style="margin-top:16px">
                 <div class="form-group">
                   <label>SMILES 列名</label>
-                  <input id="smilesColumn" type="text" value="smiles" placeholder="例如 smiles" />
+                  <input id="smilesColumn" name="smiles_column" type="text" value="smiles" placeholder="例如 smiles" />
                 </div>
                 <div class="form-group">
                   <label>目标列名（Label）</label>
-                  <input id="targetColumn" type="text" placeholder="例如 pIC50" required />
+                  <input id="targetColumn" name="target_column" type="text" placeholder="例如 pIC50" required />
                 </div>
                 <div class="form-group">
                   <label>划分策略</label>
-                  <select id="splitStrategy">
-                    <option>Scaffold Split</option>
-                    <option>Random Split</option>
-                    <option>Stratified</option>
+                  <select id="splitStrategy" name="split_strategy">
+                    <option value="scaffold">Scaffold Split</option>
+                    <option value="random">Random Split</option>
+                    <option value="stratified">Stratified</option>
                   </select>
                 </div>
               </div>
@@ -244,40 +244,40 @@
               <div class="grid-4">
                 <div class="form-group">
                   <label>任务类型</label>
-                  <select id="trainTaskType">
+                  <select id="trainTaskType" name="task_type">
                     <option value="regression">回归</option>
                     <option value="classification">分类</option>
                   </select>
                 </div>
                 <div class="form-group">
                   <label>Epochs</label>
-                  <input id="epochs" type="number" value="120" min="1" max="2000" />
+                  <input id="epochs" name="epochs" type="number" value="120" min="1" max="2000" />
                 </div>
                 <div class="form-group">
                   <label>Learning Rate</label>
-                  <input id="learningRate" type="number" value="0.001" step="0.0001" />
+                  <input id="learningRate" name="learning_rate" type="number" value="0.001" step="0.0001" />
                 </div>
                 <div class="form-group">
                   <label>Batch Size</label>
-                  <input id="batchSize" type="number" value="64" min="1" />
+                  <input id="batchSize" name="batch_size" type="number" value="64" min="1" />
                 </div>
               </div>
 
               <details class="advanced">
                 <summary>⚙️ 高级超参数 · Advanced Settings</summary>
                 <div class="advanced-body grid-4">
-                  <div class="form-group"><label>Dropout</label><input id="dropout" type="number" value="0.20" step="0.01" min="0" max="0.9" /></div>
-                  <div class="form-group"><label>图层数</label><input id="trainLayers" type="number" value="5" min="1" /></div>
-                  <div class="form-group"><label>隐藏维度</label><input id="trainHidden" type="number" value="256" min="32" /></div>
-                  <div class="form-group"><label>Weight Decay</label><input id="trainWeightDecay" type="number" value="0.0001" step="0.0001" /></div>
-                  <div class="form-group"><label>早停耐心</label><input id="trainPatience" type="number" value="12" min="1" /></div>
+                  <div class="form-group"><label>Dropout</label><input id="dropout" name="dropout" type="number" value="0.20" step="0.01" min="0" max="0.9" /></div>
+                  <div class="form-group"><label>图层数</label><input id="trainLayers" name="num_layers" type="number" value="5" min="1" /></div>
+                  <div class="form-group"><label>隐藏维度</label><input id="trainHidden" name="hidden_size" type="number" value="256" min="32" /></div>
+                  <div class="form-group"><label>Weight Decay</label><input id="trainWeightDecay" name="weight_decay" type="number" value="0.0001" step="0.0001" /></div>
+                  <div class="form-group"><label>早停耐心</label><input id="trainPatience" name="patience" type="number" value="12" min="1" /></div>
                   <div class="form-group">
                     <label>损失函数</label>
-                    <select id="trainLoss"><option>MSE</option><option>MAE</option><option>Huber</option></select>
+                    <select id="trainLoss" name="loss_metric"><option>MSE</option><option>MAE</option><option>Huber</option></select>
                   </div>
                   <div class="form-group">
                     <label>学习率调度</label>
-                    <select id="trainScheduler"><option>Cosine</option><option>Step</option><option>Plateau</option></select>
+                    <select id="trainScheduler" name="lr_scheduler"><option>Cosine</option><option>Step</option><option>Plateau</option></select>
                   </div>
                   <div class="form-group">
                     <label>特征组合</label>
@@ -285,11 +285,11 @@
                   </div>
                   <div class="form-group">
                     <label for="classificationThreshold">连续标签分类阈值</label>
-                    <input id="classificationThreshold" type="number" step="any" placeholder="仅分类任务需要" />
+                    <input id="classificationThreshold" name="classification_threshold" type="number" step="any" placeholder="仅分类任务需要" />
                   </div>
                   <div class="form-group">
                     <label for="classificationDirection">阈值方向</label>
-                    <select id="classificationDirection">
+                    <select id="classificationDirection" name="classification_direction">
                       <option value="">请选择（连续标签必填）</option>
                       <option value="greater_or_equal">≥ 阈值为有活性</option>
                       <option value="less_or_equal">≤ 阈值为有活性</option>
@@ -531,9 +531,9 @@
     <script src="/static/js/activity_prediction/model_manager.js?v=20261116-ui-feedback-v1"></script>
     <script src="/static/js/activity_prediction/charts.js?v=20261116-ui-feedback-v1"></script>
     <script src="/static/js/activity_prediction/results_renderer.js?v=20261116-ui-feedback-v1"></script>
-    <script src="/static/js/activity_prediction/preflight.js"></script>
+    <script src="/static/js/activity_prediction/preflight.js?v=training-file-confirmation"></script>
     <script src="/static/js/activity_prediction/training_monitor.js?v=20261121-training-recovery"></script>
-    <script src="/static/js/activity_prediction/main.js?v=20261121-prediction-tabs"></script>
+    <script src="/static/js/activity_prediction/main.js?v=training-file-confirmation"></script>
     <script>
       document.addEventListener("DOMContentLoaded", function () {
         ActivityMain.init();
