@@ -118,10 +118,10 @@ function harness(responses = []) {
     localStorage: forbiddenStorage,
     sessionStorage: forbiddenStorage,
     window: { localStorage: forbiddenStorage, sessionStorage: forbiddenStorage },
-    chatMode: false,
     decisionActive: () => false,
     document: { ...document, addEventListener() {} },
     HomeChatRenderer: {
+      addSystemMessage() {},
       scrollToBottom() {},
       showToast: (...args) => toasts.push(args),
       showNotification: (...args) => toasts.push(args),
@@ -977,6 +977,6 @@ test("send readiness does not overwrite a draft typed before config load", async
 
 test("homepage loads the updated settings script instead of the stale cached version", () => {
   const activeHtml = html.replace(/<!--[\s\S]*?-->/g, "");
-  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261117-document-uploads"></script>'));
+  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261120-chat-mode"></script>'));
   assert.match(activeHtml, /<button[^>]*class="btn"[^>]*aria-label="发送消息"/);
 });

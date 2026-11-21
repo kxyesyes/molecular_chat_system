@@ -11,7 +11,6 @@
   // 全局变量
   let ws = null;
   let isConnected = false;
-  let chatMode = false;
   let ragEnabled = false; // 默认禁用RAG
   let toolsEnabled = true;
   let currentMessages = [];
@@ -346,7 +345,7 @@
     scientificReferences?.startRequest();
     moleculeCandidateLifecycle.startRequest();
     evidenceReportLifecycle?.startRequest();
-    if (!chatMode) enterChatMode();
+    enterChatMode();
     addUserMessage(repeat && repeat.runs.length ? `第 ${repeat.runs.length + 1} 次综合评价` : message);
     decisionTurn.userMessage = elements.chatContainer.lastChild;
     if (!repeat || !repeat.runs.length) elements.input.value = "";
@@ -897,7 +896,7 @@
           HomeChatRenderer.updateConnectionStatus("connected");
           if (!moleculeCandidateLifecycle.isRequestInFlight()) {
             void scientificReferences?.restore(payload => {
-              if (!chatMode) enterChatMode();
+              enterChatMode();
               const follow = HomeChatRenderer.isNearBottom();
               const box = addAssistantMessage("已恢复此前确认的候选集合；这不是新的计算结果。");
               const rendered = renderMoleculeCandidates(box, payload);
@@ -1573,7 +1572,6 @@
 
     currentMessages = [];
     HomeState.currentMessages = [];
-    chatMode = false;
     HomeState.chatMode = false;
 
     if (elements.input) {
@@ -1804,12 +1802,7 @@
           "success"
         );
 
-        // 如果在聊天模式，也添加系统消息
-        if (chatMode) {
-          HomeChatRenderer.addSystemMessage(
-            `已切换到 ${getModelDisplayName(selectedModel)}`
-          );
-        }
+        HomeChatRenderer.addSystemMessage(`已切换到 ${getModelDisplayName(selectedModel)}`);
       } else {
         console.error("❌ 模型切换失败:", result.message);
 
@@ -1821,13 +1814,7 @@
           "error"
         );
 
-        // 如果在聊天模式，也添加系统消息
-        if (chatMode) {
-          HomeChatRenderer.addSystemMessage(
-            `模型切换失败: ${result.message}`,
-            true
-          );
-        }
+        HomeChatRenderer.addSystemMessage(`模型切换失败: ${result.message}`, true);
       }
     } catch (error) {
       console.error("❌ 模型切换请求失败:", error);
@@ -1838,10 +1825,7 @@
       // 显示错误Toast
       HomeChatRenderer.showToast("模型切换失败，请检查网络连接", "error");
 
-      // 如果在聊天模式，也添加系统消息
-      if (chatMode) {
-        HomeChatRenderer.addSystemMessage("模型切换失败，请检查网络连接", true);
-      }
+      HomeChatRenderer.addSystemMessage("模型切换失败，请检查网络连接", true);
     }
   }
 
@@ -1946,7 +1930,7 @@
     }
     documentQuestionPending = true;
     updateDecisionControls();
-    if (!chatMode) enterChatMode();
+    enterChatMode();
     addUserMessage((doc.label || doc.name) + " · " + question);
     elements.input.value = "";
     showTypingIndicator();
@@ -2016,9 +2000,7 @@
 
     try {
       // 切换到聊天模式
-      if (!chatMode) {
-        enterChatMode();
-      }
+      enterChatMode();
 
       // 添加用户消息到界面
       addUserMessage(message);
@@ -2081,7 +2063,7 @@
     console.log("WebSocket URL:", `${diagnosticProtocol}//${window.location.host}/ws`);
     console.log("重连尝试次数:", reconnectAttempts);
     console.log("isConnected标志:", isConnected);
-    console.log("chatMode:", chatMode);
+    console.log("chatMode:", HomeState.chatMode);
 
     if (ws) {
       console.log("WebSocket对象存在");
@@ -2126,7 +2108,7 @@
 
   // 进入聊天模式
   function enterChatMode() {
-    chatMode = true;
+    if (HomeState.chatMode) return;
     HomeState.chatMode = true;
     console.log("🎯 进入聊天模式");
 

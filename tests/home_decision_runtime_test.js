@@ -79,7 +79,9 @@ function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = 
   const fill = composer.appendChild(new Element("div")); fill.className = "fill";
   const input = fill.appendChild(new Element("textarea")), send = fill.appendChild(new Element("button"));
   const toolbar = composer.appendChild(new Element("div")); toolbar.className = "tool";
-  const chat = body.appendChild(new Element("div"));
+  const layout = body.appendChild(new Element("div")); layout.className = "index_con";
+  const right = layout.appendChild(new Element("div")); right.className = "right";
+  const chat = right.appendChild(new Element("div")); chat.style.display = "none";
   const timers = new Map(), sockets = [], logs = [], requests = [], detailsMounts = [], formatCalls = [];
   let detailsAborts = 0;
   let timer = 0, stored = storedPointer;
@@ -92,7 +94,7 @@ function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = 
     emit(message) {this.onmessage({data: typeof message === "string" ? message : JSON.stringify(message)});}
     close(code = 1000, reason = "") {this.readyState = 3; this.onclose?.({code, reason, wasClean: true});}
   }
-  const document = {readyState: "loading", addEventListener() {},
+  const document = {body, readyState: "loading", addEventListener() {},
     createElement(tag) {return Object.assign(new Element(tag), {ownerDocument: document});},
     querySelector: s => body.querySelector(s), querySelectorAll: s => body.querySelectorAll(s),
     getElementById: id => body.querySelector("#" + id)};
@@ -113,18 +115,19 @@ function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = 
     }};
   const context = vm.createContext({window, document, WebSocket: Socket, TextEncoder, AbortController, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
-    HomeChatRenderer: renderer, HomeState: {}, HomeFormatters: {formatContent: (s, options) => {formatCalls.push(options); return String(s);}},
+    HomeChatRenderer: renderer, HomeFormatters: {formatContent: (s, options) => {formatCalls.push(options); return String(s);}},
     HomeAdvancedOptions: {getConfig: () => ({...advancedConfig})},
     setTimeout: (fn, ms) => {timers.set(++timer, {fn, ms}); return timer;}, clearTimeout: id => timers.delete(id),
     fetch: async (url, options) => {requests.push([url, JSON.parse(options.body)]);
       return {ok: true, json: async () => vm.runInContext("JSON.parse", context)(JSON.stringify({success: true,
         data: request ? await request(url, JSON.parse(options.body)) : {confirmed: true}}))};},
   });
-  for (const file of ["chat_renderer.js", "config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js", "docking_consent.js"]) {
+  for (const file of ["state.js", "chat_renderer.js", "config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js", "docking_consent.js"]) {
     vm.runInContext(fs.readFileSync(path.join(home, file), "utf8"), context, {filename: file});
   }
   context.HomeChatRenderer = window.HomeChatRenderer = Object.assign(window.HomeChatRenderer, renderer);
-  context.HomeState.elements = {chatContainer: chat};
+  context.HomeState = window.HomeState;
+  context.HomeState.elements.chatContainer = chat;
   context.HomeConfig = window.HomeConfig;
   if (fetchDetails) {
     window.fetch = fetchDetails;
@@ -135,7 +138,7 @@ function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = 
   // Expose lexical entry points only in this VM; run the complete real script.
   source = source.replace(/\}\)\(\);\s*$/, `window.testHome = {connectWebSocket, sendMessage, elements, scientificReferences,
     addUserMessage, addAssistantMessage, appendToLastMessage, displayRAGInfo, handleQuickAction, toggleRAG,
-    prepare() {chatMode = true; elements.input = window.testInput; elements.sendBtn = window.testSend;
+    prepare() {elements.input = window.testInput; elements.sendBtn = window.testSend;
       elements.chatContainer = window.testChat; bindEvents();}};})();`);
   Object.assign(window, {testInput: input, testSend: send, testChat: chat});
   vm.runInContext(source, context, {filename: "main.js"});
@@ -181,6 +184,35 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
+  await test("first send opens the chat and enables system messages in the renderer", () => {
+    const h = loadHome(); h.ready("pi");
+    assert.equal(h.chat.style.display, "none");
+    h.renderer.addSystemMessage("首页提示");
+    assert(!h.chat.querySelector(".system-message"));
+    h.input.value = "你好"; h.send();
+    assert.equal(h.chat.style.display, "");
+    assert(h.body.classList.contains("chat-active"));
+    assert(h.chat.parentNode.classList.contains("chat-mode"));
+    assert.deepEqual(h.socket.sent.filter(frame => frame.type === "chat").map(frame => frame.message), ["你好"]);
+    h.renderer.addSystemMessage("聊天提示");
+    assert(h.chat.querySelector(".system-message").textContent.includes("聊天提示"));
+  });
+  for (const top of [50, 400]) await test(`restored candidates reveal the chat and respect scroll position ${top}`, async () => {
+    const event = candidateEvent();
+    const {trace_id, presentation_id, revision} = event.reference;
+    const h = loadHome({storedPointer: JSON.stringify({trace_id, presentation_id, revision}), request: async url => {
+      assert(url.endsWith("/restore"));
+      return {reference: event.reference, events: [event], source_status: "partial", warnings: [], expires_at: Date.now() / 1000 + 60};
+    }});
+    h.chat.clientHeight = 400;
+    Object.defineProperty(h.chat, "scrollHeight", {get: () => 800 + h.chat.textContent.length});
+    h.chat.scrollTop = top;
+    h.ready("pi"); await tick();
+    assert.equal(h.chat.style.display, "");
+    assert(h.chat.textContent.includes("CCO"));
+    assert.equal(h.chat.scrollTop, top === 50 ? top : h.chat.scrollHeight);
+    assert(!h.socket.sent.some(frame => frame.type === "chat"));
+  });
   await test("blank decision input gives feedback without sending chat", () => {
     const h = loadHome();
     h.ready("pi");
@@ -1218,7 +1250,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261117-document-uploads"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261120-chat-mode"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
