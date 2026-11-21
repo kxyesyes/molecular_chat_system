@@ -20,7 +20,6 @@ from src.agent.contracts import (
     AgentResult, CandidateSet, ObservationStatus, RunOutcome,
     AgentErrorCode, AgentExecutionError,
 )
-from src.agent.contracts.generation_request import has_generation_intent
 from src.agent.routing.hybrid import SMILES_PATTERN
 from src.agent.runtime.allocation import (
     AllocationScope, AllocationStopped,
@@ -477,18 +476,6 @@ class ChatHandler:
             on_malformed_step=lambda: logger.warning("Skipped malformed partial step metadata"),
         )
 
-    async def _send_partial_agent_result(
-        self, websocket: WebSocket, agent_result: Mapping[str, Any],
-    ) -> str:
-        payload = self._partial_agent_projection(agent_result)
-        await websocket.send_text(json.dumps({
-            **payload, "type": "agent_result", "message": payload["content"],
-        }, ensure_ascii=False))
-        await websocket.send_text(json.dumps({
-            **payload, "type": "complete",
-        }, ensure_ascii=False))
-        return payload["content"]
-
     @classmethod
     def _agent_failure_content(cls, agent_result: Dict[str, Any]) -> str:
         return result_presentation.failure_content(
@@ -756,17 +743,6 @@ class ChatHandler:
             if payload is not None:
                 await websocket.send_text(payload)
 
-    async def _send_agent_events(self, websocket: WebSocket, agent_result: Dict[str, Any]):
-        """Forward structured Agent workflow events to the browser."""
-        events = agent_result.get("agent_events") or []
-        if not isinstance(events, list):
-            return
-
-        for event in events:
-            if not isinstance(event, dict):
-                continue
-            await self._send_agent_event(websocket, event)
-
     @classmethod
     def _safe_agent_event_key(cls, key: Any) -> str:
         if not isinstance(key, str):
@@ -1007,49 +983,6 @@ class ChatHandler:
             logger.warning("Model response reached its output length limit")
 
         return content, warning, completion_meta
-    
-    def _analyze_user_intent(self, user_message_lower: str) -> Dict[str, Any]:
-        """分析用户意图"""
-        intent = {
-            'intent_type': '通用咨询',
-            'task_description': '回答用户问题',
-            'rag_usage': '作为参考信息',
-            'suggested_tools': []
-        }
-        
-        # 生成类任务
-        if has_generation_intent(user_message_lower):
-            intent['intent_type'] = '分子生成'
-            intent['task_description'] = '使用AI生成符合要求的新分子结构'
-            intent['rag_usage'] = '作为设计灵感和参考'
-            intent['suggested_tools'] = ['llm_molecular_generator - AI分子生成工具']
-        
-        # 分析类任务
-        elif any(kw in user_message_lower for kw in ['分析', '计算', '评估', 'analyze', 'calculate', 'evaluate']):
-            intent['intent_type'] = '分子分析'
-            intent['task_description'] = '分析分子的药物化学性质'
-            intent['rag_usage'] = '提供相似分子的对比数据'
-            intent['suggested_tools'] = [
-                'property_calculator - 基础属性计算',
-                'drug_likeness_assessment - 类药性评估',
-                'admet_predictor - ADMET预测'
-            ]
-        
-        # 对接类任务
-        elif any(kw in user_message_lower for kw in ['对接', '结合', '靶点', 'docking', 'binding', 'target']):
-            intent['intent_type'] = '分子对接'
-            intent['task_description'] = '预测分子与靶点的结合'
-            intent['rag_usage'] = '提供相似活性分子参考'
-            intent['suggested_tools'] = ['molecular_docking - 分子对接分析']
-        
-        # ADMET类任务
-        elif any(kw in user_message_lower for kw in ['admet', 'adme', '吸收', '代谢', '毒性']):
-            intent['intent_type'] = 'ADMET预测'
-            intent['task_description'] = '预测分子的药代动力学性质'
-            intent['rag_usage'] = '提供ADMET性质对比'
-            intent['suggested_tools'] = ['admet_predictor - ADMET性质预测']
-        
-        return intent
     
     def _build_prompt_with_agent(self, user_message: str, agent_response: str,
                                 rag_context: str, retrieved_molecules: List[Dict[str, Any]],
