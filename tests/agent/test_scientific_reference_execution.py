@@ -2,6 +2,8 @@
 import asyncio
 import inspect
 import json
+from pathlib import Path
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 import threading
 
@@ -87,6 +89,37 @@ def test_two_chat_turns_capture_canonical_tool_input(tmp_path):
     assert tools["drug_likeness_assessment"].calls == ["CCN"]
     assert history[-1]["user"] == "计算刚才第二个分子的属性"
     assert svc.restore(p, session_id="owner"), "new turn must not overwrite source run"
+
+
+def test_home_card_32_followup_reaches_property_tool(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / "state.db")
+    properties = Tool("property_calculator")
+    handler = make_web_handler([properties], store)
+    references = handler.scientific_references
+    chains = ["C" * n for n in range(1, 17)]
+    alcohols = [chain + "O" for chain in chains]
+    source = seed(store, (chains, alcohols), trace_id="a" * 32)
+    events = references.project(source, session_id="owner")
+
+    script = Path(__file__).resolve().parents[1] / "home_decision_runtime_test.js"
+    replay = subprocess.run(["node", str(script), "--select-last-stdin"], input=json.dumps(events),
+                            capture_output=True, text=True, encoding="utf-8", timeout=30)
+    assert replay.returncode == 0, replay.stderr
+    browser = json.loads(replay.stdout)
+    assert browser["confirms"] == [event["reference"] for event in events]
+    for manifest in browser["confirms"]:
+        assert references.confirm(manifest, session_id="owner")
+
+    request = browser["followup"]
+    assert request["type"] == "chat" and request["reference"] == pointer(events[1])
+    observation_id, candidate_id = events[1]["reference"]["ordered_keys"][-1]
+    assert request["selection"] == {"observation_id": observation_id, "candidate_id": candidate_id}
+    before = references.restore(request["reference"], session_id="owner")
+    assert before
+    terminal, _ = run_web_turn(handler, request.pop("message"), [], "owner", **request)
+    assert terminal["status"] == "completed", terminal
+    assert properties.calls == [alcohols[-1]]
+    assert references.restore(pointer(events[1]), session_id="owner") == before
 
 
 def confirmed(tmp_path):
