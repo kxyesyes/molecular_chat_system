@@ -217,21 +217,11 @@
     }
   }
 
-  function handleUpload(event) {
-    var file = event && event.target && event.target.files && event.target.files[0];
+  async function handleUpload(event) {
+    var file = event.target.files[0];
     if (!file) return;
-    var mutationToken = S.mutationSeq;
-    var reader = new FileReader();
-    reader.onload = function () {
-      if (mutationToken !== S.mutationSeq) return;
-      var smiles = window.MedChatSmilesFile.extractUploadedSmiles(file.name, reader.result);
-      if (!smiles) { UI.toast("文件中没有找到 SMILES", "error"); return; }
-      Editor.restoreCandidate(smiles, "已导入分子，属性已更新。").then(function (success) {
-        if (success) UI.toast("已导入分子", "success");
-      }).catch(function () { UI.toast("文件中的 SMILES 无法载入", "error"); });
-    };
-    reader.readAsText(file);
     event.target.value = "";
+    if (await Editor.loadStructure(file, "已导入分子，属性已更新。")) UI.toast("已导入分子", "success");
   }
 
   window.onSearch = Frag.onSearch;

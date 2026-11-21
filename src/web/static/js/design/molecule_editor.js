@@ -87,12 +87,12 @@ var MoleculeEditor = (function () {
     });
   }
 
-  async function setSMILES(smi) {
+  async function setSMILES(smi, preparedStructure) {
     var k = getK();
     if (!k) return smi;
     S.editorWriteSeq = (S.editorWriteSeq || 0) + 1;
     var writeSeq = S.editorWriteSeq;
-    var mutationSeq = S.mutationSeq;
+    var mutationToken = S.mutationSeq;
     var frame = document.getElementById("ketcher-frame");
     if (!S.editorWriteDepth) S.editorPreviousInert = !!frame.inert;
     frame.inert = true;
@@ -102,11 +102,12 @@ var MoleculeEditor = (function () {
     var previous = S.editorWriteQueue || Promise.resolve();
     var operation = previous.catch(function () {}).then(async function () {
       try {
-        await loadEditorMolecule(k, labelEditorAttachmentPoints(smi));
+        if (preparedStructure && mutationToken !== S.mutationSeq) return;
+        await loadEditorMolecule(k, preparedStructure || labelEditorAttachmentPoints(smi));
         // Capture the editor's canonical/CXSMILES form before releasing the
         // write guard, so polling cannot mistake our import for a user edit.
         var exported = await k.getSmiles();
-        if (writeSeq === S.editorWriteSeq && mutationSeq === S.mutationSeq) S.smiles = exported;
+        if (writeSeq === S.editorWriteSeq) S.smiles = exported;
         return exported;
       } finally {
         S.editorWriteDepth = Math.max(0, (S.editorWriteDepth || 1) - 1);
@@ -237,26 +238,52 @@ var MoleculeEditor = (function () {
     renderCandidateBoard();
   }
 
-  async function restoreCandidate(smiles, successMessage) {
-    if (!smiles) return;
-    resetConnectionState();
-    var mutationToken = (S.mutationSeq || 0) + 1;
-    S.mutationSeq = mutationToken;
+  async function loadStructure(source, successMessage) {
+    if (!source) return;
+    var mutationToken = ++S.mutationSeq;
+    S.propsRequestSeq++;
+    clearTimeout(S.propsDebounceTimer);
+    S.pendingPropsSmiles = "";
     var loadingOverlay = document.getElementById("loadingOverlay");
     if (loadingOverlay) loadingOverlay.style.display = "none";
-    S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
+    function isCurrent() { return mutationToken === S.mutationSeq; }
+    var smiles = source, prepared;
+    try {
+      if (typeof source !== "string") {
+        var text = await source.text();
+        if (!isCurrent()) return;
+        smiles = window.MedChatSmilesFile.extractUploadedSmiles(source.name, text);
+        if (!smiles) { UI.toast("文件中没有找到 SMILES", "error"); return; }
+      }
+      var k = getK();
+      if (!k) { UI.toast("请等待分子编辑器就绪后重试", "error"); return; }
+      // Ketcher's setMolecule detaches SMILES parsing. Prepare its native KET
+      // layout first so malformed input rejects before changing the canvas.
+      var options = k.editor.options();
+      prepared = await k.structService.layout({
+        struct: labelEditorAttachmentPoints(smiles), output_format: "chemical/x-indigo-ket"
+      }, {"dearomatize-on-load": options["dearomatize-on-load"], "ignore-no-chiral-flag": options.ignoreChiralFlag});
+    } catch (_) {
+      if (isCurrent()) UI.toast("结构导入失败，请检查文件或 SMILES 后重试", "error");
+      return;
+    }
+    if (!isCurrent()) return;
+    try {
+      smiles = await setSMILES(smiles, prepared.struct);
+    } catch (error) {
+      if (isCurrent()) UI.toast(error.message || "分子载入失败", "error");
+      return;
+    }
+    if (!isCurrent()) return;
+    resetConnectionState();
     S.curProps = null;
     S.prevProps = null;
     S.curGoals = null;
     S.propsSmiles = "";
-    S.pendingPropsSmiles = "";
-    smiles = await setSMILES(smiles);
-    if (mutationToken !== S.mutationSeq) return;
     S.smiles = smiles;
     document.getElementById("curSmiles").textContent = smiles;
     var result = await PropertiesPanel.calcProps(smiles);
-    if (mutationToken !== S.mutationSeq) return;
-    if (!result || result.stale || !result.success) return;
+    if (!isCurrent() || !result || result.stale || !result.success) return;
     UI.setFeedback(successMessage || "已恢复候选分子，可继续选择片段做下一轮设计。", "success");
     return true;
   }
@@ -384,13 +411,7 @@ var MoleculeEditor = (function () {
       UI.toast("请输入 SMILES", "error");
       return;
     }
-    if (smi) {
-      try {
-        if (await restoreCandidate(smi, "已导入分子，属性已更新。")) UI.closeImport();
-      } catch (_) {
-        UI.toast("分子载入失败，请检查 SMILES；若编辑器超时请刷新页面。", "error");
-      }
-    }
+    if (await loadStructure(smi, "已导入分子，属性已更新。")) UI.closeImport();
   }
 
   /* ── 导出 / 复制 / 清空 ── */
@@ -434,7 +455,8 @@ var MoleculeEditor = (function () {
     resetConnectionState: resetConnectionState,
     addCandidateComparison: addCandidateComparison,
     renderCandidateComparison: renderCandidateComparison,
-    restoreCandidate: restoreCandidate,
+    loadStructure: loadStructure,
+    restoreCandidate: loadStructure,
     detectSites: detectSites,
     execSubstitute: execSubstitute,
     confirmImport: confirmImport,
