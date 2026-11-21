@@ -141,7 +141,7 @@ T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下�
 python -m pytest -q tests/agent/test_scientific_reference_execution.py::test_home_card_32_followup_reaches_property_tool
 ```
 
-仅调整卡片标题时，从渲染函数入手，用上述回归核对编号、点击和工具输入。修改确认或恢复规则时，加跑 `python -m pytest -q tests/agent/test_scientific_reference_web.py`，覆盖错误顺序、其他会话和数据库重新打开后的恢复。
+想熟悉这条路径，可以在临时工作树中只把 `renderMoleculeCandidates` 的卡片标签改成批内序号，再运行上面的测试。第二批末张卡片会显示“候选 16”，回归会在检查“候选 32”时失败。恢复消息内偏移后运行同一命令，还应看到工具入参和历史恢复的断言通过。修改确认或恢复规则时，加跑 `python -m pytest -q tests/agent/test_scientific_reference_web.py`，覆盖错误顺序、其他会话和数据库重新打开后的恢复。
 
 ### 科研对象续接（已合并，非生产部署声明）
 

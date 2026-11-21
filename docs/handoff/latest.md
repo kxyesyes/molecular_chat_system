@@ -1,5 +1,9 @@
 # Latest handoff
 
+## 首页候选追问的维护入口（2026-11-21）
+
+从[候选 32 的回归](../AGENT_MAINTENANCE.md#从卡片追到工具输入)可以跟踪用户选择、两批卡片的确认清单、下一轮请求和性质工具的实际输入。其他领域可按[用户操作](../PROJECT_STANDARDS.md#从用户操作找到修改位置)查找数据归属和已有回归。代码与 CI 见 [PR #250](https://github.com/kxyesyes/molecular_chat_system/pull/250)。
+
 ## PR #215 首轮 CI 修复（2026-10-23）
 
 - 在原 Pi 分支上修复，基线 `8141b755`；维护者明确要求更新同一 draft PR，暂不合并，真实模型未验证项继续保留。
