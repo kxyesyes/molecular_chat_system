@@ -958,7 +958,7 @@ const behaviorSandbox = {
   document: behaviorDocument,
   console: { log() {}, warn() {}, error() {} },
   WebSocket: FakeWebSocket,
-  HomeState: { currentMessages: [] },
+  HomeState: {},
   HomeTheme: { init() {} },
   HomeAdvancedOptions: { getConfig: () => ({ ragCount: 3, temperature: 0.2, molCount: 2 }) },
   HomeFormatters: { formatContent: (value) => String(value ?? "") },

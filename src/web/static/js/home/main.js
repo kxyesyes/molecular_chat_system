@@ -13,7 +13,6 @@
   let isConnected = false;
   let ragEnabled = false; // 默认禁用RAG
   let toolsEnabled = true;
-  let currentMessages = [];
   let reconnectAttempts = 0;
   let maxReconnectAttempts = 5;
   let agentModelStatusRequestVersion = 0;
@@ -1564,64 +1563,6 @@
     }
   }
 
-  function resetToHomeState() {
-    window.HomeWorkspace?.clear();
-    const rightPanel = document.querySelector(".index_con .right");
-    const mass = document.querySelector(".mass");
-    const iconList = document.querySelector(".icon_list");
-
-    currentMessages = [];
-    HomeState.currentMessages = [];
-    HomeState.chatMode = false;
-
-    if (elements.input) {
-      elements.input.value = "";
-    }
-
-    if (elements.chatContainer) {
-      elements.chatContainer.innerHTML = "";
-      elements.chatContainer.style.display = "none";
-    }
-
-    if (mass) {
-      mass.style.display = "";
-    }
-
-    if (iconList) {
-      iconList.style.display = "";
-    }
-
-    if (rightPanel) {
-      rightPanel.classList.remove("chat-mode");
-    }
-
-    document.body.classList.remove("chat-active");
-
-    closeToolPanels();
-  }
-
-  function clearCurrentConversation() {
-    const hasMessages =
-      HomeState.currentMessages.length > 0 ||
-      (elements.chatContainer && elements.chatContainer.children.length > 0);
-
-    if (!hasMessages) {
-      return;
-    }
-
-    if (!window.confirm("确认清空当前会话？")) {
-      return;
-    }
-
-    currentMessages = [];
-    HomeState.currentMessages = [];
-
-    if (elements.chatContainer) {
-      elements.chatContainer.innerHTML = "";
-    }
-
-  }
-
   function openFileManagerPanel() {
     if (elements.helpPanel) {
       elements.helpPanel.hidden = true;
@@ -2201,9 +2142,6 @@
     messageWrapper.appendChild(messageContainer);
     elements.chatContainer.appendChild(messageWrapper);
 
-    // 保存到历史
-    currentMessages.push({ role: "user", content: content });
-    HomeState.currentMessages = currentMessages.slice();
     if (typeof dockingUI !== "undefined") dockingUI?.begin(ws, messageWrapper);
   }
 
@@ -2282,9 +2220,6 @@
     messageWrapper.appendChild(messageContainer);
     elements.chatContainer.appendChild(messageWrapper);
 
-    // 保存到历史
-    currentMessages.push({ role: "assistant", content: content });
-    HomeState.currentMessages = currentMessages.slice();
     return messageBox;
   }
 
@@ -2475,13 +2410,10 @@
         cursor.remove();
       }
 
-      // 保存完整内容到历史
       const finalContent = completion.hasFinalContent
         ? content
         : lastMessage.getAttribute("data-content") || lastMessage.textContent;
       lastMessage.setAttribute("data-content", finalContent);
-      currentMessages.push({ role: "assistant", content: finalContent });
-      HomeState.currentMessages = currentMessages.slice();
 
       displayCandidateCollections(lastMessage, candidatePayloads);
     } finally {
