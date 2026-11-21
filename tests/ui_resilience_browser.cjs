@@ -478,6 +478,139 @@ test("docking history reads legacy poses and restores the durable task's own rec
   assert(reads.every(([method, path]) => method === "GET" && !path.includes("original-worker-job")));
 });
 
+function activityTab(page, mode) {
+  return page.locator(`[onclick*="switchTab"][onclick*="'${mode}'"]`).click();
+}
+
+async function submitActivity(page, mode) {
+  if (mode === "single") {
+    await page.locator("#smilesInput").fill("CO");
+  } else {
+    await page.locator("#batchFile").setInputFiles({
+      name: "input.csv", mimeType: "text/csv", buffer: Buffer.from("structure\r\nCCN\r\nCCO\r\n"),
+    });
+    await page.locator("#batchActivityTarget").selectOption("BuChE");
+    await page.locator("#batchSmilesColumn").fill("structure");
+  }
+  await page.locator(mode === "single" ? "#submitBtn" : "#batchSubmitBtn").click();
+}
+
+for (const first of ["single", "batch"]) {
+  for (const outcome of ["success", "failure"]) {
+    test(`activity ignores late ${first} ${outcome} after switching tabs`, async t => {
+      const posts = [], dialogs = [];
+      const page = await pageFor(t, "/activity-prediction", (route, url) => {
+        if (route.request().method() === "POST") { posts.push(route); return; }
+        return route.fulfill({json: {success: true, models: []}});
+      });
+      page.on("dialog", async d => { dialogs.push(d.message()); await d.dismiss(); });
+      const second = first === "single" ? "batch" : "single";
+      async function submit(mode) {
+        await activityTab(page, mode);
+        const sent = page.waitForRequest(r => r.method() === "POST");
+        await submitActivity(page, mode);
+        await sent;
+        await page.waitForFunction(() => document.getElementById("loading").classList.contains("show"));
+      }
+      async function finish(route, fail, row) {
+        const done = page.waitForResponse(r => r.request() === route.request());
+        await route.fulfill(fail ? {status: 503, json: {detail: row}} :
+          {json: {success: true, results: [{smiles: row, requested_target: "PDE", success: true}]}});
+        await (await done).finished();
+        await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+      }
+      for (const state of ["loading", "results", "error", "train", "return"]) {
+        const old = posts.length;
+        dialogs.length = 0;
+        await submit(first);
+        if (state === "train") {
+          await activityTab(page, "train");
+        } else {
+          if (state === "return") await activityTab(page, second);
+          await submit(state === "return" ? first : second);
+          if (state === "results" || state === "error") await finish(posts[old + 1], state === "error", "current");
+        }
+        await finish(posts[old], outcome === "failure", "obsolete");
+        const waiting = state === "loading" || state === "return";
+        assert.equal(await page.locator("#loading").isVisible(), waiting, state);
+        assert.equal(await page.locator("#results").isVisible(), state === "results", state);
+        assert.equal(await page.locator("#statusStat").textContent(),
+          waiting ? "Predicting" : state === "error" ? "Error" : state === "train" ? "Idle" : "完成");
+        assert.deepEqual(dialogs, state === "error" ? ["请求失败: current"] : []);
+        if (waiting) {
+          const button = state === "return" ? first : second;
+          assert(await page.locator(button === "single" ? "#submitBtn" : "#batchSubmitBtn").isDisabled());
+          await finish(posts[old + 1], false, "current");
+        }
+        if (waiting || state === "results") assert.equal(await page.locator("#resultsBody td").first().innerText(), "current");
+        assert.equal(posts.length - old, state === "train" ? 1 : 2);
+      }
+    });
+  }
+}
+
+test("activity submissions retain file bytes, row order, model source and session ownership", async t => {
+  const raw = Buffer.from("\ufeffname,structure\r\nfirst,CCN\r\ninvalid,bad\r\nlast,CCO\r\n");
+  const rows = [{smiles: "CCN", success: true, activity_score: 0},
+    {smiles: "bad", success: false, error: "invalid fixture"},
+    {smiles: "CCO", success: true, activity_score: 8}];
+  async function session(owner) {
+    const writes = [], jobs = [];
+    const model = {model_id: owner, name: owner, task_type: "regression"};
+    const page = await pageFor(t, "/activity-prediction", async (route, url) => {
+      if (url.pathname === "/api/activity/models") return route.fulfill({json: {success: true, models: [model], current_model: owner}});
+      if (url.pathname.startsWith("/api/activity/train/status/")) {
+        jobs.push(url.pathname.split("/").pop());
+        return route.fulfill({json: {success: true, status: {state: "running", epoch: 2}}});
+      }
+      if (route.request().method() !== "POST") return route.fulfill({status: 404});
+      const req = route.request();
+      const form = await new Response(req.postDataBuffer(), {headers: req.headers()}).formData();
+      const file = form.get("file");
+      writes.push({url: url.pathname, target: form.get("target"), smiles: form.get("smiles"),
+        column: form.get("smiles_column"), name: file?.name, bytes: file && Buffer.from(await file.arrayBuffer())});
+      const singleRow = {smiles: form.get("smiles"), activity_score: 4.25, target: form.get("target"),
+        model_provenance: {model_id: owner}, success: true};
+      return route.fulfill({json: {success: true, results: file ? rows : [singleRow]}});
+    });
+    await page.evaluate(id => localStorage.setItem("activeTrainJobId", JSON.stringify({jobId: id, totalEpochs: 4})), owner);
+    await page.reload();
+    await page.waitForFunction(() => document.getElementById("dock-epoch-text").textContent === "Epoch 2/4");
+    assert.equal(await page.locator("#modelSelector").inputValue(), owner);
+    return {page, owner, writes, jobs};
+  }
+  const single = await session("owner-A"), batch = await session("owner-B");
+  await single.page.locator("#smilesInput").fill("CO");
+  await single.page.locator("#submitBtn").dblclick({delay: 120});
+  await single.page.waitForFunction(() => document.getElementById("singleScoreValue").textContent === "4.250");
+  assert(await single.page.locator("#singleSummary").isVisible());
+  assert.match(await single.page.locator("#singleModelMeta").textContent(), /PDE.*owner-A/);
+  await activityTab(batch.page, "batch");
+  // Capture the exact chart options passed to the CDN library in this offline test.
+  await batch.page.evaluate(() => {
+    window.echarts = {getInstanceByDom: () => null, graphic: {LinearGradient: class {}},
+      init: () => ({clear() {}, setOption(option) { window.histogram = option.series[0]; }})};
+  });
+  await batch.page.locator("#batchActivityTarget").selectOption("BuChE");
+  await batch.page.locator("#batchSmilesColumn").fill("structure");
+  await batch.page.locator("#batchFile").setInputFiles({name: "original.csv", mimeType: "text/csv", buffer: raw});
+  await batch.page.locator("#batchSubmitBtn").dblclick({delay: 120});
+  await batch.page.waitForFunction(() => document.getElementById("row-score-2")?.textContent === "8.000");
+  assert.deepEqual(await batch.page.locator("#resultsBody tr td:first-child").allTextContents(), ["CCN", "bad", "CCO"]);
+  assert.deepEqual(await batch.page.locator("#resultsBody tr td:nth-child(2)").allTextContents(), ["0.000", "invalid fixture", "8.000"]);
+  assert.deepEqual(await batch.page.evaluate(() => [histogram.type, histogram.data]), ["bar", [1, 0, 0, 1]]);
+  assert(await batch.page.locator("#batchHistogram").isVisible());
+  assert(await batch.page.locator("#singleSummary").isHidden());
+  assert.deepEqual(single.writes, [{url: "/api/activity/predict", target: "PDE", smiles: "CO", column: null, name: undefined, bytes: null}]);
+  assert.deepEqual(batch.writes, [{url: "/api/activity/batch_predict", target: "BuChE", smiles: null, column: "structure", name: "original.csv", bytes: raw}]);
+  for (const {page, owner, jobs} of [single, batch]) {
+    assert(jobs.length > 0 && jobs.every(id => id === owner));
+    assert.equal(await page.locator("#modelSelector").inputValue(), owner);
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("activeTrainJobId")).jobId), owner);
+  }
+  assert.equal(await single.page.locator("#resultsBody tr td").first().textContent(), "CO");
+});
+
 test("model list reports failure and its controls fit a long model name", async t => {
   let available = false;
   const page = await pageFor(t, "/activity-prediction", (route, url) => {

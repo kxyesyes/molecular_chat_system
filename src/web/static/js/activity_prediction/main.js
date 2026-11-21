@@ -1,6 +1,10 @@
 "use strict";
 
 window.ActivityMain = (function () {
+  let activeTab = "single";
+  let currentPrediction = null;
+  let trainingStatus = "Idle";
+
   function fillExample() {
     const input = document.getElementById("smilesInput");
     if (!input) return;
@@ -9,6 +13,12 @@ window.ActivityMain = (function () {
   }
 
   function switchTab(mode, tabEl) {
+    if (mode === activeTab) return;
+    activeTab = mode;
+    if (currentPrediction) currentPrediction.button.disabled = false;
+    currentPrediction = null;
+    document.getElementById("loading").classList.remove("show");
+    displayStatus(mode === "train" ? trainingStatus : "Idle");
     document.querySelectorAll(".tab").forEach(function (tab) {
       tab.classList.remove("active");
     });
@@ -23,9 +33,14 @@ window.ActivityMain = (function () {
     if (results) results.classList.remove("show");
   }
 
-  function setStatus(text) {
+  function displayStatus(text) {
     const el = document.getElementById("statusStat");
     if (el) el.textContent = text;
+  }
+
+  function setTrainingStatus(text) {
+    trainingStatus = text;
+    if (!currentPrediction) displayStatus(text);
   }
 
   function normalizeSplitStrategy(value) {
@@ -70,16 +85,17 @@ window.ActivityMain = (function () {
 
   async function handlePredict(url, formData, btnId) {
     const btn = document.getElementById(btnId);
+    const isSingleRequest = btnId === "submitBtn";
+    if (activeTab !== (isSingleRequest ? "single" : "batch") || btn.disabled) return;
+    const prediction = {button: btn};
+    currentPrediction = prediction;
     const loading = document.getElementById("loading");
     const results = document.getElementById("results");
-    const isSingleRequest =
-      url.includes("/api/activity/predict") && !url.includes("batch");
-
-    if (btn) btn.disabled = true;
+    btn.disabled = true;
     if (loading) loading.classList.add("show");
     if (results) results.classList.remove("show");
     ActivityResults.resetViews();
-    setStatus("Predicting");
+    displayStatus("Predicting");
 
     try {
       // Keep stale sessions safe: the API returns a structured failure when no
@@ -87,24 +103,26 @@ window.ActivityMain = (function () {
       if (formData.get("target") === "") formData.delete("target");
       const res = await fetch(url, { method: "POST", body: formData });
       const data = await res.json();
+      if (currentPrediction !== prediction) return;
 
       if (res.ok === false || !Array.isArray(data.results)) {
         throw new Error(data.detail || data.error || "预测失败");
       }
 
-      ActivityResults.renderPredictionResults(data, {
-        isSingleRequest: isSingleRequest,
-      });
+      ActivityResults.renderPredictionResults(data, {isSingleRequest});
       const status = data.results.length
         ? data.status || (data.success === true ? "passed" : "failed")
         : "failed";
-      setStatus(ActivityResults.statusLabel(status));
+      displayStatus(ActivityResults.statusLabel(status));
     } catch (e) {
+      if (currentPrediction !== prediction) return;
+      displayStatus("Error");
       alert("请求失败: " + e.message);
-      setStatus("Error");
     } finally {
-      if (btn) btn.disabled = false;
-      if (loading) loading.classList.remove("show");
+      if (currentPrediction === prediction) {
+        btn.disabled = false;
+        if (loading) loading.classList.remove("show");
+      }
     }
   }
 
@@ -183,7 +201,7 @@ window.ActivityMain = (function () {
 
   const trainingCallbacks = {
     onFinish: function (state) {
-      if (state === "canceled") setStatus("训练已取消");
+      if (state === "canceled") setTrainingStatus("训练已取消");
       const trainBtn = document.getElementById("trainBtn");
       if (trainBtn) {
         trainBtn.disabled = false;
@@ -191,11 +209,11 @@ window.ActivityMain = (function () {
       }
     },
     onCompleted: async function () {
-      setStatus("Model Ready");
+      setTrainingStatus("Model Ready");
       await ActivityModels.loadModels();
     },
     onFailed: function () {
-      setStatus("Failed");
+      setTrainingStatus("Failed");
     },
   };
 
@@ -223,7 +241,7 @@ window.ActivityMain = (function () {
       trainBtn.disabled = true;
       trainBtn.textContent = "⏳ 提交中...";
     }
-    setStatus("Starting Train...");
+    setTrainingStatus("Starting Train...");
 
     ActivityCharts.resetMetricsChartState(taskType);
 
@@ -288,7 +306,7 @@ window.ActivityMain = (function () {
 
       if (logBox) logBox.textContent += `[System] 任务已提交, Job ID: ${data.job_id}\n`;
       if (trainBtn) trainBtn.textContent = "⏳ 训练中...";
-      setStatus("Training");
+      setTrainingStatus("Training");
 
       ActivityTraining.startPolling(data.job_id, totalEpochs, trainingCallbacks);
     } catch (e) {
@@ -297,7 +315,7 @@ window.ActivityMain = (function () {
         trainBtn.disabled = false;
         trainBtn.textContent = "🚀 启动训练";
       }
-      setStatus("Error");
+      setTrainingStatus("Error");
       ActivityTraining.closeDrawer();
     }
   }
@@ -330,29 +348,25 @@ window.ActivityMain = (function () {
     ActivityModels.loadModels();
     ActivityCharts.initMetricsChart();
 
-    const predictForm = document.getElementById("predictForm");
-    predictForm &&
-      predictForm.addEventListener("submit", function (e) {
-        e.preventDefault();
-        handlePredict("/api/activity/predict", new FormData(e.target), "submitBtn");
+    for (const [formId, buttonId, endpoint] of [
+      ["predictForm", "submitBtn", "/api/activity/predict"],
+      ["batchForm", "batchSubmitBtn", "/api/activity/batch_predict"],
+    ]) {
+      document.getElementById(buttonId).addEventListener("click", event => {
+        if (event.detail > 1) event.preventDefault();
       });
-
-    const batchForm = document.getElementById("batchForm");
-    batchForm &&
-      batchForm.addEventListener("submit", function (e) {
-        e.preventDefault();
-        setBatchValidationMessage("");
-        const batchFile = document.getElementById("batchFile");
-        if (!batchFile || !batchFile.files || !batchFile.files[0]) {
-          setBatchValidationMessage("请先上传批量分子文件。");
-          return;
+      document.getElementById(formId).addEventListener("submit", event => {
+        event.preventDefault();
+        if (formId === "batchForm") {
+          setBatchValidationMessage("");
+          if (!batchFile.files[0]) {
+            setBatchValidationMessage("请先上传批量分子文件。");
+            return;
+          }
         }
-        handlePredict(
-          "/api/activity/batch_predict",
-          new FormData(e.target),
-          "batchSubmitBtn",
-        );
+        handlePredict(endpoint, new FormData(event.target), buttonId);
       });
+    }
 
     ActivityTraining.initRecovery(trainingCallbacks);
 
@@ -363,7 +377,7 @@ window.ActivityMain = (function () {
     init: init,
     fillExample: fillExample,
     switchTab: switchTab,
-    setStatus: setStatus,
+    setStatus: setTrainingStatus,
     bindFileDisplay: bindFileDisplay,
     handlePredict: handlePredict,
     exportConfig: exportConfig,
