@@ -1130,6 +1130,16 @@ function applyDockingTaskRecord(record) {
 
 const DOCKING_POLL_INTERVAL_MS = 500;
 
+function followDockingTaskRecord(taskId, record) {
+  const terminal = applyDockingTaskRecord(record);
+  if (!terminal && readRememberedDockingTask() === taskId) {
+    clearDockingPoll();
+    dockingPollTimer = setTimeout(() => {
+      pollDockingTask(taskId).catch(handleDockingTaskError);
+    }, DOCKING_POLL_INTERVAL_MS);
+  }
+}
+
 async function pollDockingTask(taskId) {
   if (!isCurrentDockingTask(taskId)) return;
   clearDockingPoll();
@@ -1152,13 +1162,7 @@ async function pollDockingTask(taskId) {
   if (!response.ok || payload.success === false) {
     throw new Error(payload.message || payload.detail || "无法读取对接任务状态");
   }
-  const record = unwrapApiData(payload);
-  const terminal = applyDockingTaskRecord(record);
-  if (!terminal && readRememberedDockingTask() === taskId) {
-    dockingPollTimer = setTimeout(() => {
-      pollDockingTask(taskId).catch(handleDockingTaskError);
-    }, DOCKING_POLL_INTERVAL_MS);
-  }
+  followDockingTaskRecord(taskId, unwrapApiData(payload));
 }
 
 function handleDockingTaskError(error) {
@@ -1192,11 +1196,12 @@ async function cancelDockingTask() {
   }
 }
 
-function resumeDockingTaskIfPresent() {
-  const taskId = readRememberedDockingTask();
+function resumeDockingTaskIfPresent(record) {
+  const taskId = record ? record.task_id : readRememberedDockingTask();
   if (!taskId) return;
   markHistoricalDockingTask(taskId);
-  activeDockingTaskId = taskId;
+  if (record) rememberDockingTask(taskId);
+  else activeDockingTaskId = taskId;
   window.showStepLog = renderDockingStepLog;
   if (!stepManager) stepManager = new DockingStepManager();
   stepManager.reset();
@@ -1209,7 +1214,8 @@ function resumeDockingTaskIfPresent() {
   const progressContainer = document.querySelector(".progress-container");
   if (progressContainer) progressContainer.style.display = "block";
   setDockingTaskButtonState(true);
-  pollDockingTask(taskId).catch(handleDockingTaskError);
+  if (record) followDockingTaskRecord(taskId, record);
+  else pollDockingTask(taskId).catch(handleDockingTaskError);
 }
 
 // 开始对接分析
@@ -2119,14 +2125,7 @@ async function restoreDurableDockingTask(taskId) {
     if (!record || record.task_id !== taskId || record.task_type !== "docking") throw new Error("任务记录不匹配");
     const status = String(record.status || "").toLowerCase();
     if (!TERMINAL_DOCKING_TASK_STATUSES.has(status)) {
-      markHistoricalDockingTask(taskId);
-      if (!stepManager) stepManager = new DockingStepManager();
-      stepManager.reset();
-      stepManager.show();
-      activeDockingTaskId = taskId;
-      rememberDockingTask(taskId);
-      setDockingTaskButtonState(true);
-      await pollDockingTask(taskId);
+      resumeDockingTaskIfPresent(record);
     } else if (status === "succeeded") {
       const result = durableDockingResult(record);
       if (!result) throw new Error("任务结果未通过校验");

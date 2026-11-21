@@ -335,6 +335,148 @@ test("docking history remains reachable at phone and desktop widths", async t =>
   }
 });
 
+test("docking refresh, offline retry and history takeover follow one submitted job", async t => {
+  const task = {task_id: "dock-a", task_type: "docking", phase: "vina_running", status: "running", progress: 0.2};
+  const statusPath = "/api/tasks/" + task.task_id;
+  let submissions = 0, offline = false, unavailable = false;
+  const page = await pageFor(t, "/molecular-docking", (route, url) => {
+    if (url.pathname === "/api/docking/tasks" && route.request().method() === "POST") {
+      submissions++;
+      return route.fulfill({json: {success: true, data: task}});
+    }
+    if (url.pathname === statusPath) {
+      if (offline) return route.continue();
+      if (unavailable) return route.fulfill({status: 503, json: {message: "fixture unavailable"}});
+      return route.fulfill({json: {success: true, data: task}});
+    }
+    if (url.pathname === "/api/tasks") return route.fulfill({json: {data: [task]}});
+    if (url.pathname === "/api/docking/history") return route.fulfill({json: {success: true, history: []}});
+    if (url.pathname === "/api/docking/cavities") return route.fulfill({json: {cavities: []}});
+    return route.fulfill({status: 404, json: {}});
+  });
+  page.setDefaultTimeout(8000);
+  await page.locator("#protein-file").setInputFiles({name: "receptor.pdb", mimeType: "text/plain",
+    buffer: Buffer.from("ATOM      1  CA  ALA A   1       1.000   0.000   0.000  1.00  0.00           C\nEND\n")});
+  await page.locator("#smiles-input").fill("CCO");
+  await page.locator("#center_x").fill("1");
+  await page.locator("#start-btn").click();
+  const progress = percent => page.locator(`#docking-progress[data-progress="${percent}%"]`).waitFor({state: "attached"});
+  await progress(20);
+  assert.equal(submissions, 1);
+
+  offline = true;
+  await page.context().setOffline(true);
+  const failedRead = page.waitForEvent("requestfailed", request => new URL(request.url()).pathname === statusPath);
+  await page.reload();
+  assert.match((await failedRead).failure().errorText, /INTERNET_DISCONNECTED/);
+  await page.getByText("连接中断，等待重连…").waitFor();
+  assert(await page.locator("#start-btn").isDisabled());
+  assert.equal(await page.evaluate(() => sessionStorage.getItem("medchat.docking.active_task_id")), task.task_id);
+  task.progress = 0.4;
+  offline = false;
+  await page.context().setOffline(false);
+  await progress(40);
+  // A failed status read unlocks the page. Reopen the same job from history.
+  unavailable = true;
+  await page.locator("#results-content").getByText("fixture unavailable").waitFor();
+  unavailable = false;
+  task.progress = 0.65;
+  task.status = "cancel_requested";
+  await page.locator("#history-btn").click();
+  await page.getByRole("button", {name: "恢复结果"}).click();
+  await progress(65);
+  await page.getByText("正在取消…", {exact: true}).waitFor();
+  assert(await page.locator("#cancel-docking-btn").isDisabled());
+  task.status = "canceled";
+  await page.locator("#results-content").getByText("对接任务已取消").waitFor();
+  assert(await page.locator("#start-btn").isEnabled());
+  assert.equal(await page.evaluate(() => sessionStorage.getItem("medchat.docking.active_task_id")), null);
+  assert.equal(new URL(page.url()).searchParams.get("docking_task"), null);
+  assert.equal(submissions, 1);
+});
+
+test("a late docking history response cannot replace the newer task or restart polling", {timeout: 20000}, async t => {
+  const old = {task_id: "old-task", task_type: "docking", status: "running", progress: 0.11};
+  const current = {...old, task_id: "current-task", progress: 0.73, phase: "vina_running"};
+  const oldRead = Promise.withResolvers();
+  const releaseOld = Promise.withResolvers();
+  const writes = [];
+  let oldReads = 0;
+  const page = await pageFor(t, "/molecular-docking", async (route, url) => {
+    if (route.request().method() !== "GET") writes.push(url.pathname);
+    if (url.pathname === "/api/tasks") return route.fulfill({json: {data: [old, current]}});
+    if (url.pathname === "/api/docking/history") return route.fulfill({json: {success: true, history: []}});
+    if (url.pathname === "/api/tasks/old-task") {
+      oldReads++;
+      oldRead.resolve();
+      await releaseOld.promise;
+      return route.fulfill({json: {data: old}});
+    }
+    if (url.pathname === "/api/tasks/current-task") return route.fulfill({json: {data: current}});
+    return route.fulfill({status: 404, json: {}});
+  });
+  page.setDefaultTimeout(8000);
+  await page.locator("#history-btn").click();
+  const card = id => page.locator(".history-card").filter({hasText: id}).getByRole("button", {name: "恢复结果"});
+  await card(old.task_id).click();
+  await oldRead.promise;
+  await card(current.task_id).click();
+  await page.locator('#docking-progress[data-progress="73%"]').waitFor({state: "attached"});
+  const received = page.waitForResponse(response => new URL(response.url()).pathname === "/api/tasks/old-task");
+  releaseOld.resolve();
+  await (await received).finished();
+  current.progress = 0.78;
+  await page.locator('#docking-progress[data-progress="78%"]').waitFor({state: "attached"});
+  assert.equal(new URL(page.url()).searchParams.get("docking_task"), current.task_id);
+  current.status = "timed_out";
+  await page.locator("#results-content").getByText("状态：timed_out").waitFor();
+  assert.equal(oldReads, 1);
+  assert.deepEqual(writes, []);
+});
+
+test("docking history reads legacy poses and restores the durable task's own receptor and best pose", async t => {
+  const task = {task_id: "saved-dock", task_type: "docking", status: "running", progress: 0.5,
+    result: {data: {result_job_id: "original-worker-job", total_poses: 2, best_pose: {pose: 2, binding_energy: -7}}}};
+  const legacy = {job_id: "legacy-dock", has_result: true, status: "completed", pose_count: 2};
+  const poses = "REMARK VINA RESULT: -6.0 0.0 0.0\nREMARK VINA RESULT: -7.0 0.0 0.0\n";
+  const receptor = "ATOM      1  CA  ALA A   1       2.000   0.000   0.000  1.00  0.00           C\nEND\n";
+  const ligand = "saved-dock pose 2\n  test\n\n  1  0  0  0  0  0            999 V2000\n    4.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\nM  END\n";
+  const reads = [];
+  const page = await pageFor(t, "/molecular-docking", (route, url) => {
+    reads.push([route.request().method(), url.pathname + url.search]);
+    switch (url.pathname) {
+      case "/api/tasks": return route.fulfill({json: {data: [task]}});
+      case "/api/docking/history": return route.fulfill({json: {success: true, history: [legacy]}});
+      case "/api/tasks/saved-dock": return route.fulfill({json: {data: task}});
+      case "/api/docking/result/legacy-dock":
+      case "/api/docking/result/saved-dock": return route.fulfill({body: poses});
+      case "/api/docking/result/saved-dock/summary":
+        return route.fulfill({json: {results: [{pose: 1, binding_energy: -6}, {pose: 2, binding_energy: -7}]}});
+      case "/api/docking/tasks/saved-dock/receptor":
+        return route.fulfill({body: receptor, headers: {"X-Receptor-Format": "pdb"}});
+      case "/api/docking/pose_sdf/saved-dock":
+        if (url.search === "?pose=2") return route.fulfill({body: ligand});
+    }
+    return route.fulfill({status: 404, json: {}});
+  });
+  page.setDefaultTimeout(8000);
+  await page.locator("#history-btn").click();
+  await page.getByRole("button", {name: /加载结果/}).click();
+  await page.locator("#results-content").getByText("Pose 2", {exact: true}).waitFor();
+  assert(await page.locator("#pose-select").isDisabled());
+  assert.equal(await page.locator("#results-content").getByRole("button", {name: "查看 Pose 2"}).count(), 0);
+
+  await page.locator("#history-btn").click();
+  await page.getByRole("button", {name: "恢复结果"}).click();
+  await page.locator('#docking-progress[data-progress="50%"]').waitFor({state: "attached"});
+  task.status = "succeeded";
+  await page.waitForFunction(expected => AppState.dockedLigandData === expected, ligand);
+  assert.equal(await page.evaluate(() => receptorForView(AppState.currentJobId).data), receptor);
+  assert.equal(await page.locator("#pose-select").inputValue(), "2");
+  assert(await page.locator("#pose-select").isEnabled());
+  assert(reads.every(([method, path]) => method === "GET" && !path.includes("original-worker-job")));
+});
+
 test("model list reports failure and its controls fit a long model name", async t => {
   let available = false;
   const page = await pageFor(t, "/activity-prediction", (route, url) => {
