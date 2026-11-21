@@ -1241,9 +1241,6 @@ class TargetSearchService:
         structure = self._format_structure(row)
         file_format = (requested_format or structure.get("file_format") or "cif").lower()
         local_file_path = self.downloader._local_path_for_format(row, file_format)
-        absolute_path = absolute_from_project(local_file_path, self.project_root)
-        file_exists = absolute_path.is_file()
-        file_size = absolute_path.stat().st_size if file_exists else None
         source = str(structure.get("source") or "")
         docking_grade = structure["docking_grade"]
         warnings = list(structure.get("warnings") or [])
@@ -1260,6 +1257,9 @@ class TargetSearchService:
             else None
         )
         cache_verified = verified_cache is not None
+        absolute_path = verified_cache[0] if verified_cache else absolute_from_project(local_file_path, self.project_root)
+        file_exists = absolute_path.is_file()
+        file_size = absolute_path.stat().st_size if file_exists else None
 
         if not file_exists:
             warnings.append("本地缓存文件不存在，下载时将尝试远程获取并写入缓存。")
@@ -1318,10 +1318,10 @@ class TargetSearchService:
             "recommendation_reasons": structure.get("recommendation_reasons") or [],
         }
 
-    def send_to_docking(self, structure_db_id: int) -> dict:
+    def send_to_docking(self, structure_db_id: int, requested_format: Optional[str] = None) -> dict:
         structure = self._get_structure(structure_db_id)
-        prepared = self.downloader.prepare_structure_file(structure, requested_format=None)
-        return {
+        prepared = self.downloader.prepare_structure_file(structure, requested_format)
+        response = {
             "status": "success",
             "message": "结构文件已准备好，可以进入分子对接页面继续配置",
             "protein_file": prepared["local_file_path"],
@@ -1329,6 +1329,9 @@ class TargetSearchService:
             "structure_id": structure["structure_id"],
             "file_format": prepared["file_format"],
         }
+        if requested_format:
+            response["preflight"] = self.preflight_structure(structure_db_id, requested_format)
+        return response
 
     def get_database_stats(self) -> dict:
         db_path = get_db_path(self.project_root)

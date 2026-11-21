@@ -447,7 +447,14 @@ class StructureDownloader:
         model_id = self._alphafold_model_id(structure)
         urls = []
         if preferred_url:
-            urls.append(str(preferred_url))
+            if file_format == str(structure.get("file_format") or "cif").lower():
+                urls.append(str(preferred_url))
+            else:
+                url = urlsplit(str(preferred_url))
+                if re.search(r"-model_v\d+\.(?:pdb|cif)$", url.path):
+                    # Changing format must keep the selected model version.
+                    path = url.path.rsplit(".", 1)[0] + "." + file_format
+                    return [url._replace(path=path).geturl()]
         for version in ("v6", "v5", "v4", "v3", "v2"):
             urls.append(f"https://alphafold.ebi.ac.uk/files/{model_id}-model_{version}.{ALPHAFOLD_FORMAT_EXTENSIONS[file_format]}")
         return list(dict.fromkeys(urls))
@@ -635,21 +642,22 @@ class StructureDownloader:
         self,
         structure_db_id: int,
         local_file_path: str,
+        *,
+        file_format: str,
         download_url: Optional[str] = None,
-        file_format: Optional[str] = None,
     ) -> None:
-        fields = ["local_file_path = ?", "is_downloaded = 1", "updated_at = datetime('now')"]
-        params: list[object] = [relative_to_project(absolute_from_project(local_file_path, self.project_root), self.project_root)]
-        if download_url:
-            fields.append("download_url = ?")
-            params.append(download_url)
-        if file_format:
-            fields.append("file_format = ?")
-            params.append(file_format)
-        params.append(structure_db_id)
+        path = relative_to_project(absolute_from_project(local_file_path, self.project_root), self.project_root)
+        # Other formats have their own coordinate cache entry. Keep the catalog
+        # path and URL paired with the format used by callers that omit it.
         conn = get_connection(self.project_root)
         try:
-            conn.execute(f"UPDATE target_structures SET {', '.join(fields)} WHERE id = ?", params)
+            conn.execute(
+                """UPDATE target_structures
+                   SET local_file_path = ?, file_format = ?, download_url = COALESCE(?, download_url),
+                       is_downloaded = 1, updated_at = datetime('now')
+                   WHERE id = ? AND LOWER(COALESCE(NULLIF(file_format, ''), 'cif')) = ?""",
+                (path, file_format, download_url or None, structure_db_id, file_format),
+            )
             conn.commit()
         finally:
             conn.close()

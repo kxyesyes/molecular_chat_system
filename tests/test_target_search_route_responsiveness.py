@@ -12,7 +12,8 @@ from src.target_search.downloader import StructureDownloadError
 
 
 @pytest.mark.parametrize(("method", "path", "operation", "args", "kwargs"), [
-    ("POST", "structures/7/send-to-docking", "send_to_docking", (7,), {}),
+    ("POST", "structures/7/send-to-docking", "send_to_docking", (7,), {"requested_format": None}),
+    ("POST", "structures/7/send-to-docking?format=pdb", "send_to_docking", (7,), {"requested_format": "pdb"}),
     ("GET", "stats", "get_database_stats", (), {}),
     ("GET", "health", "get_database_health", (), {}),
     ("GET", "targets/7", "get_target_detail", (7,), {}),
@@ -72,7 +73,7 @@ def test_target_database_work_runs_off_event_loop(monkeypatch, method, path, ope
 
 @pytest.mark.parametrize("error, expected_status", [(ValueError, 404), (StructureDownloadError, 502), (RuntimeError, 500)])
 def test_send_to_docking_preserves_error_mapping(monkeypatch, error, expected_status):
-    def fail(_structure_id):
+    def fail(_structure_id, requested_format=None):
         raise error("controlled failure")
     monkeypatch.setattr(routes, "TargetSearchService", lambda: SimpleNamespace(send_to_docking=fail))
     app = FastAPI()

@@ -9,6 +9,6 @@ const TargetSearchConfig = {
     STRUCTURES: (id) => `/api/target-db/targets/${id}/structures`,
     PREFLIGHT: (id, format) => `/api/target-db/structures/${id}/preflight?format=${encodeURIComponent(format)}`,
     DOWNLOAD: (id, format) => `/api/target-db/structures/${id}/download?format=${encodeURIComponent(format)}`,
-    SEND_TO_DOCKING: (id) => `/api/target-db/structures/${id}/send-to-docking`,
+    SEND_TO_DOCKING: (id) => `/api/target-db/structures/${id}/send-to-docking?format=pdb`,
   },
 };
