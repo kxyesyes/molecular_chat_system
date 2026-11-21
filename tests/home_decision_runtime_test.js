@@ -1490,8 +1490,30 @@ async function replayRepeat({query, ready, rounds, details}) {
   assert.equal(chats().length, rounds.length, "opening historical details does not submit another turn");
 }
 
+async function selectLastCandidate(events) {
+  const h = loadHome();
+  const traceId = events[0].trace_id;
+  h.ready("pi"); start(h, turn, traceId);
+  h.socket.emit(result("completed", turn, traceId));
+  for (const event of events) h.socket.emit(event);
+  assert.equal(h.requests.length, 0);
+  h.socket.emit(complete("completed", turn, traceId));
+  await tick();
+  const cards = h.chat.querySelectorAll(".molecule-card");
+  assert.equal(cards.length, 32);
+  const last = cards.at(-1);
+  assert.match(last.textContent, /候选 32/);
+  last.querySelector(".molecule-selection-button").click();
+  h.input.value = "计算所选分子的 logP"; h.send();
+  const confirms = h.requests.map(([url, body]) => {
+    assert.equal(url, "/api/agent/workflows/references/confirm");
+    return body;
+  });
+  process.stdout.write(JSON.stringify({confirms, followup: h.socket.sent.at(-1)}));
+}
+
 const mode = process.argv[2];
-const replay = {"--frames-stdin": runFrameContracts, "--repeat-stdin": replayRepeat}[mode];
+const replay = {"--frames-stdin": runFrameContracts, "--repeat-stdin": replayRepeat, "--select-last-stdin": selectLastCandidate}[mode];
 (replay ? replay(JSON.parse(fs.readFileSync(0, "utf8"))) : run()).catch(error => {
   console.error(error); process.exitCode = 1;
 });

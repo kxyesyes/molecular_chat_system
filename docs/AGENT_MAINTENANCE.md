@@ -18,8 +18,9 @@ Pi 入口核对日期：2026-10-23。当前分支的网页通用 Agent 唯一运
 
 ## 2. 意图到证据的定位顺序
 
-接手首页时，可以从两条用户操作追踪输入和结果的去向。
+接手首页时，可以从以下用户操作追踪输入和结果的去向。
 
+- 同一条回复显示两批候选，点击“候选 32”后要求计算 logP，见[从卡片追到工具输入](#从卡片追到工具输入)。
 - 比较分子后追问“哪一个的 logP 更低？”时，从 [WebTurnProjection.followup](../src/web/web_business.py) 进入 [batch_property_followup](../src/web/property_comparison.py)，这里读取上轮已核验的分子、顺序和数值。运行 [test_short_lower_logp_followup_uses_the_displayed_pair](../tests/agent/test_web_scientific_execution.py) 可核对页面回答和工具调用次数。
 - 上传两个同名文档后，对其中一份提问时，从 [workspace_routes.py 的 ask](../src/web/routes/workspace_routes.py) 跟踪 `doc_id`。运行 [test_same_named_uploads_keep_their_source_in_project_and_history](../tests/test_home_workspace.py) 可核对送给模型的文档内容、项目详情及历史记录中的来源。
 
@@ -120,6 +121,27 @@ T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下�
 该历史台账当时仍列出其他工具类型化、Planner 选择与参数解析拆分及历史残差逐项核对；完整第1–8项见[完成台账](handoff/remaining-through-step8.md)。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成；其中首页尚未切换的描述已被本页第 1 节 Pi 入口取代。
 
 本节只说明核对基线，避免把未合并改动描述成当前行为；不复制各批历史测试数量。每批合并后应删去相应“待发布”表述并更新源码定位。
+
+### 从卡片追到工具输入
+
+假设同一条回复显示两批各 16 张卡片。用户看到的“候选 32”是第二批第 16 张。追问“计算所选分子的 logP”时，页面发送该批的展示指针和卡片的复合标识。服务端据此从已确认的记录取出规范 SMILES。
+
+| 从用户看到的现象出发 | 先查这里 | 核对什么 |
+|---|---|---|
+| 少了一批，或卡片出现在另一条回复 | [main.js](../src/web/static/js/home/main.js) 的 `handleDecisionMessage`、`completeLastMessage`，以及 [molecule_candidates.js](../src/web/static/js/home/molecule_candidates.js) 的 `enqueue` | Pi 模式按当前轮的 trace 接收候选，在结果交付完成时挂载。队列去重并限制同次请求总数，超出容量的整批会被拒绝。 |
+| 第二批重新从 1 编号 | [main.js](../src/web/static/js/home/main.js) 的 `renderMoleculeCandidates` | 标签使用当前消息已有卡片数加批内序号。引用的 `ordered_keys` 按本批索引读取；两种序号的起点不同。 |
+| 卡片可见，却选不中或选错 | [scientific_references.js](../src/web/static/js/home/scientific_references.js) 的 `present`、`select`、`outgoing`，以及 [确认路由](../src/web/routes/scientific_reference_routes.py) | 实际挂载顺序与清单一致后才发出 confirm。多批同时展示时由用户选定集合；选择记录同时包含 observation_id 和 candidate_id。普通 Pi 追问由 `sendDecisionMessage` 读取这份选择。 |
+| 追问发出后，工具收到的结构不对 | [web_request.py](../src/web/web_request.py) 的 `prepare_web_request` → [scientific_references.py](../src/web/scientific_references.py) 的 `resolve` | 对照请求的 trace_id、presentation_id、revision 和复合标识，在当前会话的已确认集合中定位结构。请求明确给出新结构时，它走常规输入校验。检查工具实际收到的 SMILES。 |
+
+顺序和确认是科学结果的保护条件。用户可能同时看到多个批次，也可能在确认返回前断线。刷新时标签页用指针重新获取已确认集合，服务端复核归属、来源版本和有效期。最初引入这些约束的原因及失败场景见[科研引用设计](superpowers/specs/2026-09-24-scientific-reference-continuity-design.md)。
+
+在仓库根目录使用 MedChat 环境、Node 和已安装的 [Pi 依赖](PI_RUNTIME.md)，运行下面的回归。它在临时 SQLite 库构造两个来源，将服务端投影的事件送入首页脚本的 DOM 测试环境，点击最后一张卡片，把页面发出的确认和追问交回服务端，并核对性质工具只收到第二批最后一个结构。追问后还会重新读取原展示记录。
+
+```powershell
+python -m pytest -q tests/agent/test_scientific_reference_execution.py::test_home_card_32_followup_reaches_property_tool
+```
+
+仅调整卡片标题时，从渲染函数入手，用上述回归核对编号、点击和工具输入。修改确认或恢复规则时，加跑 `python -m pytest -q tests/agent/test_scientific_reference_web.py`，覆盖错误顺序、其他会话和数据库重新打开后的恢复。
 
 ### 科研对象续接（已合并，非生产部署声明）
 

@@ -21,8 +21,8 @@ def service(store):
     return ScientificReferenceService(store)
 
 
-def seed(store, groups=(("CCO", "CCN"),), *, status="completed", warnings=None):
-    store.start_run({"trace_id": "trace", "session_id": "owner", "status": status,
+def seed(store, groups=(("CCO", "CCN"),), *, trace_id="trace", status="completed", warnings=None):
+    store.start_run({"trace_id": trace_id, "session_id": "owner", "status": status,
                      "workflow_version": "1", "metadata": {}})
     observations = []
     for n, smiles in enumerate(groups):
@@ -33,14 +33,14 @@ def seed(store, groups=(("CCO", "CCN"),), *, status="completed", warnings=None):
             "llm_molecular_generator", data=data, warnings=warnings if warnings is not None else ["fixture only"],
             evidence=[{"source": "offline-test"}]), trusted_checkpoint=True)
         result.quality["step_id"] = step
-        ledger = EvidenceLedger("trace")
+        ledger = EvidenceLedger(trace_id)
         result.quality["evidence_id"] = ledger.register_tool_result(step, "a" * 64, result)
         observation = result.to_legacy_dict()
-        store.save_checkpoint({"id": f"checkpoint-{n}", "trace_id": "trace", "step_id": step,
+        store.save_checkpoint({"id": f"checkpoint-{n}", "trace_id": trace_id, "step_id": step,
             "status": "succeeded", "input_hash": "a" * 64, "workflow_version": "1",
             "tool_name": result.tool_name, "tool_version": "1", "output": observation})
         observations.append({**observation, "tool_name": result.tool_name, "step_id": step})
-    return {"trace_id": "trace", "success": True, "status": status,
+    return {"trace_id": trace_id, "success": True, "status": status,
             "tool_result_sequence": observations}
 
 
