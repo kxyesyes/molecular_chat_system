@@ -10,11 +10,8 @@ document.addEventListener("DOMContentLoaded", function () {
   // 2. 初始化文件上传交互
   RtUI.initFileUpload();
 
-  // 3. 绑定单分子预测表单
-  _bindPredictForm();
-
-  // 4. 绑定批量预测表单
-  _bindBatchForm();
+  bindQueryForm("predictForm", false);
+  bindQueryForm("batchForm", true);
 
   // 5. 绑定模态框点击关闭
   _bindModalDismiss();
@@ -57,124 +54,57 @@ function applyReverseTargetPreset(mode) {
   });
 }
 
-// ══════════════════════════════════════
-//  单分子预测表单提交
-// ══════════════════════════════════════
-function _bindPredictForm() {
-  const form = document.getElementById("predictForm");
-  if (!form) return;
+// Switching tabs retires the request even if its server response is still pending.
+let pendingQuery = null;
 
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const formData = new FormData(e.target);
-    const requestedSmiles = String(formData.get("smiles") || "").trim();
-    if (!requestedSmiles) {
-      RtUI.setSubmitEnabled("submitBtn", true);
-      RtUI.hideLoading();
-      RtUI.showError("请输入 SMILES");
-      document.getElementById("smiles")?.focus();
-      return;
-    }
-    if (!form.reportValidity()) return;
-    RtUI.setSubmitEnabled("submitBtn", false);
-    RtUI.showLoading();
-
-    formData.set("smiles", requestedSmiles);
-    window.lastQuerySmiles = formData.get("smiles");
-    window.lastThreshold = formData.get("threshold");
-    window.lastOrganismFilter = document.getElementById("humanOnly")?.checked ? "Human" : "";
-    if (window.lastOrganismFilter) {
-      formData.append("organism_filter", window.lastOrganismFilter);
-    }
-
-    try {
-      if (RT_CONFIG.IS_PHARM_3D_MODE) {
-        // ── 3D 药效团精修模式 ──
-        const fd = new FormData();
-        fd.append("smiles", formData.get("smiles"));
-        fd.append("threshold", formData.get("threshold"));
-        fd.append("top_k", formData.get("top_k"));
-        const requestedMaxRefine = Number(document.getElementById("maxRefine").value || "50");
-        fd.append("max_refine", String(requestedMaxRefine));
-        fd.append(
-          "alpha_3d",
-          document.getElementById("alpha3d").value || "0.6",
-        );
-        fd.append(
-          "alpha_2d",
-          String(
-            1.0 - parseFloat(document.getElementById("alpha3d").value || "0.6"),
-          ),
-        );
-        if (window.lastOrganismFilter) {
-          fd.append("organism_filter", window.lastOrganismFilter);
-        }
-
-        const data = await RtApi.predict3D(fd);
-        window.lastReverseTargetSummary = data;
-        window.lastQuery3DPharmacophore = data.query_pharmacophore;
-        window.currentQuerySmiles = window.lastQuerySmiles;
-        const refinedResults = (data.results || []).map((row) => ({
-          ...row,
-          ranking_group: "3d_refined",
-        }));
-        const fallbackResults = (data.fallback_results || []).map((row) => ({
-          ...row,
-          ranking_group: "2d_fallback",
-        }));
-        RtResults.displayResults(refinedResults.concat(fallbackResults), true);
-      } else {
-        // ── 2D 模式 ──
-        const data = await RtApi.predict2D(formData);
-        window.lastReverseTargetSummary = data;
-        window.lastQuery3DPharmacophore = null;
-        window.currentQuerySmiles = window.lastQuerySmiles;
-        RtResults.displayResults(data.results, false);
-      }
-    } catch (err) {
-      RtUI.showError(err.message);
-    } finally {
-      RtUI.setSubmitEnabled("submitBtn", true);
-      RtUI.hideLoading();
-    }
-  });
+function finishQuery() {
+  if (!pendingQuery) return;
+  RtUI.setSubmitEnabled(pendingQuery.mode === "batch" ? "batchSubmitBtn" : "submitBtn", true);
+  RtUI.hideLoading();
+  pendingQuery = null;
 }
 
-// ══════════════════════════════════════
-//  批量预测表单提交
-// ══════════════════════════════════════
-function _bindBatchForm() {
-  const form = document.getElementById("batchForm");
+function bindQueryForm(formId, batch) {
+  const form = document.getElementById(formId);
   if (!form) return;
-
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const fileInput = document.getElementById("batchFile");
-    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
-      RtUI.setSubmitEnabled("batchSubmitBtn", true);
-      RtUI.hideLoading();
-      RtUI.showError("请先上传批量分子文件");
-      fileInput?.focus();
+  const button = batch ? "batchSubmitBtn" : "submitBtn";
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (pendingQuery) return;
+    const data = new FormData(form);
+    const querySmiles = String(data.get("smiles") || "").trim();
+    const input = document.getElementById(batch ? "batchFile" : "smiles");
+    if (batch ? !input?.files.length : !querySmiles) {
+      RtUI.showError(batch ? "请先上传批量分子文件" : "请输入 SMILES");
+      input?.focus();
       return;
     }
     if (!form.reportValidity()) return;
-    RtUI.setSubmitEnabled("batchSubmitBtn", false);
-    RtUI.showLoading();
 
+    const mode = batch ? "batch" : (RT_CONFIG.IS_PHARM_3D_MODE ? "3d" : "2d");
+    const organismFilter = document.getElementById(batch ? "batchHumanOnly" : "humanOnly")?.checked ? "Human" : "";
+    if (organismFilter) data.set("organism_filter", organismFilter);
+    if (!batch) data.set("smiles", querySmiles);
+    if (mode === "3d") {
+      const alpha = document.getElementById("alpha3d").value || "0.6";
+      data.set("max_refine", String(Number(document.getElementById("maxRefine").value || "50")));
+      data.set("alpha_3d", alpha);
+      data.set("alpha_2d", String(1 - Number(alpha)));
+    }
+
+    const query = {mode, querySmiles, organismFilter, threshold: Number(data.get("threshold") || (batch ? 0.6 : 0))};
+    pendingQuery = query;
+    RtResults.clear();
+    RtUI.setSubmitEnabled(button, false);
+    RtUI.showLoading();
     try {
-      const formData = new FormData(e.target);
-      const organismFilter = document.getElementById("batchHumanOnly")?.checked ? "Human" : "";
-      if (organismFilter) formData.append("organism_filter", organismFilter);
-      const data = await RtApi.batchPredict(formData);
-      RtResults.displayBatchResults(data.results, {
-        threshold: Number(formData.get("threshold") || "0.6"),
-        organismFilter,
-      });
-    } catch (err) {
-      RtUI.showError(err.message);
+      const predict = {batch: RtApi.batchPredict, "3d": RtApi.predict3D, "2d": RtApi.predict2D}[mode];
+      const response = await predict(data);
+      if (pendingQuery === query) RtResults.display(query, response);
+    } catch (error) {
+      if (pendingQuery === query) RtUI.showError(error.message);
     } finally {
-      RtUI.setSubmitEnabled("batchSubmitBtn", true);
-      RtUI.hideLoading();
+      if (pendingQuery === query) finishQuery();
     }
   });
 }
@@ -195,10 +125,13 @@ function _bindModalDismiss() {
 //  全局函数桥接（供 HTML onclick 属性调用）
 // ══════════════════════════════════════
 function switchTab(tabName) {
+  if (document.querySelector(".tab.active")?.dataset.tab === tabName) return;
+  finishQuery();
+  RtResults.clear();
   RtUI.switchTab(tabName);
 }
 function exportData() {
-  RtUI.exportData();
+  RtUI.exportData(RtResults.current);
 }
 function closeSimilarModal() {
   RtResults.closeSimilarModal();

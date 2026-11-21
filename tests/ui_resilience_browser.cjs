@@ -866,3 +866,162 @@ test("manual receptor selection supersedes a slow demo and preserves the demo li
   assert.deepEqual(cavities, ["manual.pdb", receptorName]);
   assert.deepEqual(submits, []);
 });
+
+async function reverseTargetCsv(page) {
+  const [download] = await Promise.all([page.waitForEvent("download"), page.locator("#exportBtn").click()]);
+  const chunks = [];
+  for await (const chunk of await download.createReadStream()) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
+for (const first of ["single", "batch"]) {
+  for (const [late, state] of [["success", "results"], ["failure", "loading"], ["success", "error"], ["failure", "error"]]) {
+    test(`reverse target ignores late ${first} ${late} while the current tab shows ${state}`, async t => {
+      const requests = [];
+      const gates = {single: Promise.withResolvers(), batch: Promise.withResolvers()};
+      const page = await pageFor(t, "https://medchat.test/reverse-target", async (route, url) => {
+        const mode = {predict_3d: "single", batch_predict: "batch"}[url.pathname.split("/").pop()];
+        if (!mode) return route.fulfill({status: 404, json: {}});
+        requests.push(mode);
+        await gates[mode].promise;
+        if (mode === first && late === "failure") return route.fulfill({status: 503, json: {detail: "obsolete failure"}});
+        if (mode !== first && state === "error") return route.fulfill({status: 503, json: {detail: "current failure"}});
+        const row = {target_name: mode + "-row", final_similarity: 0};
+        return route.fulfill({json: {results: mode === "single" ? [row] : [{success: true, query_smiles: "CCN", targets: [row]}]}});
+      });
+      await page.setViewportSize({width: 1280, height: 900});
+      async function submit(mode) {
+        await page.locator(`.tab[data-tab="${mode}"]`).click();
+        if (mode === "single") await page.locator("#smiles").fill("CCO");
+        else await page.locator("#batchFile").setInputFiles({name: "input.csv", mimeType: "text/csv", buffer: Buffer.from("smiles\nCCN\n")});
+        const request = page.waitForRequest(r => r.method() === "POST");
+        await page.locator(mode === "single" ? "#submitBtn" : "#batchSubmitBtn").click();
+        await request;
+      }
+      const current = first === "single" ? "batch" : "single";
+      await submit(first);
+      await submit(current);
+      // Let the old finally block run while the newer request is loading,
+      // or after its results are already visible.
+      if (state === "error") {
+        gates[current].resolve();
+        await page.getByText("current failure", {exact: true}).waitFor();
+      } else if (state === "results") {
+        gates[current].resolve();
+        await page.getByText(current + "-row", {exact: true}).waitFor();
+      }
+      const oldResponse = page.waitForResponse(r => r.url().endsWith(first === "single" ? "/predict_3d" : "/batch_predict"));
+      gates[first].resolve();
+      await (await oldResponse).finished();
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.deepEqual(requests, [first, current]);
+      assert.equal(await page.locator(".tab.active").getAttribute("data-tab"), current);
+      if (state === "error") {
+        assert(await page.locator("#error").isVisible());
+        assert.equal(await page.locator("#errorText").textContent(), "current failure");
+        assert.equal(await page.locator("#results").isVisible(), false);
+        assert.equal(await page.locator("#loading").isVisible(), false);
+        return;
+      }
+      assert.equal(await page.locator("#error").isVisible(), false);
+      if (state === "loading") {
+        assert(await page.locator("#loading").isVisible());
+        assert.equal(await page.locator("#results").isVisible(), false);
+        gates[current].resolve();
+        await page.getByText(current + "-row", {exact: true}).waitFor();
+      }
+      assert.equal(await page.locator("#loading").isVisible(), false);
+      assert.match(await page.locator("#resultsBody").innerText(), new RegExp(current + "-row"));
+      assert.match((await reverseTargetCsv(page)).toString("utf8"), new RegExp(current + "-row"));
+    });
+  }
+}
+
+test("reverse target keeps ranks, details, CSV bytes and uploaded inputs with their own query and session", async t => {
+  const header = "row_index,original_row_index,query_smiles,status,error,pharm_refinement_status,pharm_error,target_name,organism,molecule_chembl_id,standard_type,standard_relation,standard_value,standard_units,measurement_status,similar_count,morgan_similarity,maccs_similarity,final_similarity,final_3d_score,alignment_score,alignment_rmsd,alignment_coverage";
+  const columns = header.split(",");
+  function expectedCsv(records) {
+    const lines = records.map(row => columns.map(key => '"' + String(row[key] ?? "").replaceAll('"', '""') + '"').join(","));
+    return Buffer.from("\ufeff" + [header, ...lines].join("\n"));
+  }
+  const ranked = Array.from({length: 12}, (_, i) => ({target_name: "Rank " + (i + 1), final_similarity: (12 - i) / 12}));
+  const refined = ranked.slice(0, 10).map(row => ({...row, pharm_refinement_status: "refined", final_3d_score: 0.5}));
+  const fallback = ranked.slice(10).map(row => ({...row, pharm_refinement_status: "failed", pharm_error: "test fallback"}));
+  const batchTarget = {target_name: 'Example, "quoted"', standard_value: 0, standard_units: "μM", standard_relation: "<", final_similarity: 0};
+  const rows = [
+    {row_index: 1, original_row_index: 2, query_smiles: "CCN", success: true, targets: [batchTarget]},
+    {row_index: 2, original_row_index: 4, query_smiles: "CCN", success: true, targets: [], status: "no_match", error: "no match"},
+    {row_index: 3, original_row_index: 5, query_smiles: "bad", success: false, status: "failed", error: 'bad, "input"'},
+  ];
+  const input = Buffer.from("smiles\r\nCCN\r\n\r\nCCN\r\nbad\r\n");
+  const details = [], posts = [], uploads = [];
+  async function respond(route, url) {
+    const endpoint = url.pathname.split("/").pop();
+    if (route.request().method() === "POST") posts.push(endpoint);
+    if (endpoint === "predict") return route.fulfill({json: {results: ranked}});
+    if (endpoint === "predict_3d") return route.fulfill({json: {results: refined, fallback_results: fallback, prefilter_threshold: 0.3}});
+    if (endpoint === "batch_predict") {
+      const request = route.request();
+      const multipart = new Response(request.postDataBuffer(), {headers: {"content-type": request.headers()["content-type"]}});
+      uploads.push(Buffer.from(await (await multipart.formData()).get("file").arrayBuffer()));
+      return route.fulfill({json: {results: rows}});
+    }
+    if (endpoint === "similar_molecules") {
+      details.push(Object.fromEntries(url.searchParams));
+      return route.fulfill({json: {results: []}});
+    }
+    return route.fulfill({status: 404, json: {}});
+  }
+  const url = "https://medchat.test/reverse-target";
+  const single = await pageFor(t, url, respond);
+  const other = await pageFor(t, url, respond);
+  for (const page of [single, other]) await page.setViewportSize({width: 1280, height: 900});
+  await other.evaluate(() => { RT_CONFIG.IS_PHARM_3D_MODE = false; });
+  async function checkSingle(page, smiles, records) {
+    await page.locator("#smiles").fill(smiles);
+    await page.locator("#submitBtn").click();
+    await page.locator("#results.show").waitFor();
+    const titles = page.locator("#resultsBody .rt-target-title");
+    assert.deepEqual(await titles.allTextContents(), records.slice(0, 10).map(r => r.target_name));
+    await page.getByRole("button", {name: "下一页"}).click();
+    assert.deepEqual(await titles.allTextContents(), records.slice(10).map(r => r.target_name));
+    assert.deepEqual(await page.locator(".rt-rank-cell").allTextContents(), ["#11", "#12"]);
+    // Editing the form must not change details or exports for the displayed result.
+    await page.locator("#smiles").fill("CCC");
+    await page.locator("#threshold").fill("0.9");
+    await page.locator("#humanOnly").uncheck();
+    await page.locator("#resultsBody button").first().click();
+    await page.getByText("暂无更多详细数据").waitFor();
+    await page.locator("#similarModal .modal-close").click();
+    const csv = await reverseTargetCsv(page);
+    assert.deepEqual(csv, expectedCsv(records.map(row => ({...row, query_smiles: smiles, status: "completed"}))));
+    return csv;
+  }
+  await checkSingle(single, "CO", refined.concat(fallback));
+  assert.match(await single.locator("#resultsBody").innerText(), /2D fallback/);
+  const otherCsv = await checkSingle(other, "CCO", ranked);
+  await single.locator('.tab[data-tab="batch"]').click();
+  await single.locator("#batchFile").setInputFiles({name: "duplicates.csv", mimeType: "text/csv", buffer: input});
+  await single.locator("#batchThreshold").fill("0");
+  await single.locator("#batchHumanOnly").uncheck();
+  await single.locator("#batchSubmitBtn").click();
+  await single.locator("#results.show").waitFor();
+  await single.locator("#batchThreshold").fill("0.8");
+  await single.locator("#resultsBody button").first().click();
+  await single.getByText("暂无更多详细数据").waitFor();
+  await single.locator("#similarModal .modal-close").click();
+  assert.deepEqual(details, [
+    {smiles: "CO", target_name: "Rank 11", threshold: "0.3", limit: "50", organism_filter: "Human"},
+    {smiles: "CCO", target_name: "Rank 11", threshold: "0.5", limit: "50", organism_filter: "Human"},
+    {smiles: "CCN", target_name: batchTarget.target_name, threshold: "0", limit: "50"},
+  ]);
+  assert.deepEqual(await reverseTargetCsv(single), expectedCsv([{...rows[0], ...batchTarget, status: "completed"}, rows[1], rows[2]]));
+  assert.deepEqual(uploads, [input]);
+  const fileHash = await single.locator("#batchFile").evaluate(async el => {
+    const hash = await crypto.subtle.digest("SHA-256", await el.files[0].arrayBuffer());
+    return Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, "0")).join("");
+  });
+  assert.equal(fileHash, createHash("sha256").update(input).digest("hex"));
+  assert.deepEqual(await reverseTargetCsv(other), otherCsv);
+  assert.deepEqual(posts, ["predict_3d", "predict", "batch_predict"]);
+});

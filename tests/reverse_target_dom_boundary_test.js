@@ -52,7 +52,7 @@ test("similar molecule modal uses the source assay units, including missing meta
     { standard_value: null, measurement_status: "unit_verification_required" },
   ];
   const requested = [];
-  const context = { window: { location: new URL("http://test/"), currentQuerySmiles: "OLD" }, URL, AbortController,
+  const context = { window: { location: new URL("http://test/") }, URL, AbortController,
     document: { createElement: () => element("panel"), getElementById: element },
     RtApi: { fetchSimilarMolecules: async query => { requested.push(query); return {results: molecules}; },
       smilesImageUrl: query => "/image?query=" + query },
@@ -93,13 +93,13 @@ test("batch row details fetch with their own query, threshold and species", asyn
   const element = {querySelector: () => row, classList: {add() {}}, style: {}};
   const api = fs.readFileSync(path.join(__dirname, "../src/web/static/js/reverse_target/api_client.js"), "utf8");
   const context = { URLSearchParams, AbortController, RT_CONFIG: {API: {SIMILAR_MOLECULES: "/similar"}},
-    window: {lastThreshold: 0.8, lastOrganismFilter: "Human", lastReverseTargetSummary: {prefilter_threshold: 0.4}},
+    window: {},
     document: {getElementById: () => element, querySelector: () => element},
     fetch: async value => { url = value; return {ok: true, json: async () => ({results: []})}; },
   };
   const renderer = vm.runInNewContext(api + "\n" + source + "\nRtResults;", context);
-  renderer.displayBatchResults([{success: true, query_smiles: "CCN", targets: [{target_name: "B"}]}],
-    {threshold: 0, organismFilter: ""});
+  renderer.display({mode: "batch", threshold: 0, organismFilter: ""},
+    {results: [{success: true, query_smiles: "CCN", targets: [{target_name: "B"}]}]});
   click();
   const params = new URL(url, "http://test").searchParams;
   assert.equal(params.get("smiles"), "CCN");
@@ -112,12 +112,12 @@ test("CSV export carries source relation and unit beside the unchanged raw assay
   const ui = fs.readFileSync(path.join(__dirname, "../src/web/static/js/reverse_target/ui_manager.js"), "utf8");
   const context = { Blob, URL: { createObjectURL(value) { blob = value; }, revokeObjectURL() {} },
     document: { createElement: () => ({ click() {}, remove() {} }), body: { appendChild() {} } },
-    window: { currentSingleResults: [
+    result: { rows: [
       { target_name: "T", standard_relation: "<", standard_units: "μM", standard_value: 0 },
       { target_name: "U", standard_value: null, measurement_status: "unit_verification_required" },
     ] },
   };
-  vm.runInNewContext(ui + "\nRtUI.exportData();", context);
+  vm.runInNewContext(ui + "\nRtUI.exportData(result);", context);
   const [header, record, unresolved] = (await blob.text()).split("\n").map(row => row.split(","));
   for (const [key, value] of [["standard_value", "0"], ["standard_relation", "<"], ["standard_units", "μM"]]) {
     assert.equal(record[header.indexOf(key)], JSON.stringify(value));
@@ -136,9 +136,9 @@ test("query legend puts six server properties only in text nodes and preserves z
     return fields.get(selector);
   }};
   const context = vm.createContext({
-    window: { lastQuery3DPharmacophore: { properties: {
+    queryPharmacophore: { properties: {
       MW: payload, LogP: payload, TPSA: payload, HBD: 0, HBA: payload, RotBonds: 0,
-    } } },
+    } },
     $: () => inserted ? legend : null,
     document: { querySelector: () => ({ insertAdjacentHTML(_position, html) {
       writes.push(html); inserted = true;
@@ -148,7 +148,7 @@ test("query legend puts six server properties only in text nodes and preserves z
   const start = source.indexOf("  function _attachQueryLegend(");
   const end = source.indexOf("  function displayBatchResults(", start);
   assert.ok(start >= 0 && end > start);
-  vm.runInContext(source.slice(start, end) + "\n_attachQueryLegend(true);", context);
+  vm.runInContext(source.slice(start, end) + "\n_attachQueryLegend(queryPharmacophore);", context);
   assert.equal(writes.length, 1);
   assert.ok(!writes[0].includes(payload));
   for (const name of ["mw", "logp", "tpsa", "hba"]) {

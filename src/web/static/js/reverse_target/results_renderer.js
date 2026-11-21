@@ -9,12 +9,30 @@ const RtResults = (() => {
   const SINGLE_PAGE_SIZE = 10;
   const SINGLE_RESULT_COLUMN_COUNT = 7;
   const BATCH_RESULT_COLUMN_COUNT = 7;
-  const singlePageState = {
-    results: [],
-    is3DMode: false,
-    page: 1,
-    pageSize: SINGLE_PAGE_SIZE,
-  };
+  let displayed = null;
+
+  function clear() {
+    displayed = null;
+    closeSimilarModal();
+    $("queryLegendBox")?.remove();
+    $("exportBtn").style.display = "none";
+    $("results").classList.remove("show");
+  }
+
+  function display(query, response) {
+    const {results, fallback_results, ...summary} = response;
+    let rows = results || [];
+    if (query.mode === "3d") {
+      rows = [
+        ...rows.map(row => ({...row, ranking_group: "3d_refined"})),
+        ...(fallback_results || []).map(row => ({...row, ranking_group: "2d_fallback"})),
+      ];
+    }
+    displayed = {...query, rows, summary};
+    $("exportBtn").style.display = rows.length ? "flex" : "none";
+    if (query.mode === "batch") displayBatchResults(rows);
+    else displayResults(rows, query.mode === "3d");
+  }
 
   function escapeHtml(value) {
     return String(value ?? "")
@@ -263,7 +281,7 @@ const RtResults = (() => {
           </td>
           <td class="rt-action-cell">
             <div class="rt-row-actions">
-            <button class="rt-action-btn rt-action-secondary" onclick="RtResults.onShowSimilar(${inlineJsArg(targetName)}, ${inlineJsArg(window.currentQuerySmiles || '')})">相似分子 ${_similarCount(result)}</button>
+            <button class="rt-action-btn rt-action-secondary" onclick="RtResults.onShowSimilar(${inlineJsArg(targetName)})">相似分子 ${_similarCount(result)}</button>
             <a class="target-db-link" href="${_targetDbUrl(targetName)}" target="_blank" rel="noopener noreferrer">靶点库</a>
             </div>
           </td>
@@ -275,23 +293,17 @@ const RtResults = (() => {
     const resultCount = $("resultCount");
     if (!resultsBody || !resultCount) return;
 
-    const pageData = paginateResults(
-      singlePageState.results,
-      page,
-      singlePageState.pageSize,
-    );
-    singlePageState.page = pageData.page;
-
-    const humanCount = singlePageState.results.filter((item) => (item.organism || "").toLowerCase() === "human").length;
-    const summary = window.lastReverseTargetSummary || {};
+    const {rows, summary, mode} = displayed;
+    const pageData = paginateResults(rows, page, SINGLE_PAGE_SIZE);
+    const humanCount = rows.filter((item) => (item.organism || "").toLowerCase() === "human").length;
     const diagnostics = Number.isFinite(Number(summary.unique_target_count_before_top_k))
       ? ` · 聚合前 ${summary.unique_target_count_before_top_k} 个靶点 · 候选 ${summary.raw_candidate_count || 0}/${summary.candidate_pool_size || 0}`
       : "";
-    resultCount.textContent = `预测到 ${singlePageState.results.length} 个潜在靶点 · Human ${humanCount} 个${diagnostics} · 第 ${pageData.page}/${pageData.totalPages} 页`;
+    resultCount.textContent = `预测到 ${rows.length} 个潜在靶点 · Human ${humanCount} 个${diagnostics} · 第 ${pageData.page}/${pageData.totalPages} 页`;
 
     resultsBody.innerHTML = pageData.items
       .map((result, index) =>
-        _singleResultRow(result, pageData.startIndex + index, singlePageState.is3DMode),
+        _singleResultRow(result, pageData.startIndex + index, mode === "3d"),
       )
       .join("");
     _renderPagination(pageData);
@@ -343,11 +355,6 @@ const RtResults = (() => {
     const results = $("results");
     const resultsBody = $("resultsBody");
     const resultCount = $("resultCount");
-    const exportBtn = $("exportBtn");
-    window.currentSingleResults = resultsData || [];
-    window.currentBatchResults = null;
-    if (exportBtn) exportBtn.style.display = resultsData && resultsData.length ? "flex" : "none";
-
     // 还原表头为单分子模式
     const tableHead = document.querySelector(".results-table thead tr");
     tableHead.innerHTML = `
@@ -368,26 +375,15 @@ const RtResults = (() => {
       return;
     }
 
-    singlePageState.results = resultsData || [];
-    singlePageState.is3DMode = Boolean(is3DMode);
-    singlePageState.page = 1;
-    singlePageState.pageSize = SINGLE_PAGE_SIZE;
-
-    // Attach query pharmacophore legend once, then render the first 10 results.
-    _attachQueryLegend(is3DMode);
+    if (is3DMode) _attachQueryLegend(displayed.summary.query_pharmacophore);
     _renderSinglePage(1);
     results.classList.add("show");
     return;
   }
 
   // ── 附加查询分子的药效团图例到表格上方 ──
-  function _attachQueryLegend(is3DMode) {
-    const oldLegend = $("queryLegendBox");
-    if (oldLegend) oldLegend.remove();
-
-    if (!is3DMode || !window.lastQuery3DPharmacophore) return;
-
-    const qp = window.lastQuery3DPharmacophore;
+  function _attachQueryLegend(qp) {
+    if (!qp) return;
     const legendHtml = `
       <div id="queryLegendBox" style="background:linear-gradient(135deg,#f5f3ff,#ede9fe);border:1px solid #c4b5fd;
         border-radius:12px;padding:16px 20px;margin-bottom:16px;width:100%;box-sizing:border-box;">
@@ -419,26 +415,11 @@ const RtResults = (() => {
   // ──────────────────────────────────────
   //  显示批量预测结果
   // ──────────────────────────────────────
-  function displayBatchResults(resultsData, detailOptions) {
+  function displayBatchResults(resultsData) {
     const results = $("results");
     const resultsBody = $("resultsBody");
     const resultCount = $("resultCount");
-    const exportBtn = $("exportBtn");
-    window.currentSingleResults = null;
     _clearPagination();
-    if (exportBtn) exportBtn.style.display = resultsData && resultsData.length ? "flex" : "none";
-
-    if (!resultsData || resultsData.length === 0) {
-      resultCount.textContent = "未找到有效结果";
-      resultsBody.innerHTML =
-        `<tr><td colspan="${BATCH_RESULT_COLUMN_COUNT}" style="text-align:center;padding:40px;">无数据</td></tr>`;
-      results.classList.add("show");
-      return;
-    }
-
-    resultCount.textContent = `🎉 批量预测完成，共 ${resultsData.length} 个分子`;
-    window.currentBatchResults = resultsData;
-
     // 动态切换表头
     const tableHead = document.querySelector(".results-table thead tr");
     tableHead.innerHTML = `
@@ -450,6 +431,15 @@ const RtResults = (() => {
       <th>相似度</th>
       <th>操作</th>`;
 
+    if (!resultsData || resultsData.length === 0) {
+      resultCount.textContent = "未找到有效结果";
+      resultsBody.innerHTML =
+        `<tr><td colspan="${BATCH_RESULT_COLUMN_COUNT}" style="text-align:center;padding:40px;">无数据</td></tr>`;
+      results.classList.add("show");
+      return;
+    }
+
+    resultCount.textContent = `🎉 批量预测完成，共 ${resultsData.length} 个分子`;
     let rows = "";
     let idx = 1;
     const rowBindings = [];
@@ -510,7 +500,7 @@ const RtResults = (() => {
       if (errorCell) errorCell.textContent = binding.errorText || "无匹配靶点";
       const similarButton = row.querySelector("[data-batch-similar]");
       if (similarButton) {
-        similarButton.addEventListener("click", () => showSimilarMolecules(binding.targetName, binding.querySmiles, detailOptions));
+        similarButton.addEventListener("click", () => showSimilarMolecules(binding.targetName, binding.querySmiles));
       }
     });
     results.classList.add("show");
@@ -522,27 +512,21 @@ const RtResults = (() => {
   let similarRequestId = 0;
   let similarAbortController = null;
 
-  function _detailsThreshold() {
-    const configured = Number(window.lastThreshold);
-    const configuredThreshold = Number.isFinite(configured) ? configured : NaN;
-    const fallback = typeof RT_CONFIG !== "undefined"
-      ? Number(RT_CONFIG.DEFAULTS && RT_CONFIG.DEFAULTS.THRESHOLD)
-      : NaN;
-    const baseThreshold = Number.isFinite(configuredThreshold)
-      ? configuredThreshold
-      : (Number.isFinite(fallback) ? fallback : 0.6);
-    const prefilter = Number(window.lastReverseTargetSummary?.prefilter_threshold);
+  function _detailsThreshold(result) {
+    const baseThreshold = result?.threshold ?? 0.6;
+    const prefilter = Number(result?.summary?.prefilter_threshold);
+    if (result?.mode === "batch") return baseThreshold;
     if (Number.isFinite(prefilter) && prefilter >= 0 && prefilter <= 1 && prefilter < baseThreshold) {
       return prefilter;
     }
     return baseThreshold;
   }
 
-  async function showSimilarMolecules(targetName, querySmiles, detailOptions) {
+  async function showSimilarMolecules(targetName, querySmiles) {
     const requestId = ++similarRequestId;
     if (similarAbortController) similarAbortController.abort();
     similarAbortController = new AbortController();
-    const resolvedQuerySmiles = String(querySmiles || window.currentQuerySmiles || "");
+    const resolvedQuerySmiles = String(querySmiles || displayed?.querySmiles || "");
     const modal = $("similarModal");
     const modalTitle = $("modalTitle");
     const modalBody = $("modalBody");
@@ -556,10 +540,10 @@ const RtResults = (() => {
       const data = await RtApi.fetchSimilarMolecules(
         resolvedQuerySmiles,
         targetName,
-        detailOptions?.threshold ?? _detailsThreshold(),
+        _detailsThreshold(displayed),
         50,
         similarAbortController.signal,
-        detailOptions?.organismFilter,
+        displayed?.organismFilter,
       );
 
       if (requestId !== similarRequestId) return;
@@ -710,18 +694,14 @@ const RtResults = (() => {
     }
   }
 
-  // 供外部 onclick 调用的钩子
-  function onShowSimilar(targetName, querySmiles) {
-    showSimilarMolecules(targetName, querySmiles);
-  }
-
   return {
     renderPharmLegend,
-    displayResults,
-    displayBatchResults,
+    display,
+    clear,
+    get current() { return displayed; },
     showSimilarMolecules,
     closeSimilarModal,
-    onShowSimilar,
+    onShowSimilar: showSimilarMolecules,
     _test: {
       paginateResults,
       escapeHtml,
