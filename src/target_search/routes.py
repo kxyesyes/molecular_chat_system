@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
@@ -144,9 +145,9 @@ def setup_target_search_routes(app: FastAPI) -> None:
             )
 
     @app.post("/api/target-db/structures/{structure_db_id}/send-to-docking")
-    async def send_to_docking(structure_db_id: int):
+    async def send_to_docking(structure_db_id: int, format: Literal["pdb", "cif", "pdb.gz", "cif.gz"] | None = None):
         try:
-            return await run_in_threadpool(service.send_to_docking, structure_db_id)
+            return await run_in_threadpool(service.send_to_docking, structure_db_id, requested_format=format)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except StructureDownloadError as exc:

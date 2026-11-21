@@ -693,6 +693,63 @@ class TargetSearchDemoTest(unittest.TestCase):
         self.assertEqual(payload["structure_id"], structure["structure_id"])
         self.assertIn("coordinates", payload["protein_file"])
 
+    def test_pdb_handoff_downloads_once_and_preserves_the_default_cif(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from requests import Response
+        from src.target_search import routes
+
+        service = self._seeded_service()
+        target = service.search_targets("WDR5")["results"][0]
+        structures = service.get_target_structures(target["target_id"])["structures"]
+        chosen = next(item for item in structures if item["source"] == "RCSB_PDB")
+        other_id = next(item["id"] for item in structures if item["id"] != chosen["id"])
+        other_before = service._get_structure(other_id)
+        path = f"/api/target-db/structures/{chosen['id']}"
+        cif = b"data_example\n_atom_site.id\nATOM\n"
+        pdb = b"ATOM      1  CA  ALA A   1       2.000   0.000   0.000  1.00  0.00           C\nEND\n"
+
+        def upstream(url, *args, **kwargs):
+            response = Response()
+            response.status_code = 200
+            response._content = {".cif": cif, ".pdb": pdb}[Path(url).suffix]
+            response._content_consumed = True
+            return response
+
+        app = FastAPI()
+        with patch.object(routes, "TargetSearchService", return_value=service):
+            routes.setup_target_search_routes(app)
+        with TestClient(app) as client, patch("src.target_search.downloader._request_structure", side_effect=upstream) as remote:
+            legacy = client.post(path + "/send-to-docking").json()
+            self.assertEqual(legacy["file_format"], "cif")
+            cif_file = self.root / legacy["protein_file"]
+            self.assertEqual(cif_file.read_bytes(), cif)
+
+            for _ in range(2):  # First preparation fills the PDB cache, retry reads it.
+                prepared = client.post(path + "/send-to-docking?format=pdb")
+                self.assertEqual(prepared.status_code, 200, prepared.text)
+                data = prepared.json()
+                self.assertEqual((data["structure_db_id"], data["file_format"]), (chosen["id"], "pdb"))
+                self.assertEqual(data["preflight"]["cache_status"], "available")
+                self.assertEqual(data["preflight"]["file_size_bytes"], len(pdb))
+                self.assertEqual(client.get(path + "/download?format=pdb").content, pdb)
+            self.assertEqual(client.post(path + "/send-to-docking").json(), legacy)
+            self.assertEqual([Path(call.args[0]).suffix for call in remote.call_args_list], [".cif", ".pdb"])
+            self.assertEqual(cif_file.read_bytes(), cif)
+            self.assertEqual(service._get_structure(other_id), other_before)
+
+    def test_alternate_alphafold_pdb_uses_the_selected_model_version(self):
+        from src.target_search.downloader import StructureDownloader
+
+        downloader = StructureDownloader(self.root)
+        structure = {
+            "structure_id": "AF-P12345-F1", "file_format": "cif",
+            "download_url": "https://alphafold.ebi.ac.uk/files/AF-P12345-F1-model_v4.cif",
+        }
+        self.assertEqual(downloader._alphafold_urls(structure, "pdb"), [
+            "https://alphafold.ebi.ac.uk/files/AF-P12345-F1-model_v4.pdb",
+        ])
+
     def test_route_returns_404_for_missing_structure(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient

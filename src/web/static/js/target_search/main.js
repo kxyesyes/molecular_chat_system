@@ -639,18 +639,14 @@ const TargetSearchApp = (() => {
     if (button) button.disabled = true;
     showMessage("正在准备对接结构…", "info");
     try {
-      const preflight = await TargetSearchApi.preflight(structureId, "cif");
-      showMessage(formatPreflightMessage(preflight, "docking"), preflight.suitable_for_direct_docking ? "success" : "info");
       const data = await TargetSearchApi.sendToDocking(structureId);
-      if (data.status === "error") {
-        throw new Error(data.message || "结构文件准备失败");
+      if (data.file_format !== "pdb" || data.structure_db_id !== Number(structureId)) {
+        throw new Error("未取得所选结构的 PDB 文件，请重试。");
       }
-      showMessage(`${data.message}：${data.protein_file}。${formatPreflightMessage(preflight, "docking")}`, "success");
-      const targetId = data.structure_db_id || structureId;
-      window.location.href = `/molecular-docking?target_structure=${encodeURIComponent(targetId)}&target_structure_id=${encodeURIComponent(targetId)}`;
+      showMessage(formatPreflightMessage(data.preflight, "docking"), data.preflight.suitable_for_direct_docking ? "success" : "info");
+      window.location.href = `/molecular-docking?target_structure=${encodeURIComponent(structureId)}`;
     } catch (error) {
       showMessage(formatStructureActionError(error), "error");
-    } finally {
       if (button) button.disabled = false;
     }
   }

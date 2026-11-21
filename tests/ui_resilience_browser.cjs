@@ -2,6 +2,7 @@
 // node --test tests/ui_resilience_browser.cjs
 const { after, before, test } = require("node:test");
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const path = require("node:path");
 const fs = require("node:fs");
 const { chromium } = require("playwright");
@@ -675,7 +676,6 @@ test("structure actions accept one request per double click and recover after fa
     page.locator("#targetDetail").getByRole("button", { name: "下载推荐" }),
     page.getByRole("button", { name: "下载 PDB" }),
     page.getByRole("button", { name: "下载 mmCIF" }),
-    page.getByRole("button", { name: "准备并打开分子对接" }),
   ]) {
     const before = preflights;
     await button.dblclick();
@@ -685,4 +685,77 @@ test("structure actions accept one request per double click and recover after fa
     assert.equal(preflights, before + 1);
   }
   assert.equal(detailRequests, 2);
+});
+
+test("PDB handoff retries offline, prepares the selected receptor once and preserves direct links", {timeout: 30000}, async t => {
+  const target = {target_id: 1, gene_symbol: "TEST"};
+  const structures = [{id: 21, structure_id: "1AAA"}, {id: 32, structure_id: "2BBB"}];
+  const pdb = id => `HEADER    RECEPTOR ${id}\nATOM      1  CA  ALA A   1       ${id === 21 ? "1" : "2"}.000   0.000   0.000  1.00  0.00           C\nEND\n`;
+  const reads = [], creates = [];
+  const prepared = Promise.withResolvers();
+  let offline = false;
+  const page = await pageFor(t, "https://medchat.test/target-search", async (route, url) => {
+    if (url.pathname.endsWith("/search")) return route.fulfill({json: {query: "TEST", results: [target]}});
+    if (url.pathname.endsWith("/targets/1")) return route.fulfill({json: {...target, structures}});
+    if (["/api/docking/tasks", "/api/docking/batch_submit"].includes(url.pathname) && route.request().method() === "POST") {
+      creates.push(url.pathname);
+    }
+    const match = url.pathname.match(/^\/api\/target-db\/structures\/(\d+)\/(.+)$/);
+    if (match) {
+      const structure = structures.find(s => s.id === Number(match[1]));
+      reads.push([route.request().method(), structure.id, match[2], url.searchParams.get("format")]);
+      const preflight = {...structure, can_download: true, cache_status: "available", docking_grade: "A"};
+      if (match[2] === "send-to-docking") {
+        if (offline) return route.continue();
+        await prepared.promise;
+        return route.fulfill({json: {structure_db_id: structure.id, file_format: "pdb", preflight}});
+      }
+      if (match[2] === "preflight") return route.fulfill({json: preflight});
+      if (match[2] === "download") return route.fulfill({body: pdb(structure.id)});
+    }
+    if (url.pathname === "/api/docking/cavities") return route.fulfill({json: {cavities: []}});
+    return route.fulfill({status: 404, json: {}});
+  });
+  page.setDefaultTimeout(6000);
+  async function verifyReceptor(structure) {
+    const expected = pdb(structure.id);
+    await page.waitForFunction(text => AppState.currentProteinData === text, expected);
+    const file = await page.locator("#protein-file").evaluate(async input => {
+      const receptor = input.files[0];
+      const digest = await crypto.subtle.digest("SHA-256", await receptor.arrayBuffer());
+      return {name: receptor.name, hash: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("")};
+    });
+    assert.deepEqual(file, {name: `target-${structure.structure_id}.pdb`, hash: createHash("sha256").update(expected).digest("hex")});
+  }
+  const launch = page.locator(".structure-item").filter({hasText: "2BBB"}).getByRole("button", {name: "准备并打开分子对接"});
+  await launch.waitFor();
+  offline = true;
+  await page.context().setOffline(true);
+  const failed = page.waitForEvent("requestfailed", request => request.url().includes("/send-to-docking"));
+  await launch.click();
+  assert.match((await failed).failure().errorText, /INTERNET_DISCONNECTED/);
+  await page.waitForFunction(() => document.querySelector("#targetMessage").classList.contains("error"));
+  assert(await launch.isEnabled());
+  assert.equal(new URL(page.url()).pathname, "/target-search");
+  offline = false;
+  await page.context().setOffline(false);
+  try {
+    await launch.dblclick();
+    assert(await launch.isDisabled());
+  } finally {
+    prepared.resolve();
+  }
+  await page.waitForURL("**/molecular-docking*");
+  await verifyReceptor(structures[1]);
+  const prepare = ["POST", 32, "send-to-docking", "pdb"];
+  assert.deepEqual(reads, [prepare, prepare, ["GET", 32, "preflight", "pdb"], ["GET", 32, "download", "pdb"]]);
+  await page.reload();
+  assert.equal(reads.length, 4);
+  for (const key of ["target_structure", "target_structure_id"]) {
+    await page.goto(`https://medchat.test/molecular-docking?${key}=21&keep=yes#viewer`);
+    await verifyReceptor(structures[0]);
+    assert.equal(new URL(page.url()).search + new URL(page.url()).hash, "?keep=yes#viewer");
+  }
+  assert.deepEqual(reads.slice(4), Array(2).fill([["GET", 21, "preflight", "pdb"], ["GET", 21, "download", "pdb"]]).flat());
+  assert.deepEqual(creates, []);
 });
