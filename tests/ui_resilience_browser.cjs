@@ -136,6 +136,9 @@ test("sidebar project, document question, and analysis archive work at phone wid
   });
   page.setDefaultTimeout(3000);
   const dialog = page.locator("#workspaceDialog");
+  const legacyFiles = JSON.stringify([{id:"legacy-1", name:"previous.txt", size:12, lastModified:1}]);
+  await page.evaluate(value => localStorage.setItem("medchatManagedFiles", value), legacyFiles);
+  await page.reload();
   async function open(label) {
     const entry = page.getByRole("button",{name:label,exact:true}).first();
     await page.locator("#openSidebarBtn").click();
@@ -170,6 +173,7 @@ test("sidebar project, document question, and analysis archive work at phone wid
   await open("我的项目");
   await dialog.getByRole("button",{name:"查看记录"}).click();
   await dialog.getByText(/已完成测试/).waitFor();
+  assert.equal(await page.evaluate(() => localStorage.getItem("medchatManagedFiles")), legacyFiles);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 320);
 });
 
