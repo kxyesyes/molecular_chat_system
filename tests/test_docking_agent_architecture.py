@@ -91,6 +91,7 @@ class DockingAgentArchitectureTests(unittest.TestCase):
         route_thread_ids = []
         service_thread_ids = []
         service_owners = []
+        file_jobs = {b"first\r\nEND\r\n": "file-1", b"second\nEND\n": "file-2"}
 
         async def recording_run_in_threadpool(func, *args, **kwargs):
             route_thread_ids.append(threading.get_ident())
@@ -104,7 +105,8 @@ class DockingAgentArchitectureTests(unittest.TestCase):
                 await asyncio.sleep(0)
                 if kwargs["input_type"] == "file":
                     ligand = Path(kwargs["ligand_input"]).read_bytes()
-                    return {"success": ligand == b"first\r\nEND\r\n", "job_id": "file-fixture"}
+                    job_id = file_jobs[ligand]
+                    return {"success": job_id == "file-1", "job_id": job_id}
                 if kwargs["ligand_input"] == "invalid":
                     return {"success": False, "error": "invalid ligand fixture"}
                 return {
@@ -150,8 +152,10 @@ class DockingAgentArchitectureTests(unittest.TestCase):
                          [(1, "first", True), (2, "second", False)])
         self.assertEqual(result["results"][1]["error"], "invalid ligand fixture")
         self.assertEqual(files_batch.status_code, 200, files_batch.text)
-        self.assertEqual([(r["index"], r["ligand_name"], r["success"]) for r in files_batch.json()["results"]],
-                         [(1, "duplicate.pdbqt", True), (2, "duplicate.pdbqt", False)])
+        self.assertEqual(
+            [(r["index"], r["ligand_name"], r["job_id"], r["success"]) for r in files_batch.json()["results"]],
+            [(1, "duplicate.pdbqt", "file-1", True), (2, "duplicate.pdbqt", "file-2", False)],
+        )
         self.assertTrue(owner)
         self.assertEqual(service_owners, [owner] * 5)
         self.assertEqual(len(service_thread_ids), 5)

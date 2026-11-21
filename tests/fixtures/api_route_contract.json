@@ -34,7 +34,7 @@
       "path": "/api/docking/batch_submit",
       "name": "submit_batch_docking_job",
       "status_code": null,
-      "parameters": "protein_file: UploadFile=File(...), ligand_files: Optional[List[UploadFile]]=File(None), batch_smiles: str=Form(''), center_x: float=Form(0.0), center_y: float=Form(0.0), center_z: float=Form(0.0), size_x: float=Form(20.0), size_y: float=Form(20.0), size_z: float=Form(20.0), exhaustiveness: int=Form(8), num_modes: int=Form(10), energy_range: float=Form(3.0), manual_center: bool=Form(False)"
+      "parameters": "protein_file: UploadFile=File(...), ligand_files: List[UploadFile]=File([]), batch_smiles: str=Form(''), center_x: float=Form(0.0), center_y: float=Form(0.0), center_z: float=Form(0.0), size_x: float=Form(20.0), size_y: float=Form(20.0), size_z: float=Form(20.0), exhaustiveness: int=Form(8), num_modes: int=Form(10), energy_range: float=Form(3.0), manual_center: bool=Form(False)"
     },
     {
       "methods": [
@@ -1789,19 +1789,13 @@
               "title": "Protein File"
             },
             "ligand_files": {
-              "anyOf": [
-                {
-                  "items": {
-                    "type": "string",
-                    "contentMediaType": "application/octet-stream"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ligand Files"
+              "items": {
+                "type": "string",
+                "contentMediaType": "application/octet-stream"
+              },
+              "type": "array",
+              "title": "Ligand Files",
+              "default": []
             },
             "batch_smiles": {
               "type": "string",
