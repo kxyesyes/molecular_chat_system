@@ -90,6 +90,16 @@ ChatHandler → WebDecisionRuntime → PiAgentRuntime → 官方 Pi（runtime/pi
 - **后台工作**：[TaskManager](../src/task_runtime/manager.py) 是工作流 API 使用的提交入口；[TaskRuntime](../src/task_runtime/runtime.py) 是带 staging、幂等、后端选择和收尾的异步科学任务门面，两者不是同一个类。Temporal/OpenSandbox 等边界见 [task_runtime](../src/task_runtime)；不要因都是“任务”就机械合并或删除资源清理。
 - **聊天与续接**：[agent_session_config.py](../src/web/agent_session_config.py) 组装服务端匿名会话，正式 WebSocket/工作流从 scope 取身份，任务访问按服务端归属过滤；它不是实名登录授权。聊天历史仍按连接创建，六处终态共用 `_append_history` 原位保留末20条，不是完整断线历史持久化。隔离决策续接与本分支首页科研引用各自保留保护；首页“第3个分子”通过实际展示ACK、版本、归属和失效校验解析，不从历史文本猜SMILES。详见下方科研续接定位。
 
+### 首页多轮追问的会话状态
+
+Pi SDK 负责对话循环。首页另在当前连接中保留用户实际看到的科学结果、展示顺序和当前选择。批量活性换算从已验收的工具行读取原始 pIC50，并保留用户指定的单位。自由表述的活性解读通过现有模型上下文取得同一份展示顺序和当前选择。换批后由新表决定序号。
+
+当一轮只包含“谢谢”“收到”这类确认且正常完成时，Web 层会保留上一轮中属于本会话的性质、活性、ADMET 和靶点记录。靶点待选配体等操作标记只在原流程中使用。新增追问时，先确定它引用哪条证据、需要哪些字段、是否应调用工具；普通寒暄也无需额外装入靶点结构表。
+
+用户自由提问“为什么刚才选中的分子需要复核”时，如果科学编译器给出通用拒绝，已有意图分类器可根据整句请求确认是否仅需解读。进入解读时工具权限为空，模型从本会话选中行读取预测。请求含有新的计算或检索时保留科学编译结果。
+
+回归覆盖直接追问、连续寒暄后追问、换会话和失败请求后再追问。浏览器验收用每轮 trace 对照实际工具执行次数，数值按首轮工具记录核对。见[会话证据回归](../tests/agent/test_scientific_readback_memory.py)和[活性追问回归](../tests/agent/test_activity_evidence_inspection.py)。
+
 ## 4. 兼容代码与迁移状态
 
 | 保留项 | 原因与删除门槛 |

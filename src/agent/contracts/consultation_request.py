@@ -2,8 +2,10 @@
 import re
 
 
-def asks_about_given_information(query):
-    """Limit reconsideration of rejected plans to explicit evidence-interpretation questions."""
+def asks_about_given_information(query, *, prior_activity_context=None):
+    """Accept a reference to a server-resolved activity row or explicitly supplied evidence."""
+    if prior_activity_context and prior_activity_context.get('selected_smiles'):
+        return True
     return re.search(
         r'(?:仅|只)(?:凭|据|根据|依据)(?:上述|以上|这些|现有|所给)(?:信息|数据|结果|证据)'
         r'|(?:能否|能|可以|可否)(?:仅)?(?:由此|据此)(?:认定|断定|推断|判断|认为|证明|声称)'

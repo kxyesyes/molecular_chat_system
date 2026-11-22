@@ -1943,7 +1943,8 @@ class WebDecisionRuntime:
                       and turn.scientific_plan.status == 'rejected' and not turn.scientific_plan.message
                       and envelope.reference is None and envelope.selection is None
                       and turn.scientific_plan.original_query == execution_payload['message'] == envelope.query
-                      and asks_about_given_information(envelope.query)):
+                      and asks_about_given_information(envelope.query,
+                          prior_activity_context=projection.model_activity_context())):
                     # Keep the original rejection for mixed or executable requests.
                     if await self._classify_tool_free_consultation(
                             sender, turn, model, generation, handler._input_limit(), rejection=None):

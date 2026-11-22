@@ -172,6 +172,8 @@ class WebTurnProjection:
     def __init__(self, query, session_id, history, *, reverse_boundary=None):
         from src.agent.activity_evidence_inspection import split_concept_prior_value
         self.query = query
+        self.acknowledgement = bool(re.fullmatch(
+            r'\s*(?:谢谢(?:你)?|多谢|好的|好|收到|明白了|thanks|thank you|got it|okay|ok)[。.!！]?\s*', query, re.I))
         self.session_id = session_id
         # Candidate evidence may be distributed across the design turn and a
         # later single-candidate ADMET turn; retain a small bounded window for
@@ -411,6 +413,8 @@ class WebTurnProjection:
 
     def model_target_context(self):
         """Project accepted socket-local retrieval facts for ordinary explanations."""
+        if self.acknowledgement:
+            return None
         evidence = self.history[-1].get('target_structure_evidence') if self.history else None
         if (not isinstance(evidence, dict) or not self.session_id
                 or evidence.get('session_id') != self.session_id or not evidence.get('trace_id')):
@@ -475,7 +479,15 @@ class WebTurnProjection:
                 for task, model in provenance.get('models', {}).items()
                 if task in ('classification', 'regression')}
             rows.append(row)
-        return {'scope': 'last_activity_observations', 'predictions': rows}
+        context = {'scope': 'last_activity_observations', 'predictions': rows}
+        previous = self.history[-1]
+        order = previous.get('activity_display_order')
+        if order:
+            context['display_order'] = list(order)
+            position = previous.get('activity_position')
+            if position is not None and 1 <= position <= len(order):
+                context['selected_smiles'] = order[position - 1]
+        return context
 
     def followup(self, *, enable_tools, enable_rag=False, resolve_selection=None):
         if self.mixed_activity_discussion:
@@ -2007,6 +2019,29 @@ class WebTurnProjection:
                     'status': view['status']}
         return None
 
+    def _retain_acknowledged_results(self):
+        """Keep accepted facts from this connection; pending actions belong to their original turn."""
+        if not self.session_id or not self.history:
+            return
+        previous = self.history[-1]
+        descriptors = property_comparison.descriptor_context(self.history, self.session_id)
+        if descriptors:
+            self.entry['descriptor_carry'] = descriptors
+        for key, fields in (
+            ('activity_evidence', ('session_id', 'trace_id', 'query', 'smiles', 'observations')),
+            ('candidate_evidence', ('session_id', 'trace_id', 'query', 'candidates')),
+            ('target_function_evidence', ('session_id', 'uniprot_id', 'gene_symbol', 'function', 'source_url')),
+            ('target_structure_evidence', ('session_id', 'trace_id', 'structures', 'selected_structure_id',
+                                           'component', 'mechanism', 'binding_sites')),
+        ):
+            record = previous.get(key)
+            if isinstance(record, dict) and record.get('session_id') == self.session_id:
+                self.entry[key] = {field: record[field] for field in fields if field in record}
+        if 'activity_evidence' in self.entry:
+            for key in ('activity_display_order', 'activity_position', 'activity_conversion'):
+                if key in previous:
+                    self.entry[key] = previous[key]
+
     def capture(self, result, *, context, reverse_count=10, reverse_restricted=False):
         view = self._capture(result, context=context, reverse_count=reverse_count,
                              reverse_restricted=reverse_restricted)
@@ -2017,12 +2052,11 @@ class WebTurnProjection:
                 metrics = current.get('requested_metrics', [])
                 if len(metrics) == 1:
                     self.entry['descriptor_metric'] = {'mw': 'molecular_weight', 'logp': 'logp'}[metrics[0]]
-        if (result.outcome == RunOutcome.COMPLETED and not result.tool_results
+        if (self.acknowledgement and result.outcome == RunOutcome.COMPLETED and not result.tool_results
                 and context is not None and context.resolved_molecule is None
-                and re.fullmatch(r'\s*(?:谢谢(?:你)?|多谢|好的|好|收到|明白了)[。.!！]?\s*', self.query)):
-            carry = property_comparison.descriptor_context(self.history, self.session_id)
-            if carry:
-                self.entry['descriptor_carry'] = carry
+                and not result.metadata.get('waiting_for_input')):
+            self._retain_acknowledged_results()
+            return view
         from src.agent.contracts.concept_request import parse_ic50_ki_consultation
         consultation = parse_ic50_ki_consultation(self.query)
         if (consultation and self.session_id
