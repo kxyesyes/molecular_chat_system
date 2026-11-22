@@ -67,6 +67,30 @@ def test_confirmed_identity_supplies_properties_and_next_turn_evidence(tmp_path,
     assert history[-1]["user"] == followup
 
 
+def test_selected_card_takes_precedence_over_conversational_descriptor(tmp_path):
+    store, references, pointer = confirmed(tmp_path)
+    chat, properties = handler(store, references)
+    history = []
+    turn(chat, "请计算乙醇（SMILES: CCO）的分子量和 LogP。", history)
+    assert history[-1]["property_evidence"]["canonical_smiles"] == "CCO"
+    displayed = turn(chat, "刚才那个分子有多重来着？", history, reference=pointer)
+    assert "46.07" in displayed["content"] and properties.calls == ["CCO"]
+    answer = turn(chat, "刚才那个分子的分子量是多少来着？", history,
+                  reference=pointer, selection={"ordinal": 2})
+    assert properties.calls == ["CCO", "CCN"]
+    assert "45.08" in answer["content"] and "46.07" not in answer["content"]
+    same = turn(chat, "它的分子量是多少？不要重新计算。", history,
+                reference=pointer, selection={"ordinal": 2})
+    assert "45.08" in same["content"] and properties.calls == ["CCO", "CCN"]
+    read_only = turn(chat, "它的分子量是多少？不要重新计算。", history,
+                     reference=pointer, selection={"ordinal": 1})
+    assert read_only["status"] == "not_calculated" and properties.calls == ["CCO", "CCN"]
+    foreign = turn(chat, "刚才那个分子有多重来着？", history, owner="other",
+                   reference=pointer, selection={"ordinal": 2})
+    assert foreign["status"] == "rejected" and "45.08" not in foreign["content"]
+    assert properties.calls == ["CCO", "CCN"]
+
+
 @pytest.mark.parametrize("defect", ["foreign_identity", "missing_logp"])
 def test_resolved_identity_does_not_rescue_wrong_or_incomplete_observation(tmp_path, defect):
     class DefectiveProperties(RecordingProperties):
