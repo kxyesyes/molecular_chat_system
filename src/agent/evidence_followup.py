@@ -29,7 +29,7 @@ _PIC50_CONVERSION = re.compile(
     r'(?P<explain>解释为什么分类(?:和|与)回归结果不一致)))?'
     r'(?:\s*是多少)?[。.!！?？]?\s*', re.I)
 _PIC50_NATURAL_CONVERSION = re.compile(
-    r'\s*(?:这个|刚才的|上一轮的)\s*pIC50\s*(?:换算|转换)\s*(?:成|为)\s*'
+    r'\s*(?:请)?(?:把|将)?(?:这个|刚才的|上一轮的|它的|其)\s*pIC50\s*(?:换算|转换)\s*(?:成|为)\s*'
     r'(?:多少)?\s*(?P<unit>微摩尔|μM|µM|uM|nM)\s*[？?。.!！]?\s*', re.I)
 
 
@@ -302,6 +302,38 @@ def _render(smiles, observations, trace_id, tools, *, reused=False, activity_bou
             "status": "partial" if partial else "completed", "partial": partial}
 
 
+def _converted_activity(row, unit, explain):
+    value = row.get('predicted_pIC50')
+    try:
+        exponent = 9 if unit.lower() == 'nm' else 6
+        converted = 10 ** (exponent - value) if type(value) in (int, float) and math.isfinite(value) else None
+    except OverflowError:
+        converted = None
+    if converted is None or not math.isfinite(converted) or converted <= 0:
+        return {'final_answer': '上一轮没有可换算的有效 pIC50 预测值。',
+                'status': 'not_calculated', 'success': False}
+    review = _exclusion(row)
+    note = '；分类与回归不一致或证据不完整，需复核' if review else ''
+    if unit == '微摩尔':
+        unit = '微摩尔（μM）'
+    answer = (f"分子 `{_cell(row['smiles'])}` 对 {_cell(row['requested_target'])} 的预测 pIC50 "
+              f"为 {value:.6g}，按 IC50（{unit}）= 10^({exponent} − pIC50) 换算约为 {converted:.4g} {unit}{note}。"
+              '这是由模型预测值换算的浓度，表示预测的半数抑制浓度，不能作为实验测定结果。')
+    if explain:
+        from src.activity.family_contract import LABEL_THRESHOLD, PROBABILITY_THRESHOLD
+        probability = row.get('activity_probability')
+        answer += (f" 原始活性概率：{_cell(probability)}；预测分类：{_cell(row.get('activity_class'))}。"
+                   if probability is not None else ' 原始活性概率不可用。')
+        if (row.get('label_threshold') == LABEL_THRESHOLD
+                and row.get('probability_threshold') == PROBABILITY_THRESHOLD):
+            answer += (f' 分类概率阈值为 {PROBABILITY_THRESHOLD}，回归 pIC50 的活性标签阈值为 {LABEL_THRESHOLD}。'
+                       '分类与回归分别预测；不一致表示两者给出的活性标签不同，具体原因无法由这些结果确定，需复核并以实验验证。')
+        else:
+            answer += ' 未提供可验证的阈值信息，无法进一步解释一致性。'
+    return {'final_answer': answer, 'status': 'partial' if review else 'completed',
+            'success': not bool(review)}
+
+
 def followup_answer(query, history, session_id):
     """Return None outside the deliberately closed follow-up grammar."""
     from .activity_evidence_inspection import inspection_request, inspection_answer, valid_inspection_evidence
@@ -356,59 +388,53 @@ def followup_answer(query, history, session_id):
                   '是模型根据分类阈值得出的预测，并不证明没有抑制作用或实验活性。'
                   '需要核查模型适用域、预测误差和实验条件，并通过合适的实验验证。')
         return {'final_answer': answer, 'status': 'completed', 'success': True, 'activity_evidence': evidence}
+    last = history[-1] if history else {}
+    previous = last.get('activity_evidence')
+    owned = isinstance(previous, dict) and session_id and previous.get('session_id') == session_id
+    order = last.get('activity_display_order', ()) if owned else ()
+    current = last.get('activity_position') if order else None
     conversion = _PIC50_CONVERSION.fullmatch(query) or _PIC50_NATURAL_CONVERSION.fullmatch(query)
+    request = None
+    selector = None
+    position = current
     if conversion:
-        previous = history[-1].get('activity_evidence') if history else None
-        evidence = None
-        if isinstance(previous, dict) and previous.get('session_id') == session_id and session_id:
-            evidence = accepted_activity_evidence(
-                {'trace_id': previous.get('trace_id'), 'tool_result_sequence': previous.get('observations')},
-                previous.get('query', ''), session_id)
+        request = {'unit': conversion['unit'], 'explain': bool(conversion.groupdict().get('explain'))}
+        selector = conversion.groupdict().get('smiles')
+    elif owned and last.get('activity_conversion'):
+        from .activity_evidence_inspection import batch_reply_position
+        position = batch_reply_position(query, current)
+        if position is not None:
+            request = last['activity_conversion']
+        elif current is None and re.fullmatch(r'[A-Za-z0-9@+\-\[\]().=#\\/:%*]+', query.strip()):
+            if _canonical(query.strip()) is not None:
+                request, selector = last['activity_conversion'], query.strip()
+    if request:
+        evidence = accepted_activity_evidence(
+            {'trace_id': previous.get('trace_id'), 'tool_result_sequence': previous.get('observations')},
+            previous.get('query', ''), session_id) if owned else None
         if evidence is None or not valid_inspection_evidence(evidence):
             return {'final_answer': '无法确认上一轮的活性预测证据；请先完成对应分子和靶点的预测。',
                     'status': 'not_calculated', 'success': False}
         rows = evidence['observations'][0]['data']
-        selector = conversion.groupdict().get('smiles')
+        retained = {'activity_evidence': evidence, 'activity_conversion': request, 'activity_position': current}
+        if selector is None and position is not None:
+            if not 1 <= position <= len(order):
+                return {**retained, 'final_answer': '该序号不在本批展示的结果中，请指定已列出的序号或 SMILES。',
+                        'status': 'not_calculated', 'success': False}
+            selector = order[position - 1]
         if selector is not None:
             selected = _canonical(selector)
             rows = [row for row in rows if selected is not None and _canonical(row.get('smiles')) == selected]
             if len(rows) != 1:
-                return {'final_answer': '上一轮没有该分子对应的可验证活性预测；未改用其他分子。',
+                return {**retained, 'final_answer': '上一轮没有该分子对应的可验证活性预测；请核对 SMILES。',
                         'status': 'not_calculated', 'success': False}
         elif len(rows) != 1:
-            return {'final_answer': '上一轮包含多个分子，无法确定要换算哪一个；请明确指定分子。',
+            return {**retained, 'final_answer': '本批有多个分子，请指定要换算的分子序号或 SMILES。',
                     'status': 'not_calculated', 'success': False}
         row = rows[0]
-        value = row.get('predicted_pIC50')
-        try:
-            exponent = 9 if conversion.group('unit').lower() == 'nm' else 6
-            converted = 10 ** (exponent - value) if type(value) in (int, float) and math.isfinite(value) else None
-        except OverflowError:
-            converted = None
-        if converted is None or not math.isfinite(converted) or converted <= 0:
-            return {'final_answer': '上一轮没有可换算的有效 pIC50 预测值。',
-                    'status': 'not_calculated', 'success': False}
-        review = _exclusion(row)
-        note = '；分类与回归不一致或证据不完整，需复核' if review else ''
-        unit = conversion.group('unit')
-        if unit == '微摩尔':
-            unit = '微摩尔（μM）'
-        answer = (f"分子 `{_cell(row['smiles'])}` 对 {_cell(row['requested_target'])} 的预测 pIC50 "
-                  f"为 {value:.6g}，按 IC50（{unit}）= 10^({exponent} − pIC50) 换算约为 {converted:.4g} {unit}{note}。"
-                  '这是由模型预测值换算的浓度，表示预测的半数抑制浓度，不能作为实验测定结果。')
-        if conversion.groupdict().get('explain'):
-            from src.activity.family_contract import LABEL_THRESHOLD, PROBABILITY_THRESHOLD
-            probability = row.get('activity_probability')
-            answer += (f" 原始活性概率：{_cell(probability)}；预测分类：{_cell(row.get('activity_class'))}。"
-                       if probability is not None else ' 原始活性概率不可用。')
-            if (row.get('label_threshold') == LABEL_THRESHOLD
-                    and row.get('probability_threshold') == PROBABILITY_THRESHOLD):
-                answer += (f' 分类概率阈值为 {PROBABILITY_THRESHOLD}，回归 pIC50 的活性标签阈值为 {LABEL_THRESHOLD}。'
-                           '分类与回归分别预测；不一致表示两者给出的活性标签不同，具体原因无法由这些结果确定，需复核并以实验验证。')
-            else:
-                answer += ' 未提供可验证的阈值信息，无法进一步解释一致性。'
-        return {'final_answer': answer, 'status': 'partial' if review else 'completed',
-                'success': not bool(review), 'activity_evidence': evidence}
+        if row['smiles'] in order:
+            retained['activity_position'] = order.index(row['smiles']) + 1
+        return {**retained, **_converted_activity(row, **request)}
     species_question = re.fullmatch(
         r'(?:这个|刚才的|上一轮的)(?:(?:预测)?结果|预测值)能(?:否|不能|不可以|不能否|)说明\s*'
         r'(?P<smiles>该分子|这个分子|[A-Za-z0-9@+\-\[\]().=#\\/:%*]+)\s*对\s*人源\s*'
@@ -466,10 +492,6 @@ def followup_answer(query, history, session_id):
         return {'final_answer': f'对 `{proof.group(1)}` 和 `{proof.group(2)}` 的模型预测不能证明该分子没有实验活性；'
                 '需要结合模型适用范围并通过实验验证。', 'status': 'completed', 'success': True,
                 'activity_evidence': evidence}
-    last = history[-1] if history else {}
-    previous = last.get('activity_evidence')
-    owned = isinstance(previous, dict) and session_id and previous.get('session_id') == session_id
-    order = last.get('activity_display_order', ()) if owned else ()
     inspection = inspection_request(query, batch=last if order else None)
     concept = is_concept_explanation(query)
     if inspection is False and not concept:
@@ -497,13 +519,13 @@ def followup_answer(query, history, session_id):
                             'status': 'not_calculated', 'success': False}
                     if order and valid_inspection_evidence(evidence):
                         view.update(activity_evidence=evidence,
-                                    activity_consistency_position=last.get('activity_consistency_position'))
+                                    activity_position=last.get('activity_position'))
                     return view
                 single_position = len(positions) == 1 and not inspection['selectors'] and not inspection['all']
                 inspection['selectors'] += tuple(order[pos - 1] for pos in positions)
                 view = inspection_answer(evidence, inspection)
                 if single_position and 'activity_evidence' in view:
-                    view['activity_consistency_position'] = positions[0]
+                    view['activity_position'] = positions[0]
                 return view
             view = _render(evidence["smiles"], evidence["observations"], evidence["trace_id"],
                            ("activity_predictor",), reused=True)

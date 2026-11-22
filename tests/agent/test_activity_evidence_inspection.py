@@ -300,6 +300,36 @@ CONVERT = '把刚才预测的 pIC50 换算为 IC50（nM），并说明结果代�
 CONVERT_CCO = '把上一轮 CCO 的 pIC50 换算为 IC50（nM），并说明结果代表什么。'
 
 
+@pytest.mark.parametrize('reply', ['第二个', 'CCN'])
+def test_batch_conversion_keeps_unit_selection_and_pending_clarification(tmp_path, reply):
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+
+    def ask(query):
+        return turn(handler, query, history, SESSION)[0]
+
+    batch = '预测 CCO 和 CCN 对 BuChE 的活性。'
+    ask(batch)
+    ask('第二个分子的分类与回归是否一致？')
+    converted = ask('这个 pIC50 换算成多少微摩尔？')
+    assert 'CCN' in converted['content'] and '0.1995' in converted['content'] and '需复核' in converted['content']
+    first = ask('那第一个呢？')
+    assert first['status'] == 'completed' and '50.12' in first['content'] and 'μM' in first['content']
+    assert '序号' in ask('那第三个呢？')['content']
+    assert '50.12' in ask('那它呢？')['content']
+    assert len(activity.calls) == 1
+
+    ask(batch)
+    pending = ask('这个 pIC50 换算成多少 nM？')
+    assert pending['status'] == 'not_calculated' and '分子' in pending['content']
+    assert followup_answer(reply, history, 'another-session') is None
+    assert '序号' in ask('第三个')['content']
+    second = ask(reply)
+    assert second['status'] == 'partial' and '199.5 nM' in second['content'] and 'CCN' in second['content']
+    assert '5.012e+04 nM' in ask('那第一个呢？')['content']
+    assert len(activity.calls) == 2
+
+
 def test_conversion_to_micromolar_explains_disagreement_without_repredicting():
     query = '预测 CCN 对 BuChE 的活性'
     raw = accepted_result([prediction('CCN', 6.7, consistent=False)])

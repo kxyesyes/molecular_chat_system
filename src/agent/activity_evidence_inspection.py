@@ -66,6 +66,21 @@ def split_concept_prior_value(query):
     return concept_query, prior[0]
 
 
+def _position(number):
+    chinese = ('一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
+               '十一', '十二', '十三', '十四', '十五', '十六')
+    if number.isascii() and len(number) <= 2:
+        return int(number)
+    return chinese.index(number) + 1 if number in chinese else 0
+
+
+def batch_reply_position(query, current):
+    match = re.fullmatch(rf'\s*(?:那)?(?:第({_ORDINAL})个(?:分子)?|它)(?:呢)?[？?。]?\s*', query)
+    if match:
+        return _position(match[1]) if match[1] else current
+    return None
+
+
 def inspection_request(query, *, batch=None):
     """None: other intent; dict: supported selection; False: denied inspection.
 
@@ -75,8 +90,8 @@ def inspection_request(query, *, batch=None):
     if not isinstance(query, str):
         return None
     if batch:
-        follow = re.fullmatch(rf'\s*(?:那)?(?:第({_ORDINAL})个(?:分子)?|它)(?:呢)?[？?。]?\s*', query)
-        if follow and (position := follow[1] or batch.get('activity_consistency_position')):
+        position = batch_reply_position(query, batch.get('activity_position'))
+        if position is not None:
             query = f'第{position}个分子的分类与回归是否一致'
     clauses = [part.strip() for part in re.split(r'[，,；;。!?！？\n]|\.(?=\s|$)', query)
                if part.strip()]
@@ -93,11 +108,7 @@ def inspection_request(query, *, batch=None):
             selectors.extend(value for value in match.groups() if value is not None)
             all_candidates = all_candidates or bool(re.search(r'所有候选|全部候选|这些候选|它们', clause))
         elif ordinal := _ORDINAL_CONSISTENCY.fullmatch(clause):
-            number = ordinal['position']
-            chinese = ('一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
-                       '十一', '十二', '十三', '十四', '十五', '十六')
-            positions.append(int(number) if number.isascii() and len(number) <= 2 else
-                             chinese.index(number) + 1 if number in chinese else 0)
+            positions.append(_position(ordinal['position']))
             recognized = activity_inspection = True
         elif _EXPLAIN.fullmatch(clause) or _PRIOR_VALUE.fullmatch(clause):
             recognized = True

@@ -1999,8 +1999,9 @@ class WebTurnProjection:
                 self.entry['activity_evidence'] = deepcopy(view['activity_evidence'])
                 if self.history and 'activity_display_order' in self.history[-1]:
                     self.entry['activity_display_order'] = list(self.history[-1]['activity_display_order'])
-                if view.get('activity_consistency_position') is not None:
-                    self.entry['activity_consistency_position'] = view['activity_consistency_position']
+                for key in ('activity_position', 'activity_conversion'):
+                    if view.get(key) is not None:
+                        self.entry[key] = view[key]
             return {'content': view['final_answer'],
                     'summary_content': view.get('summary_answer', view['final_answer']),
                     'status': view['status']}
