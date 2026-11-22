@@ -956,10 +956,10 @@ class MolecularDockingService:
 
                 supplier = Chem.SDMolSupplier(ligand_path, removeHs=False)
                 molecule = supplier[0] if len(supplier) == 1 else None
+                # RDKit excludes neighboring H atoms from this count; any
+                # remaining atom-bound H still needs an explicit graph node.
                 needs_hydrogens = molecule is not None and any(
-                    atom.GetTotalNumHs(includeNeighbors=False)
-                    > sum(neighbor.GetAtomicNum() == 1 for neighbor in atom.GetNeighbors())
-                    for atom in molecule.GetAtoms()
+                    atom.GetTotalNumHs(includeNeighbors=False) > 0 for atom in molecule.GetAtoms()
                 )
                 if needs_hydrogens:
                     prepared = self._prepare_ligand_file_with_explicit_hs(

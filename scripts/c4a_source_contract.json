@@ -5,7 +5,7 @@
     "scripts/run_c4a_acceptance.py": "15e604baeefbd3a90174b38aa2de69e18d5098643bc480f4700350c663c3dc76",
     "src/agent/tools/molecular_docking.py": "ede89b0ae3413e748044e114b09662841adbe66f12ba95549a4dbf35f980be2a",
     "src/docking/adapters/base.py": "587b8c85889e57d833a435ba9a5bbd11ed55529d1361f6d5dbbf7a9884c7fbc0",
-    "src/docking/molecular_docking_service.py": "edc8a636bc72974ce5c692f6cfcd6c3f8f9f98910d3c14e9558de2346183a293",
+    "src/docking/molecular_docking_service.py": "036e4febd950c0c789be793d9c5730a55c3948ac9adcf33829d39e2e885710c3",
     "src/task_runtime/backends/local.py": "c0826225dbd8b639af4ed27bf1891335fab3398e82bc621b86913d4abe114720",
     "src/task_runtime/docking_consent.py": "8d678cde3a2e37ec43f33d0ab87957c5a72566f09f41e075d3cf972a5d2be466",
     "src/task_runtime/docking_execution.py": "b07407bc1fc9ae28c6f48486201a8d9bdfccc07054a052408f0d48e171912d72",
