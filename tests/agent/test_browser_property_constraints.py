@@ -111,6 +111,32 @@ def test_batch_property_followup_reuses_evidence_after_lipinski():
     assert WebTurnProjection(natural + '再预测活性。', 's', [turn.entry]).followup(enable_tools=True) is None
 
 
+def test_compare_entire_batch_after_courtesy_without_changing_row_order():
+    from src.web.property_comparison import batch_property_followup
+    rows = [{'smiles': s, 'logp': p} for s, p in [('CCC', 1.4163), ('CCN', -0.03499), ('CCO', -0.0014)]]
+    batch = {'session_id': 'owner', 'trace_id': 'batch', 'evidence_id': 'e', 'rows': rows}
+    previous = [{'descriptor_carry': {'batch_property_evidence': batch, 'batch_property_evidence_reused': True}}]
+    query = '这批分子，哪个 logP 最低？'
+    answer, update = batch_property_followup(query, previous, 'owner')
+    assert answer['status'] == 'completed' and '`CCN` 的 LogP 最低' in answer['content']
+    assert answer['content'].index('CCC') < answer['content'].index('CCN') < answer['content'].index('CCO')
+    assert update['batch_property_evidence'] == batch
+    foreign, _ = batch_property_followup(query, previous, 'other')
+    assert foreign['status'] == 'not_calculated' and 'CCN' not in foreign['content']
+
+
+def test_batch_ordinals_cover_all_supported_rows_and_reject_missing_row():
+    from src.web.property_comparison import recorded_descriptor
+    rows = [{'smiles': 'C' * i, 'logp': i / 10} for i in range(1, 17)]
+    batch = {'session_id': 's', 'trace_id': 't', 'evidence_id': 'e', 'rows': rows}
+    history = [{'agent_used': True, 'batch_property_evidence': batch, 'descriptor_metric': 'logp'}]
+    chosen = recorded_descriptor('那第十六个呢？', history, 's')
+    assert chosen['history_update']['property_evidence']['canonical_smiles'] == rows[-1]['smiles']
+    invalid = recorded_descriptor('那第17个呢？', [chosen['history_update']], 's')
+    assert invalid['status'] == 'not_calculated'
+    assert invalid['history_update']['property_evidence'] == chosen['history_update']['property_evidence']
+
+
 def test_batch_lipinski_does_not_trust_incomplete_or_rounded_evidence():
     from copy import deepcopy
     from src.web.property_comparison import accepted_batch_property_evidence, batch_lipinski_followup

@@ -248,6 +248,7 @@ class WebTurnProjection:
         self.property_explanation = None
         self.property_calculation_query = None
         self.descriptor_repeat_of = None
+        self.repeated_batch = None
         self.property_bound_question = False
         pka_partial = re.fullmatch(
             r'(.+?)[，,]\s*并预测(?:它|其|该分子)的\s*pKa\s*(?:和|及|与)\s*'
@@ -551,6 +552,7 @@ class WebTurnProjection:
             evidence = prior.get('property_evidence')
             metric = {'molecular_weight': '分子量', 'logp': 'LogP'}.get(prior.get('descriptor_metric'))
             if evidence and (metric or evidence.get('requested_metrics')):
+                self.repeated_batch = prior.get('batch_property_evidence')
                 fields = metric or ' 和 '.join('分子量' if key == 'mw' else 'LogP'
                                               for key in evidence['requested_metrics'])
                 if resolve_selection is None:
@@ -2003,6 +2005,13 @@ class WebTurnProjection:
     def capture(self, result, *, context, reverse_count=10, reverse_restricted=False):
         view = self._capture(result, context=context, reverse_count=reverse_count,
                              reverse_restricted=reverse_restricted)
+        if self.repeated_batch and result.outcome == RunOutcome.COMPLETED and 'property_evidence' in self.entry:
+            current = self.entry['property_evidence']
+            if any(row['smiles'] == current['canonical_smiles'] for row in self.repeated_batch['rows']):
+                self.entry['batch_property_evidence'] = self.repeated_batch
+                metrics = current.get('requested_metrics', [])
+                if len(metrics) == 1:
+                    self.entry['descriptor_metric'] = {'mw': 'molecular_weight', 'logp': 'logp'}[metrics[0]]
         if (result.outcome == RunOutcome.COMPLETED and not result.tool_results
                 and context is not None and context.resolved_molecule is None
                 and re.fullmatch(r'\s*(?:谢谢(?:你)?|多谢|好的|好|收到|明白了)[。.!！]?\s*', self.query)):
