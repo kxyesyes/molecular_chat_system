@@ -267,6 +267,34 @@ def test_descriptor_recall_asks_for_batch_member_and_accepts_short_reply(tmp_pat
     asyncio.run(run())
 
 
+def test_batch_descriptor_focus_and_comparison_survive_readbacks(tmp_path):
+    properties = Properties()
+    handler, sender = local_case(tmp_path, tools=[properties])
+
+    async def run():
+        async def ask(query, *expected):
+            answer, _ = await invoke(handler, sender, query)
+            assert all(text in answer['content'] for text in expected), answer
+            return answer
+
+        await ask('比较 CCO 和 CCN 的分子量和 LogP。', 'CCO', 'CCN')
+        await ask('刚才那个分子有多重？', '多个分子')
+        await ask('第二个', 'CCN', '45.08')
+        await ask('那第一个呢？', 'CCO', '46.07')
+        await ask('它的分子量是多少？', 'CCO', '46.07')
+        await ask('谢谢！')
+        await ask('刚才那两个，哪个 logP 更低？差多少？', 'CCN', '0.034')
+        assert properties.calls == ['CCO\nCCN']
+        await ask('重新算一次', 'CCO', '46.07')
+        await ask('那第二个呢？', 'CCN', '45.08')
+        assert properties.calls == ['CCO\nCCN', 'CCO']
+        await ask('比较 CCN 和 CCC 的分子量和 LogP。', 'CCN', 'CCC')
+        await ask('第一个的分子量是多少？', 'CCN', '45.08')
+        assert properties.calls == ['CCO\nCCN', 'CCO', 'CCN\nCCC']
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('query', ['帮我分析一下分子性质', '帮我算一下这个分子的性质'])
 def test_missing_structure_has_a_new_request_hint_when_no_continuation_is_available(tmp_path, query):
     from tests.agent.pi_web_support import run_web_turn
