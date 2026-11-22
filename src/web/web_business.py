@@ -247,6 +247,7 @@ class WebTurnProjection:
             else activity_inspection_view)
         self.property_explanation = None
         self.property_calculation_query = None
+        self.descriptor_repeat_of = None
         self.property_bound_question = False
         pka_partial = re.fullmatch(
             r'(.+?)[，,]\s*并预测(?:它|其|该分子)的\s*pKa\s*(?:和|及|与)\s*'
@@ -475,7 +476,7 @@ class WebTurnProjection:
             rows.append(row)
         return {'scope': 'last_activity_observations', 'predictions': rows}
 
-    def followup(self, *, enable_tools, enable_rag=False):
+    def followup(self, *, enable_tools, enable_rag=False, resolve_selection=None):
         if self.mixed_activity_discussion:
             return None
         from src.literature.model_sources import model_source_followup
@@ -524,12 +525,41 @@ class WebTurnProjection:
             if isinstance(prior, dict) and self.session_id and prior.get('session_id') == self.session_id:
                 self.entry['ic50_ki_consultation'] = deepcopy(prior)
                 return {'content': _IC50_KI_CONDITIONS, 'status': 'completed'}
-        descriptor = property_comparison.recorded_descriptor(self.query, self.history, self.session_id)
-        if descriptor is not None:
-            evidence = descriptor.pop('reused_evidence', None)
-            if evidence is not None:
-                self.entry['property_evidence'] = deepcopy(evidence)
-            return descriptor
+        if resolve_selection is not None:
+            question = property_comparison.DescriptorQuestion.parse(self.query)
+            if question and question.unnamed:
+                metric = 'LogP' if question.metric == 'logp' else '分子量'
+                operation = f'只计算所选分子的{metric}。'
+                selected = resolve_selection(operation)
+                if selected is not None:
+                    descriptor = property_comparison.recorded_descriptor(self.query, self.history, self.session_id,
+                        selected_smiles=selected.canonical_smiles)
+                    if descriptor and descriptor['status'] == 'completed':
+                        self.entry.update(descriptor.pop('history_update'))
+                        return descriptor
+                if question.read_only or not enable_tools:
+                    return {'content': '当前选中的候选需要核对性质。请允许计算后再查询。', 'status': 'not_calculated'}
+                self.property_calculation_query = operation
+                return None
+        else:
+            descriptor = property_comparison.recorded_descriptor(self.query, self.history, self.session_id)
+            if descriptor is not None:
+                self.entry.update(descriptor.pop('history_update', {}))
+                return descriptor
+        if enable_tools and re.fullmatch(r'\s*(?:请)?(?:重新|再)(?:计算|算)(?:一次|一遍)[。.!！]?\s*', self.query):
+            prior = property_comparison.descriptor_context(self.history, self.session_id)
+            evidence = prior.get('property_evidence')
+            metric = {'molecular_weight': '分子量', 'logp': 'LogP'}.get(prior.get('descriptor_metric'))
+            if evidence and (metric or evidence.get('requested_metrics')):
+                fields = metric or ' 和 '.join('分子量' if key == 'mw' else 'LogP'
+                                              for key in evidence['requested_metrics'])
+                if resolve_selection is None:
+                    self.contextual_property = True
+                    self.property_calculation_query = f"计算 {evidence['canonical_smiles']} 的{fields}。"
+                else:
+                    self.property_calculation_query = f'只计算所选分子的{fields}。'
+                    self.descriptor_repeat_of = evidence['trace_id']
+                return None
         salt_question = re.fullmatch(
             r'\s*(?:刚才|上一轮)的分子量包含氯离子吗[？?]\s*'
             r'这个\s*log\s*p\s*能否直接作为游离碱的实验分配系数[？?。]?\s*', self.query, re.I)
@@ -1973,6 +2003,12 @@ class WebTurnProjection:
     def capture(self, result, *, context, reverse_count=10, reverse_restricted=False):
         view = self._capture(result, context=context, reverse_count=reverse_count,
                              reverse_restricted=reverse_restricted)
+        if (result.outcome == RunOutcome.COMPLETED and not result.tool_results
+                and context is not None and context.resolved_molecule is None
+                and re.fullmatch(r'\s*(?:谢谢(?:你)?|多谢|好的|好|收到|明白了)[。.!！]?\s*', self.query)):
+            carry = property_comparison.descriptor_context(self.history, self.session_id)
+            if carry:
+                self.entry['descriptor_carry'] = carry
         from src.agent.contracts.concept_request import parse_ic50_ki_consultation
         consultation = parse_ic50_ki_consultation(self.query)
         if (consultation and self.session_id
@@ -2338,6 +2374,10 @@ class WebTurnProjection:
             properties = property_comparison.accepted_property_evidence(raw, query, self.session_id)
             self.entry['agent_used'] = True
             if properties is not None:
+                metrics = context.metadata.get('metrics', ())
+                if (context.metadata.get('required_tools') == ['property_calculator']
+                        and metrics and set(metrics) <= {'mw', 'logp'}):
+                    properties['requested_metrics'] = list(metrics)
                 self.entry['property_evidence'] = properties
             batch_properties = property_comparison.accepted_batch_property_evidence(raw, query, self.session_id)
             if batch_properties is not None:
@@ -2617,6 +2657,13 @@ class WebTurnProjection:
         self.entry['agent_used'] = True
         properties = property_comparison.accepted_property_evidence(eligible, query, self.session_id)
         if properties is not None:
+            if (context.resolved_molecule is not None and len(raw['tool_result_sequence']) == 1
+                    and raw['tool_result_sequence'][0]['tool_name'] == 'property_calculator'):
+                from .scientific_obligations import requested_descriptor_metrics
+                from src.agent.planning.request_parsing import positive_intent_text
+                metrics = requested_descriptor_metrics(positive_intent_text(context.query))
+                if metrics and set(metrics) <= {'mw', 'logp'}:
+                    properties['requested_metrics'] = list(metrics)
             self.entry['property_evidence'] = properties
         activity = evidence_followup.accepted_activity_evidence(eligible, query, self.session_id)
         if activity is not None:

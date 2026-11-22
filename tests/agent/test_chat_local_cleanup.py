@@ -195,6 +195,78 @@ def test_descriptor_readback_does_not_cross_sessions_or_consume_a_new_operation(
     assert '0.000' in recorded_descriptor(question, history, 'owner')['content']
 
 
+def test_repeat_previous_descriptor_calculation_without_intermediate_readback(tmp_path):
+    properties = Properties()
+    handler, sender = local_case(tmp_path, tools=[properties])
+
+    async def run():
+        await invoke(handler, sender, '请计算乙醇（SMILES: CCO）的分子量和 LogP。')
+        first = sender.scientific_memory[-1]['property_evidence']
+        await invoke(handler, sender, '谢谢')
+        answer, _ = await invoke(handler, sender, '请再算一遍')
+        assert properties.calls == ['CCO', 'CCO']
+        assert answer['status'] == 'completed'
+        repeated = sender.scientific_memory[-1]['property_evidence']
+        assert repeated['canonical_smiles'] == 'CCO' and repeated['trace_id'] != first['trace_id']
+        assert set(repeated['requested_metrics']) == set(first['requested_metrics']) == {'logp', 'mw'}
+
+    asyncio.run(run())
+
+
+def test_conversational_descriptor_recall_and_explicit_rerun(tmp_path):
+    properties = Properties()
+    handler, sender = local_case(tmp_path, tools=[properties])
+
+    async def run():
+        await invoke(handler, sender, '请计算乙醇（SMILES: CCO）的分子量和 LogP。')
+        for question, value in [
+            ('刚才那个分子的分子量是多少来着？', '46.07'),
+            ('前面那个分子有多重来着？', '46.07'),
+            ('那 logP 呢？', '-0.001'),
+            ('它的 logP 是多少来着？', '-0.001'),
+        ]:
+            answer, _ = await invoke(handler, sender, question)
+            assert answer['status'] == 'completed' and value in answer['content']
+        await invoke(handler, sender, '谢谢！')
+        await invoke(handler, sender, '好的')
+        answer, _ = await invoke(handler, sender, '使用刚才的结果，乙醇的分子量是多少？不要重新计算。')
+        assert '46.07' in answer['content'] and properties.calls == ['CCO']
+        again, _ = await invoke(handler, sender, '重新算一次')
+        assert again['status'] == 'completed' and properties.calls == ['CCO', 'CCO']
+        await invoke(handler, sender, '请计算 SMILES: C1CC 的分子量。')
+        await invoke(handler, sender, '谢谢')
+        after_failure, _ = await invoke(handler, sender, '它的分子量是多少？')
+        assert '46.07' not in after_failure['content']
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('selection', ['第二个', '2', 'CCN', '乙胺'])
+def test_descriptor_recall_asks_for_batch_member_and_accepts_short_reply(tmp_path, selection):
+    properties = Properties()
+    handler, sender = local_case(tmp_path, tools=[properties])
+
+    async def run():
+        initial, _ = await invoke(handler, sender, '比较乙醇（SMILES: CCO）和乙胺（SMILES: CCN）的分子量和 LogP。')
+        assert initial['status'] == 'completed'
+        calls = list(properties.calls)
+        question, _ = await invoke(handler, sender, '刚才那个分子有多重来着？')
+        assert 'CCO' in question['content'] and 'CCN' in question['content']
+        assert '乙醇' in question['content'] and '乙胺' in question['content']
+        assert '46.07' not in question['content'] and '45.08' not in question['content']
+        answer, _ = await invoke(handler, sender, selection)
+        assert answer['status'] == 'completed' and 'CCN' in answer['content'] and '45.08' in answer['content']
+        assert properties.calls == calls
+        await invoke(handler, sender, '请计算 CCC 的分子量。')
+        latest, _ = await invoke(handler, sender, '前面那个分子有多重来着？')
+        assert '44.10' in latest['content'] and '45.08' not in latest['content']
+        await invoke(handler, sender, '介绍一下氢键')
+        unrelated, _ = await invoke(handler, sender, '刚才那个分子有多重来着？')
+        assert '44.10' not in unrelated['content']
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('query', ['帮我分析一下分子性质', '帮我算一下这个分子的性质'])
 def test_missing_structure_has_a_new_request_hint_when_no_continuation_is_available(tmp_path, query):
     from tests.agent.pi_web_support import run_web_turn

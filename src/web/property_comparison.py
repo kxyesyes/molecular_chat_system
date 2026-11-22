@@ -6,6 +6,7 @@ import math
 import re
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 
 from src.agent.planning.request_parsing import positive_intent_text, restricted_properties
 from src.agent.utils.validators import InputValidator
@@ -53,32 +54,106 @@ def _adjacent_molecule_label(query, smiles):
     return label
 
 
-def recorded_descriptor(query, history, session_id):
-    """Read a requested value from the immediately preceding, session-bound record."""
-    if deictic_property_match(query):
-        # The property workflow resolves this structure or asks which molecule to use.
+_DESCRIPTOR_QUESTION = re.compile(
+    r'(?:请问\s*|请\s*)?(?P<prior>(?:使用|根据|基于|查看)?\s*(?:刚才|上轮|上一轮|之前|前面)的?'
+    r'(?:(?:计算)?(?:结果|记录)[，,：:]\s*)?)?'
+    r'(?P<subject>[\w-]{1,80}?)?(?:的)?\s*'
+    r'(?:(?P<metric>分子量|MW|log\s*P)\s*(?:分别)?(?:是多少|为多少|多少|呢)|有多重)'
+    r'(?:来着)?[？?。]?\s*(?P<read_only>(?:请)?(?:不要|不用|无需)重新计算[。.!！]?)?', re.I)
+_DEICTIC = ('它', '那', '这个', '那个', '该分子', '这个分子', '那个分子')
+_ORDINALS = ('第一个', '第二个', '第三个', '第四个', '第五个', '第六个', '第七个', '第八个', '第九个', '第十个')
+_NAMED_COMPARISON_MEMBER = re.compile(
+    r'(?:^\s*(?:请)?(?:比较|对比)|(?<=）)\s*(?:和|与|、))\s*'
+    r'(?P<label>[\w-]{1,80})\s*（\s*(?:SMILES\s*[:：=]\s*)?(?P<smiles>[!-~]+?)\s*）', re.I)
+
+
+def descriptor_context(history, session_id):
+    """Only the immediately preceding turn can hand off a verified record."""
+    previous = history[-1] if history else {}
+    context = previous.get('descriptor_carry', previous)
+    for field in ('property_evidence', 'batch_property_evidence'):
+        record = context.get(field)
+        if (session_id and isinstance(record, dict) and record.get('session_id') == session_id
+                and record.get('trace_id') and record.get('evidence_id')):
+            return {field: record, 'descriptor_metric': context.get('descriptor_metric')}
+    return {}
+
+
+@dataclass(frozen=True)
+class DescriptorQuestion:
+    subject: str | None
+    metric: str
+    prior: bool
+    read_only: bool
+
+    @property
+    def unnamed(self):
+        return self.subject is None or self.subject in _DEICTIC
+
+    @classmethod
+    def parse(cls, query):
+        match = _DESCRIPTOR_QUESTION.fullmatch(query.strip())
+        if match:
+            metric = 'logp' if (match['metric'] or '').lower().startswith('log') else 'molecular_weight'
+            return cls(match['subject'], metric, bool(match['prior']), bool(match['read_only']))
+
+
+def recorded_descriptor(query, history, session_id, *, selected_smiles=None):
+    context = descriptor_context(history, session_id)
+    single = context.get('property_evidence')
+    batch = context.get('batch_property_evidence')
+    rows = batch['rows'] if batch else []
+    if selected_smiles:
+        if single and single.get('canonical_smiles') != selected_smiles:
+            return None
+        rows = [row for row in rows if row['smiles'] == selected_smiles]
+        if not single and not rows:
+            return None
+    query = query.strip()
+    question = DescriptorQuestion.parse(query)
+    if question:
+        subject, key = selected_smiles or question.subject, question.metric
+        if not question.prior and subject not in _DEICTIC:
+            records = [single] if single else rows
+            if not subject or not any(subject in (r.get('smiles'), r.get('canonical_smiles'),
+                                                  r.get('molecule_label')) for r in records):
+                return None
+    elif rows and context.get('descriptor_metric'):
+        # A short answer is a selection only while this particular question is open.
+        subject = query.rstrip('。！？!?')
+        key = context['descriptor_metric']
+    else:
         return None
-    match = re.fullmatch(
-        r'\s*(?:请问\s*|请\s*)?(?P<prior>(?:使用|根据|基于|查看)?\s*(?:刚才|上轮|上一轮|之前)的?'
-        r'(?:(?:计算)?(?:结果|记录)[，,：:]\s*)?)?(?:(?P<subject>[\w-]{1,80})的\s*)?'
-        r'(?P<metric>分子量|MW|log\s*P)\s*(?:分别)?(?:是多少|为多少)[？?。]?'
-        r'\s*(?:(?:请)?(?:不要|不用|无需)重新计算[。.!！]?)?\s*', query, re.I)
-    deictic = ('它', '该分子', '这个分子')
-    if not match or (not match['prior'] and match['subject'] not in deictic):
-        return None
-    evidence = history[-1].get('property_evidence') if history else None
-    key = 'logp' if match['metric'].lower().startswith('log') else 'molecular_weight'
-    if (not session_id or not isinstance(evidence, dict) or evidence.get('session_id') != session_id
-            or not evidence.get('trace_id') or not evidence.get('evidence_id')
-            or not evidence.get('canonical_smiles') or type(evidence.get(key)) not in (int, float)
-            or not math.isfinite(evidence[key]) or match['subject'] not in (
-                None, *deictic, evidence.get('canonical_smiles'), evidence.get('molecule_label'))):
-        return {'content': '上一轮没有可与该分子对应的性质记录，请核对分子名称或 SMILES。',
-                'status': 'not_calculated'}
-    value = (f"logP 为 {evidence[key]:.3f}" if key == 'logp'
-             else f"分子量为 {evidence[key]:.2f} Da")
-    return {'content': f"上一轮结构 `{evidence['canonical_smiles']}` 的计算{value}。",
-            'status': 'completed', 'reused_evidence': evidence}
+
+    if rows:
+        selected = [r for i, r in enumerate(rows, 1) if subject and subject in (
+            r['smiles'], r.get('molecule_label'), str(i), f'第{i}个',
+            _ORDINALS[i - 1] if i <= len(_ORDINALS) else None)]
+        if len(selected) == 1:
+            row = selected[0]
+            single = {k: batch[k] for k in ('session_id', 'trace_id', 'evidence_id')}
+            single.update(row, canonical_smiles=row['smiles'])
+        elif len(selected) > 1 or (question and question.unnamed):
+            choices = []
+            for i, row in enumerate(rows, 1):
+                label = row.get('molecule_label')
+                name = f"{label}（{row['smiles']}）" if label else row['smiles']
+                choices.append(f'{i}. {name}')
+            metric = 'LogP' if key == 'logp' else '分子量'
+            return {'status': 'not_calculated', 'content': f'有多个分子，你想查看哪个的{metric}？'
+                    + '；'.join(choices) + '。可回复序号、名称或 SMILES。',
+                    'history_update': {'batch_property_evidence': batch, 'descriptor_metric': key}}
+        elif not question:
+            return None
+    if (not single or not single.get('canonical_smiles') or type(single.get(key)) not in (int, float)
+            or not math.isfinite(single[key]) or (not rows and subject not in (
+                None, *_DEICTIC, single.get('canonical_smiles'), single.get('molecule_label')))):
+        if not context and deictic_property_match(query):
+            return None
+        return {'content': '没有可与该分子对应的性质记录，请核对分子名称或 SMILES。', 'status': 'not_calculated'}
+    value = (f"logP 为 {single[key]:.3f}" if key == 'logp' else f"分子量为 {single[key]:.2f} Da")
+    return {'content': f"结构 `{single['canonical_smiles']}` 的计算{value}。", 'status': 'completed',
+            'history_update': {'property_evidence': single, 'descriptor_metric': key}}
 
 
 def corrected_property_query(query, history):
@@ -274,6 +349,10 @@ def accepted_batch_property_evidence(result, query, session_id):
         if any(type(value) not in (int, float) or not math.isfinite(value) for value in values.values()):
             return None
         rows[canonical] = values
+    labels = {m['smiles']: m['label'] for m in _NAMED_COMPARISON_MEMBER.finditer(query)}
+    for identity in identities:
+        if identity.smiles in labels:
+            rows[identity.canonical_smiles]['molecule_label'] = labels[identity.smiles]
     return {'session_id': session_id, 'trace_id': result['trace_id'],
             'evidence_id': sequence[0]['quality']['evidence_id'],
             'rows': [{'smiles': smiles, **rows[smiles]} for smiles in expected]}

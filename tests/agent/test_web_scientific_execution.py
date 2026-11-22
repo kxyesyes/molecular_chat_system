@@ -684,7 +684,7 @@ def test_explicit_generation_only_respects_prediction_exclusions():
 
 @pytest.mark.parametrize('first,expected', [
     ('计算 CCO 的 LogP。', 'completed'),
-    ('计算 CCO 和 CCN 的 LogP。', 'rejected'),
+    ('计算 CCO 和 CCN 的 LogP。', 'not_calculated'),
 ])
 def test_property_followup_resolves_only_one_prior_molecule(actual_app, first, expected):
     async def run():
@@ -699,12 +699,13 @@ def test_property_followup_resolves_only_one_prior_molecule(actual_app, first, e
 
     result = asyncio.run(run())
     assert result['status'] == expected
+    assert result['tool_result_sequence'] == []
     if expected == 'completed':
-        assert result['metadata']['workflow_version'] == 'web-property-v1'
-        assert len(result['tool_result_sequence']) == 1
-        assert result['tool_result_sequence'][0]['tool_name'] == 'property_calculator'
         assert 'CCO' in json.dumps(result, ensure_ascii=False)
         assert '46.07' in json.dumps(result, ensure_ascii=False)
+    else:
+        assert all(smiles in result['final_answer'] for smiles in ('CCO', 'CCN'))
+        assert '46.07' not in result['final_answer']
 
 
 def test_property_followup_uses_most_recent_single_molecule(actual_app):
@@ -743,6 +744,7 @@ def test_ambiguous_property_followup_asks_for_a_structure(actual_app):
     assert 'LogP' in rendered
     assert '候选集合' not in rendered
     assert resumed['status'] == 'completed'
+    assert result['tool_result_sequence'] == resumed['tool_result_sequence'] == []
     assert 'CCN' in json.dumps(resumed, ensure_ascii=False)
     assert 'CCO' not in json.dumps(resumed, ensure_ascii=False)
 

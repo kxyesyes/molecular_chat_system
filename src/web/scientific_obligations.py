@@ -624,7 +624,7 @@ _UNSUPPORTED_CAPABILITIES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-def _requested_metrics(query: str) -> tuple[Metric, ...]:
+def requested_descriptor_metrics(query: str) -> tuple[Metric, ...]:
     requested = tuple(
         metric
         for metric, patterns in _METRIC_PATTERNS
@@ -1026,7 +1026,7 @@ class ScientificObligationCompiler:
         """Freeze the same reviewed obligations before the subject is supplied."""
         if self.compile(query).status != 'clarification':
             raise ScientificObligationError('Molecular clarification is not applicable.')
-        return _requested_tools(query, _requested_metrics(query),
+        return _requested_tools(query, requested_descriptor_metrics(query),
                                 admet_requested=_explicit_admet_request(query))
 
     @staticmethod
@@ -1103,7 +1103,7 @@ class ScientificObligationCompiler:
         if (_explicit_admet_request(positive)
                 and not _PROPERTY_REQUEST.search(positive)
                 and not _DRUG_LIKENESS_REQUEST.search(positive)
-                and not _requested_metrics(positive)
+                and not requested_descriptor_metrics(positive)
                 and not re.search(r'分子|\bmolecule\b', positive, re.I)
                 and not InputValidator().extract_potential_smiles_candidates(query)):
             # Domain prose such as BBB/PPB or CNS/PK is not a molecular
@@ -1155,7 +1155,7 @@ class ScientificObligationCompiler:
         return bool(
             _PROFILE_ACTION.search(query)
             and (
-                _requested_metrics(query)
+                requested_descriptor_metrics(query)
                 or _unreviewed_metric_capabilities(query)
                 or _explicit_admet_request(query)
             )
@@ -1252,7 +1252,7 @@ class ScientificObligationCompiler:
                 original_query=original_query,
                 missing_capabilities=unsupported + unreviewed_metrics,
             )
-        metrics = _requested_metrics(original_query)
+        metrics = requested_descriptor_metrics(original_query)
         required_tools = _requested_tools(
             original_query,
             metrics,

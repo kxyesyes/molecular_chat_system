@@ -595,8 +595,8 @@ def web_scientific_display(result, *, concise=False, requested_admet_endpoints=(
         request = requirements.get('request') or {}
         query = request.get('query')
         if metrics is None and isinstance(query, str):
-            from .scientific_obligations import _requested_metrics
-            metrics = _requested_metrics(query)
+            from .scientific_obligations import requested_descriptor_metrics
+            metrics = requested_descriptor_metrics(query)
     lines = []
     for block in observations:
         name, data = block['tool'], block.get('data')
