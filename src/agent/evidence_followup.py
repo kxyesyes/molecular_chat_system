@@ -466,7 +466,11 @@ def followup_answer(query, history, session_id):
         return {'final_answer': f'对 `{proof.group(1)}` 和 `{proof.group(2)}` 的模型预测不能证明该分子没有实验活性；'
                 '需要结合模型适用范围并通过实验验证。', 'status': 'completed', 'success': True,
                 'activity_evidence': evidence}
-    inspection = inspection_request(query)
+    last = history[-1] if history else {}
+    previous = last.get('activity_evidence')
+    owned = isinstance(previous, dict) and session_id and previous.get('session_id') == session_id
+    order = last.get('activity_display_order', ()) if owned else ()
+    inspection = inspection_request(query, batch=last if order else None)
     concept = is_concept_explanation(query)
     if inspection is False and not concept:
         return {'final_answer': '本次只读追问包含无法对应到已有活性记录的要求；未重新计算。'
@@ -475,8 +479,7 @@ def followup_answer(query, history, session_id):
                 'status': 'not_calculated', 'success': False}
     if inspection is None and not _FOLLOWUP.fullmatch(query):
         return None
-    previous = history[-1].get("activity_evidence") if history else None
-    if isinstance(previous, dict) and previous.get("session_id") == session_id and session_id:
+    if owned:
         # Recheck detached data; never trust a history flag or assistant prose.
         result = {"trace_id": previous.get("trace_id"), "tool_result_sequence": previous.get("observations")}
         evidence = accepted_activity_evidence(result, previous.get("query", ""), session_id)
@@ -488,13 +491,20 @@ def followup_answer(query, history, session_id):
                     return None
                 return inspection_answer(evidence, {'selectors': (), 'all': True})
             if inspection is not None:
-                if inspection.get('positions'):
-                    order = history[-1].get('activity_display_order', ())
-                    if any(not 1 <= pos <= len(order) for pos in inspection['positions']):
-                        return {'final_answer': '无法将该序号对应到上一轮展示的活性结果；请指定分子 SMILES。',
-                                'status': 'not_calculated', 'success': False}
-                    inspection['selectors'] += tuple(order[pos - 1] for pos in inspection['positions'])
-                return inspection_answer(evidence, inspection)
+                positions = inspection.get('positions', ())
+                if any(not 1 <= pos <= len(order) for pos in positions):
+                    view = {'final_answer': '该序号不在本批展示的活性结果中，请指定已列出的序号或 SMILES。',
+                            'status': 'not_calculated', 'success': False}
+                    if order and valid_inspection_evidence(evidence):
+                        view.update(activity_evidence=evidence,
+                                    activity_consistency_position=last.get('activity_consistency_position'))
+                    return view
+                single_position = len(positions) == 1 and not inspection['selectors'] and not inspection['all']
+                inspection['selectors'] += tuple(order[pos - 1] for pos in positions)
+                view = inspection_answer(evidence, inspection)
+                if single_position and 'activity_evidence' in view:
+                    view['activity_consistency_position'] = positions[0]
+                return view
             view = _render(evidence["smiles"], evidence["observations"], evidence["trace_id"],
                            ("activity_predictor",), reused=True)
             if valid_inspection_evidence(evidence):
