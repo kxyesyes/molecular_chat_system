@@ -71,6 +71,41 @@ def test_activity_consistency_followup_uses_delivered_row(tmp_path, position, sm
         assert ('不一致' if smiles == 'CCN' else '一致') in result['display_answer']
 
 
+@pytest.mark.parametrize('first,second', [('二', '一'), ('一', '二')])
+def test_activity_batch_switches_candidate_without_losing_consistency_question(tmp_path, first, second):
+    from tests.agent.pi_web_support import run_web_turn
+
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+
+    def ask(query):
+        _, frames = run_web_turn(handler, query, history, SESSION, result_format='summary_details_v1')
+        return next(frame for frame in frames if frame['type'] == 'agent_result')
+
+    ask('预测 CCO 和 CCN 对 BuChE 的活性。')
+    rows = {'一': ('CCO', '0.13', '4.3', '一致'), '二': ('CCN', '0.21', '6.7', '不一致')}
+    for query, position in [(f'第{first}个分子的分类与回归是否一致？', first),
+                            (f'那第{second}个呢？', second),
+                            ('那第3个呢？', None), ('那它呢？', second),
+                            (f'第{first}个呢？', first)]:
+        result = ask(query)
+        assert len(activity.calls) == 1
+        if position is None:
+            assert result['status'] == 'not_calculated' and '序号' in result['display_answer']
+        else:
+            smiles, probability, pic50, consistency = rows[position]
+            answer = result['display_answer']
+            assert all(value in answer for value in (smiles, probability, pic50, f'| {consistency} |'))
+            assert ('CCO' if smiles == 'CCN' else 'CCN') not in answer
+
+    activity.rows = [prediction('CCC', 4.5), prediction('CCO', 4.3)]
+    ask('预测 CCC 和 CCO 对 BuChE 的活性。')
+    answer = ask('那第一个呢？')['display_answer']
+    assert 'CCC' in answer and '4.5' in answer and 'CCN' not in answer
+    assert len(activity.calls) == 2
+    assert followup_answer('那它呢？', history, 'other-session') is None
+
+
 def test_generated_activity_evidence_requires_exact_candidate_and_target_alignment():
     from src.agent.evidence_followup import accepted_generated_activity_evidence
     raw = accepted_result(synthetic_rows())
