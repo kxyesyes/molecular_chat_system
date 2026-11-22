@@ -117,6 +117,41 @@ def parse_domain_suitability_question(query):
         r'[？?。]?\s*', query, re.I)
 
 
+def _target_summary(query, structures, function, *, function_question, docking_choice):
+    if function_question:
+        if function is None:
+            return {'content': '无法确认上一轮的单一靶点，请重新检索并指定靶点。', 'status': 'partial'}
+        if not function.get('function'):
+            return {'content': f"{function['uniprot_id']} 的功能注释未在本次检索记录中返回，无法据此说明。",
+                    'status': 'partial'}
+        annotation = re.sub(r'\s*\((?:PubMed:\d+\s*,?\s*)+\)', '', function['function'])
+        first_sentence = re.split(r'(?<=\.)\s+', annotation, maxsplit=1)[0]
+        annotation = html.escape(first_sentence).replace('`', r'\`').replace('[', r'\[').replace(']', r'\]')
+        return {'content': f"{function['uniprot_id']} 的功能注释（原文首句）：{annotation}",
+                'status': 'completed'}
+    if structures is None:
+        return {'content': '缺少上一轮可核对的结构记录，请先检索靶点结构。', 'status': 'partial'}
+    rows = [row for row in structures['structures'] if row.get('resolution') is not None]
+    if not rows:
+        return {'content': '已检索结构没有可比较的分辨率，无法判断。',
+                'status': 'partial'}
+    best = min(row['resolution'] for row in rows)
+    identifiers = '、'.join(row['structure_id'] for row in rows if row['resolution'] == best)
+    if '对接' not in query:
+        return {'content': f'在上一轮列出且有分辨率记录的结构中，{identifiers} 的分辨率最高（{best:g} Å）。',
+                'status': 'completed'}
+    if docking_choice:
+        return {'content': f'目前不能确定哪个受体最适合对接。在已检索且有分辨率记录的结构中，'
+                f'{identifiers} 分辨率最高（{best:g} Å），可作为进一步核查的起点；'
+                '分辨率本身不足以确定最佳受体。还需核实目标蛋白的构象和完整性、共晶配体的身份及位置、'
+                '对接口袋、辅因子和受体准备情况；本次未执行对接，检索也未必覆盖全部结构。',
+                'status': 'partial'}
+    return {'content': f'在已检索且有分辨率记录的结构中，{identifiers} 的分辨率最高（{best:g} Å）。'
+            '本次检索不保证覆盖全部结构。不能仅凭分辨率确认可直接对接；还需核查结构完整性、'
+            '配体与口袋，并完成受体准备。',
+            'status': 'partial'}
+
+
 def structure_followup(query, history, session_id, *, enable_tools=True):
     selection = re.fullmatch(r'\s*(?:PDB\s*[:：]?\s*)?([0-9][A-Za-z0-9]{3})[。.!！]?\s*', query, re.I)
     prior = history[-1].get('target_structure_evidence') if history else None
@@ -482,41 +517,19 @@ def structure_followup(query, history, session_id, *, enable_tools=True):
     docking_choice = re.fullmatch(
         r'(?:这些|上述|刚才列出的)结构(?:里|中)[，,]?(?:哪个|哪一个)最适合(?:分子)?对接[？?]'
         r'\s*(?:请)?说明选择依据和还需要核实的信息[。.!！?？]?', query.strip())
-    if is_resolution_docking_question(query) or docking_choice:
-        evidence = history[-1].get('target_structure_evidence') if history else None
-        if not isinstance(evidence, dict) or evidence.get('session_id') != session_id or not session_id:
-            return {'content': '缺少上一轮可核对的结构记录，请先检索靶点结构。', 'status': 'partial'}
-        rows = [row for row in evidence['structures'] if row.get('resolution') is not None]
-        if not rows:
-            return {'content': '已检索结构没有可比较的分辨率，无法判断。',
-                    'status': 'partial', 'evidence': deepcopy(evidence)}
-        best = min(row['resolution'] for row in rows)
-        identifiers = '、'.join(row['structure_id'] for row in rows if row['resolution'] == best)
-        if '对接' not in query:
-            return {'content': f'在上一轮列出且有分辨率记录的结构中，{identifiers} 的分辨率最高（{best:g} Å）。',
-                    'status': 'completed', 'evidence': deepcopy(evidence)}
-        if docking_choice:
-            return {'content': f'目前不能确定哪个受体最适合对接。在已检索且有分辨率记录的结构中，'
-                    f'{identifiers} 分辨率最高（{best:g} Å），可作为进一步核查的起点；'
-                    '分辨率本身不足以确定最佳受体。还需核实目标蛋白的构象和完整性、共晶配体的身份及位置、'
-                    '对接口袋、辅因子和受体准备情况；本次未执行对接，检索也未必覆盖全部结构。',
-                    'status': 'partial', 'evidence': deepcopy(evidence)}
-        return {'content': f'在已检索且有分辨率记录的结构中，{identifiers} 的分辨率最高（{best:g} Å）。'
-                '本次检索不保证覆盖全部结构。不能仅凭分辨率确认可直接对接；还需核查结构完整性、'
-                '配体与口袋，并完成受体准备。',
-                'status': 'partial', 'evidence': deepcopy(evidence)}
-    if re.fullmatch(r'(?:这|该|刚才的|上一轮的)(?:个)?靶点的(?:生物学)?功能(?:是什么|有哪些)[？?。]?', query.strip()):
-        evidence = history[-1].get('target_function_evidence') if history else None
-        if not isinstance(evidence, dict) or evidence.get('session_id') != session_id:
-            return {'content': '无法确认上一轮的单一靶点，请重新检索并指定靶点。', 'status': 'partial'}
-        if not evidence.get('function'):
-            return {'content': f"{evidence['uniprot_id']} 的功能注释未在本次检索记录中返回，无法据此说明。",
-                    'status': 'partial', 'function_evidence': deepcopy(evidence)}
-        annotation = re.sub(r'\s*\((?:PubMed:\d+\s*,?\s*)+\)', '', evidence['function'])
-        first_sentence = re.split(r'(?<=\.)\s+', annotation, maxsplit=1)[0]
-        annotation = html.escape(first_sentence).replace('`', r'\`').replace('[', r'\[').replace(']', r'\]')
-        return {'content': f"{evidence['uniprot_id']} 的功能注释（原文首句）：{annotation}",
-                'status': 'completed', 'function_evidence': deepcopy(evidence)}
+    function_question = re.fullmatch(r'(?:这|该|刚才的|上一轮的)(?:个)?靶点的(?:生物学)?功能(?:是什么|有哪些)[？?。]?', query.strip())
+    if function_question or docking_choice or is_resolution_docking_question(query):
+        # Both facts originate in the latest lookup or its read-only follow-up.
+        previous = history[-1] if history else {}
+        saved = {}
+        for field, key in (('evidence', 'target_structure_evidence'),
+                           ('function_evidence', 'target_function_evidence')):
+            record = previous.get(key)
+            if isinstance(record, dict) and session_id and record.get('session_id') == session_id:
+                saved[field] = deepcopy(record)
+        summary = _target_summary(query, saved.get('evidence'), saved.get('function_evidence'),
+                                  function_question=function_question, docking_choice=docking_choice)
+        return {**summary, **saved}
     ligand_list = re.fullmatch(
         r'(?:这些|上述|刚才的|上一轮的)结构(?:中)?哪些(?:含有|包含|有)(?:共晶)?配体[？?。]?',
         query.strip())
