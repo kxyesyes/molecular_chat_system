@@ -37,7 +37,8 @@ def prepare_web_request(payload, *, session_id, trace_id, references=None,
                         input_max_chars=24000, history_max_chars=2000,
                         scientific_input_max_chars=None,
                         allow_molecular_clarification=False, prior_target_context=None,
-                        prior_candidate_context=None, prior_activity_context=None, tool_free_consultation=False):
+                        prior_candidate_context=None, prior_activity_context=None, tool_free_consultation=False,
+                        descriptor_repeat_of=None):
     envelope = validate_request_envelope(payload, session_id=session_id, trace_id=trace_id,
                                         config_generation=config_generation)
     try:
@@ -90,6 +91,10 @@ def prepare_web_request(payload, *, session_id, trace_id, references=None,
                       'decision_output_limit': max_output_tokens,
                       'decision_input_max_chars': input_max_chars,
                       'decision_history_max_chars': history_max_chars})
+        if descriptor_repeat_of is not None and selected is not None:
+            # A requested recomputation has its own reference claim. Retrying that
+            # same calculation still uses the same prior trace and claim.
+            context.metadata['descriptor_repeat_of'] = descriptor_repeat_of
         if tool_free_consultation:
             context.metadata['tool_free_consultation'] = True
         if count_supplied:

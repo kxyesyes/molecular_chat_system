@@ -91,6 +91,40 @@ def test_selected_card_takes_precedence_over_conversational_descriptor(tmp_path)
     assert properties.calls == ["CCO", "CCN"]
 
 
+def test_repeat_direct_two_metric_card_request(tmp_path):
+    store, references, pointer = confirmed(tmp_path)
+    chat, properties = handler(store, references)
+    history = []
+    for i, query in enumerate(["只计算分子量和 logP，不要 ADMET 或活性", "重新算一次", "再算一次"], 1):
+        result = turn(chat, query, history, reference=pointer, selection={"ordinal": 2})
+        assert properties.calls == ["CCN"] * i
+        assert result["status"] == "completed"
+        assert set(history[-1]["property_evidence"]["requested_metrics"]) == {"logp", "mw"}
+
+
+def test_explicit_card_reruns_use_current_selection_once_per_request(tmp_path):
+    store, references, pointer = confirmed(tmp_path)
+    chat, properties = handler(store, references)
+    history = []
+
+    def select(ordinal, query):
+        return turn(chat, query, history, reference=pointer, selection={"ordinal": ordinal})
+
+    assert "46.07" in select(1, "它的分子量是多少？")["content"]
+    assert "45.08" in select(2, "它的分子量是多少？")["content"]
+    assert "45.08" in select(2, "它的分子量是多少？")["content"]
+    expected = ["CCO", "CCN"]
+    assert properties.calls == expected
+    for ordinal, smiles, weight in [(2, "CCN", "45.08"), (2, "CCN", "45.08"), (1, "CCO", "46.07")]:
+        prior_trace = history[-1]["property_evidence"]["trace_id"]
+        result = select(ordinal, "重新算一次")
+        expected.append(smiles)
+        assert properties.calls == expected
+        assert result["status"] == "completed" and weight in result["content"]
+        evidence = history[-1]["property_evidence"]
+        assert evidence["trace_id"] != prior_trace and evidence["canonical_smiles"] == smiles
+
+
 @pytest.mark.parametrize("defect", ["foreign_identity", "missing_logp"])
 def test_resolved_identity_does_not_rescue_wrong_or_incomplete_observation(tmp_path, defect):
     class DefectiveProperties(RecordingProperties):

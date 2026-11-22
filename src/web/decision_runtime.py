@@ -2030,6 +2030,7 @@ class WebDecisionRuntime:
                                     and turn.scientific_projection.concept_history is None else None),
                                 'max_output_tokens': handler._model_max_tokens(model),
                                 'tool_free_consultation': turn.tool_free_consultation,
+                                'descriptor_repeat_of': projection.descriptor_repeat_of,
                                 'allow_molecular_clarification': _resumable_scientific_clarification(turn.scientific_plan),
                                 'input_max_chars': handler._input_limit(),
                                 'scientific_input_max_chars': scientific_character_limit(

@@ -139,7 +139,9 @@ def recorded_descriptor(query, history, session_id, *, selected_smiles=None):
                 label = row.get('molecule_label')
                 name = f"{label}（{row['smiles']}）" if label else row['smiles']
                 choices.append(f'{i}. {name}')
-            return {'status': 'not_calculated', 'content': '你指哪个分子？' + '；'.join(choices) + '。',
+            metric = 'LogP' if key == 'logp' else '分子量'
+            return {'status': 'not_calculated', 'content': f'有多个分子，你想查看哪个的{metric}？'
+                    + '；'.join(choices) + '。可回复序号、名称或 SMILES。',
                     'history_update': {'batch_property_evidence': batch, 'descriptor_metric': key}}
         elif not question:
             return None
