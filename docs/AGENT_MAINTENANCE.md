@@ -183,9 +183,9 @@ git diff --check
 [run_agent_acceptance.py](../scripts/run_agent_acceptance.py) 的模式边界：
 
 - `contract`：路由、计划、工具契约等离线检查；不证明真实模型与科研工具闭环可用。
-- `replay --replay-input <report.json>`：读取结构化报告，离线重新检查；缺报告应失败，不能重跑真实工具伪装回放。
+- `--mode replay --replay-input report.json` 离线复查原始报告，结果写入同目录的 `report-replay.json`。可用 `--output` 指定单独的结果文件。只传 `--output report.json` 的旧命令仍从该文件读取。缺少源报告时回放失败。
 - `real`：真实工具案例与依赖检查；`all` 包含真实模式。本轮维护不启用这两者；缺模型、样例或依赖必须如实记录 partial/failed/skipped。
-- 脚本退出码 0 允许报告状态为 `partial`；必须读结构化 status/truth checks，而不是把 exit 0 等同于全部科研通过。
+- 科学用例集判定为 `failed` 时，`real` 和 `all` 模式返回退出码 1。退出码 0 包含 `partial`，具体通过范围见报告中的状态和逐项校验结果。
 
 独立性能用例 `MEDCHAT_RUN_TASK_STORE_OFFLOAD_PERF=1` 保留原 50ms 调度断言，仅在适当的受控 runner 使用；默认功能测试验证线程 offload、同步进展和真实 SQLite。此拆分不是原 CI 慢点已经定位或性能已修复的证据。
 

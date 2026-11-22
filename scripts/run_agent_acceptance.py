@@ -1250,12 +1250,9 @@ def run_real(
         "activity_model_inference",
         "docking_execution",
     )
-    status = (
-        "passed"
-        if all(checks[name]["status"] == "passed" for name in required)
-        and real_cases["status"] == "passed"
-        else "partial"
-    )
+    status = real_cases["status"]
+    if status == "passed" and any(checks[name]["status"] != "passed" for name in required):
+        status = "partial"
     return {
         "mode": "real",
         "status": status,
@@ -1272,7 +1269,7 @@ def main() -> int:
         choices=("contract", "replay", "real", "all"),
         default="contract",
     )
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--replay-input", type=Path, default=None)
     parser.add_argument(
@@ -1283,12 +1280,21 @@ def main() -> int:
     parser.add_argument("--dataset", type=Path, default=None)
     args = parser.parse_args()
 
+    output = args.output or DEFAULT_OUTPUT
     reports = []
     if args.mode in {"contract", "all"}:
         contract = run_contract()
         reports.append(contract)
     if args.mode == "replay":
-        reports.append(run_replay(args.replay_input or args.output))
+        # Older invocations used --output alone to select the report to replay.
+        source = args.replay_input or output
+        if args.replay_input is None or args.output is None:
+            output = source.with_name(f"{source.stem}-replay.json")
+        if source.resolve() == output.resolve() or (
+            source.exists() and output.exists() and source.samefile(output)
+        ):
+            parser.error("replay output must be different from its input report")
+        reports.append(run_replay(source))
     if args.mode in {"real", "all"}:
         reports.append(
             run_real(
@@ -1304,15 +1310,15 @@ def main() -> int:
             "reports": reports,
         }
     )
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     print(
         json.dumps(
             {
-                "output": str(args.output),
+                "output": str(output),
                 "statuses": [report["status"] for report in reports],
             },
             ensure_ascii=False,
