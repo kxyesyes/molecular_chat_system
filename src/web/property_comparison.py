@@ -425,10 +425,9 @@ def batch_lipinski_followup(query, history, session_id):
         query, re.I)
     if not match:
         return None
-    evidence = previous.get('batch_property_evidence')
-    if (previous.get('agent_used') is not True or not isinstance(evidence, dict)
-            or evidence.get('session_id') != session_id or not evidence.get('trace_id')
-            or not evidence.get('evidence_id') or not evidence.get('rows')):
+    context = descriptor_context([previous], session_id)
+    evidence = context.get('batch_property_evidence')
+    if not context.get('batch_property_evidence_reused') or not evidence.get('rows'):
         return {'content': '无法核对上一轮完整的分子性质记录，请先比较这些分子的性质。', 'status': 'not_calculated'}
     if match.group('subject') != '这些' and len(evidence['rows']) != 2:
         return {'content': f"上一轮包含 {len(evidence['rows'])} 个分子，请按表格顺序选择（例如“前两个”），或给出两个 SMILES。",

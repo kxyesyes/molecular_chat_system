@@ -100,6 +100,10 @@ test("澄清、纠正及越界后按各会话自己的表格和问题作答", as
   assert.ok(summary.text.includes("CCO") && summary.text.includes("46.07") && !summary.text.includes("CCN"), summary.text);
   await checkRow(first, 0);
   await checkWeight(first, 0);
+  for (const ask of [checkRow, checkWeight]) {
+    await ask("刚才那两个里，另一个呢？", 1);
+    await ask("另一个的情况呢？", 0);
+  }
   for (const ask of [activity, descriptors]) {
     const missing = await ask(beyond, [], "not_calculated");
     assert.match(missing.text, /序号/);
@@ -111,6 +115,10 @@ test("澄清、纠正及越界后按各会话自己的表格和问题作答", as
   const triple = await descriptors("比较 CCC、CCO 和 CCN 的分子量、LogP、HBA 和 HBD。", ["property_calculator"]);
   const structures = triple.outputs[0].data.map(row => row.smiles);
   assert.deepEqual(structures, ["CCC", "CCO", "CCN"]);
+  assert.ok((await descriptors("第二个的 logP 多少？")).text.includes("CCO"));
+  const ambiguous = await descriptors("那另一个呢？", [], "not_calculated");
+  assert.match(ambiguous.text, /3 个分子.*序号/);
+  assert.ok((await descriptors("那它呢？")).text.includes("CCO"));
   const pickTwo = await descriptors("根据刚才的结果，分别判断这两个分子是否符合 Lipinski 五规则。", [], "not_calculated");
   assert.match(pickTwo.text, /3 个分子/);
   const invalidPair = await descriptors("第三行和最后一行", [], "not_calculated");
@@ -124,6 +132,9 @@ test("澄清、纠正及越界后按各会话自己的表格和问题作答", as
   assert.ok(logp.text.includes("CCC") && logp.text.includes(currentLogp), logp.text);
   const short = await descriptors("请用一句话概括刚才选中行的 SMILES 和 logP，保留三位小数。");
   assert.ok(short.text.includes("CCC") && short.text.includes(currentLogp), short.text);
+  const other = await descriptors("另一个分子的 logP 多少？");
+  const otherLogp = triple.outputs[0].data.find(r => r.smiles === "CCN").properties.logp.toFixed(3);
+  assert.ok(other.text.includes("CCN") && other.text.includes(otherLogp) && !other.text.includes("CCC"), other.text);
   const next = await activity("预测 CCC 和 CCO 对 BuChE 的活性。", ["activity_predictor"], ["partial", "completed"]);
   const nextOrder = Array.from(next.text.matchAll(/SMILES[：:]\s*(\S+)/g), m => m[1]);
   assert.deepEqual(nextOrder, ["CCC", "CCO"]);
@@ -167,7 +178,7 @@ test("首页模型解释后仍沿用当前分子、单位和同次靶点记录",
   assert.ok(classification.text.includes(selected.smiles));
   await checkConversion("这个 pIC50 换算成多少微摩尔？", selected);
   const explanation = await activity("请用自己的话解释刚才选中的那个分子，写出它的 SMILES，并说说两项预测为什么需要复核。");
-  assert.ok(explanation.text.includes(selected.smiles) && /复核|不一致/.test(explanation.text));
+  assert.ok(explanation.text.includes(selected.smiles) && /复核|不一致/.test(explanation.text), explanation.text);
   const values = await activity("不要调用任何工具。请复述刚才选中的分子的 SMILES、活性概率和预测 pIC50，两项数值都保留四位有效数字。",
     [], ["completed", "partial"]);
   assert.ok(values.text.includes(selected.smiles));
@@ -180,6 +191,8 @@ test("首页模型解释后仍沿用当前分子、单位和同次靶点记录",
   await checkConversion("我指的是第一个", rows[0]);
   await checkConversion(selected.smiles, selected);
   await checkConversion("能把刚才那个微摩尔数值帮我换算成 nM 吗？", selected, "nM");
+  await checkConversion("剩下那个呢？", rows[0], "nM");
+  await checkConversion("那另一个呢？", selected, "nM");
   const brief = "这两种估计怎么对不上，你能用一句话说说是怎么回事吗？";
   const disagreement = await activity(brief, [], "partial");
   assert.ok(disagreement.text.includes(selected.smiles) && !disagreement.text.includes(rows[0].smiles));

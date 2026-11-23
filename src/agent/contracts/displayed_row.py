@@ -11,7 +11,8 @@ _ROW = re.compile(
     rf'(?:其实)?(?:那|请|帮我)?'
     rf'(?:我指的是|我想看的是|改看|换成|看一下|看看|看)?\s*'
     rf'(?:(?:第\s*(?P<number>{ORDINAL})\s*|(?P<relative>最后一|上一|下一))'
-    rf'{_ROW_UNIT}|(?P<current>它))(?:呢)?[。？?]?\s*')
+    rf'{_ROW_UNIT}|(?:(?:刚才)?(?:这|那)两个(?:分子)?(?:里|中)[，,]?\s*)?'
+    rf'(?P<other>另一{_ROW_UNIT}|剩下的?那{_ROW_UNIT})(?:的情况)?|(?P<current>它))(?:呢)?[。？?]?\s*')
 
 
 def ordinal_number(number):
@@ -35,6 +36,8 @@ def displayed_row_position(query, current=None, *, count=None):
         return None
     if match['number']:
         return ordinal_number(match['number'])
+    if match['other']:
+        return 3 - current if count == 2 and current in (1, 2) else 0
     if match['current']:
         return current
     if match['relative'] == '最后一':

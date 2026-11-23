@@ -476,7 +476,7 @@ def followup_answer(query, history, session_id):
         retained = {'activity_evidence': evidence, 'activity_conversion': request, 'activity_position': current}
         if selector is None and position is not None:
             if not 1 <= position <= len(order):
-                return {**retained, 'final_answer': '该序号不在本批展示的结果中，请指定已列出的序号或 SMILES。',
+                return {**retained, 'final_answer': '无法确定要换算本批中的哪一个分子，请指定已列出的序号或 SMILES。',
                         'status': 'not_calculated', 'success': False}
             selector = order[position - 1]
         if selector is not None:
@@ -572,7 +572,7 @@ def followup_answer(query, history, session_id):
             if inspection is not None:
                 positions = inspection.get('positions', ())
                 if any(not 1 <= pos <= len(order) for pos in positions):
-                    view = {'final_answer': '该序号不在本批展示的活性结果中，请指定已列出的序号或 SMILES。',
+                    view = {'final_answer': '无法确定要查看本批中的哪一个分子，请指定已列出的序号或 SMILES。',
                             'status': 'not_calculated', 'success': False}
                     if order and valid_inspection_evidence(evidence):
                         view.update(activity_evidence=evidence,

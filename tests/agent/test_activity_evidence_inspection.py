@@ -86,6 +86,7 @@ def test_activity_batch_switches_candidate_without_losing_consistency_question(t
     rows = {'一': ('CCO', '0.13', '4.3', '一致'), '二': ('CCN', '0.21', '6.7', '不一致')}
     for query, position in [(f'第{first}个分子的分类与回归是否一致？', first),
                             (f'那第{second}个呢？', second),
+                            ('刚才那两个里，另一个呢？', first), ('那另一个呢？', second),
                             ('那第3个呢？', None), ('那它呢？', second),
                             (f'第{first}个呢？', first)]:
         result = ask(query)
@@ -335,6 +336,9 @@ def test_change_only_the_unit_of_the_selected_row(query):
     assert '需复核' in changed['final_answer']
     following = followup_answer('那第二个呢？', [{**selection, **changed}], SESSION)
     assert '5.012e+04 nM' in following['final_answer'] and 'CCO' in following['final_answer']
+    back = followup_answer('剩下那个呢？', [{**selection, **following}], SESSION)
+    assert '199.5 nM' in back['final_answer'] and '需复核' in back['final_answer']
+    assert 'CCN' in back['final_answer'] and 'CCO' not in back['final_answer']
     assert followup_answer(query, [selection], 'other') is None
     assert followup_answer(query + ' 再预测 CCC。', [selection], SESSION) is None
     waiting = followup_answer(query, [{**selection, 'activity_position': None}], SESSION)
