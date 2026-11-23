@@ -2019,6 +2019,24 @@ class WebTurnProjection:
                     'status': view['status']}
         return None
 
+    def _retain_activity_selection(self):
+        previous = self.history[-1]
+        for key in ('activity_display_order', 'activity_position', 'activity_conversion'):
+            if key in previous:
+                self.entry[key] = previous[key]
+
+    def _retain_target_lookup(self):
+        # The structure and function are two views of the same lookup. An
+        # explanation can carry both records, but cannot resume a pending action.
+        for key, fields in (
+            ('target_function_evidence', ('session_id', 'uniprot_id', 'gene_symbol', 'function', 'source_url')),
+            ('target_structure_evidence', ('session_id', 'trace_id', 'structures', 'selected_structure_id',
+                                           'component', 'mechanism', 'binding_sites')),
+        ):
+            record = self.history[-1].get(key)
+            if isinstance(record, dict) and record.get('session_id') == self.session_id:
+                self.entry[key] = {field: record[field] for field in fields if field in record}
+
     def _retain_acknowledged_results(self):
         """Keep accepted facts from this connection; pending actions belong to their original turn."""
         if not self.session_id or not self.history:
@@ -2027,20 +2045,16 @@ class WebTurnProjection:
         descriptors = property_comparison.descriptor_context(self.history, self.session_id)
         if descriptors:
             self.entry['descriptor_carry'] = descriptors
+        self._retain_target_lookup()
         for key, fields in (
             ('activity_evidence', ('session_id', 'trace_id', 'query', 'smiles', 'observations')),
             ('candidate_evidence', ('session_id', 'trace_id', 'query', 'candidates')),
-            ('target_function_evidence', ('session_id', 'uniprot_id', 'gene_symbol', 'function', 'source_url')),
-            ('target_structure_evidence', ('session_id', 'trace_id', 'structures', 'selected_structure_id',
-                                           'component', 'mechanism', 'binding_sites')),
         ):
             record = previous.get(key)
             if isinstance(record, dict) and record.get('session_id') == self.session_id:
                 self.entry[key] = {field: record[field] for field in fields if field in record}
         if 'activity_evidence' in self.entry:
-            for key in ('activity_display_order', 'activity_position', 'activity_conversion'):
-                if key in previous:
-                    self.entry[key] = previous[key]
+            self._retain_activity_selection()
 
     def capture(self, result, *, context, reverse_count=10, reverse_restricted=False):
         view = self._capture(result, context=context, reverse_count=reverse_count,
@@ -2213,13 +2227,15 @@ class WebTurnProjection:
                 and result.success and result.outcome == RunOutcome.COMPLETED
                 and not result.tool_results and not result.metadata.get('waiting_for_input')):
             # Carry the accepted record, never the model's interpretation.
+            if getattr(context, 'metadata', {}).get('prior_target_context') is not None:
+                self._retain_target_lookup()
             for context_key, evidence_key in (
-                    ('prior_target_context', 'target_structure_evidence'),
                     ('prior_activity_context', 'activity_evidence'),
                     ('prior_candidate_context', 'candidate_evidence')):
                 if getattr(context, 'metadata', {}).get(context_key) is not None:
                     self.entry[evidence_key] = deepcopy(self.history[-1][evidence_key])
             if getattr(context, 'metadata', {}).get('prior_activity_context') is not None:
+                self._retain_activity_selection()
                 answer = (view or {}).get('final_answer', result.final_answer)
                 displayed = activity_explanation_text(answer, self.query)
                 if displayed != answer:

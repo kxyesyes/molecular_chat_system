@@ -43,12 +43,20 @@ def test_rejected_phrase_about_selected_activity_can_only_resume_as_explanation(
                 await socket.ready()
                 sender, = bundle.app.decision_runtime.sockets
                 sender.scientific_memory[:] = [{'activity_evidence': activity_evidence(sender.scope['agent_session_id']),
-                    'activity_display_order': ['CCO', 'CCN'], 'activity_position': 2}]
+                    'activity_display_order': ['CCO', 'CCN'], 'activity_position': 2,
+                    'activity_conversion': {'unit': 'nM', 'explain': False}}]
                 frames = await socket.turn({'message': query, 'enable_rag': False})
                 result = result_of(frames)
                 assert result['success'] == success, (len(bundle.calls), result.get('metadata'), frames[-1]['content'])
                 assert len(bundle.calls) == (2 if success else 1)
                 assert not bundle.app.agent_state_store.get_tool_executions(result['trace_id'])
+                if success:
+                    for question, selected, value in (('那它呢？', 'CCN', '8.318e+04'),
+                                                      ('那第一个呢？', 'CCO', '1.072e+05')):
+                        frames = await socket.turn({'message': question, 'enable_rag': False})
+                        assert selected in frames[-1]['content'] and value + ' nM' in frames[-1]['content']
+                        assert not bundle.app.agent_state_store.get_tool_executions(result_of(frames)['trace_id'])
+                    assert len(bundle.calls) == 2
 
     asyncio.run(run())
 

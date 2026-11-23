@@ -83,7 +83,11 @@ def test_real_model_payload_gets_context_across_explanations_but_not_new_socket(
                 await socket.ready()
                 sender, = bundle.app.decision_runtime.sockets
                 evidence = target_evidence(sender.scope['agent_session_id'])
-                sender.scientific_memory[:] = [{'user': 'lookup', 'target_structure_evidence': deepcopy(evidence)}]
+                function = {'session_id': sender.scope['agent_session_id'], 'uniprot_id': 'P00533',
+                            'gene_symbol': 'EGFR', 'function': 'Fixture receptor annotation.'}
+                sender.scientific_memory[:] = [{'user': 'lookup', 'target_structure_evidence': {
+                                                    **deepcopy(evidence), 'pending_ligand_site': True},
+                                                'target_function_evidence': function}]
                 for query in ('先不做任何计算。请用两三句话解释刚才这个分辨率意味着什么，以及为什么有共晶配体还不能直接说受体已经准备好了。',
                               '请再用更通俗的话解释一下这个数值的局限。'):
                     frames = await socket.turn({'message': query, 'enable_rag': False})
@@ -91,6 +95,10 @@ def test_real_model_payload_gets_context_across_explanations_but_not_new_socket(
                     assert frames[-1]['status'] == 'completed', frames[-1]
                     assert seen[-1]['structures'][0]['resolution'] == 2.6
                     assert sender.scientific_memory[-1]['target_structure_evidence'] == evidence
+                calls = len(bundle.calls)
+                frames = await socket.turn({'message': '这个靶点的生物学功能是什么？', 'enable_rag': False})
+                assert function['function'] in frames[-1]['content']
+                assert len(bundle.calls) == calls
                 async with ActualSocket(bundle.app, cookie) as fresh:
                     await fresh.ready()
                     frames = await fresh.turn({'message': '请解释这个分辨率的含义。', 'enable_rag': False})
