@@ -1,7 +1,7 @@
 """Bounded comparison of accepted observations, never a scientific executor.
 
-Only the immediately preceding socket-local turn is reusable. This module has
-no database, model, tool execution, prose extraction or shared state access.
+Follow-ups use the preceding turn. An explicit batch reference may select
+an older delivered activity record from the same socket.
 """
 from collections.abc import Mapping
 from copy import deepcopy
@@ -29,8 +29,14 @@ _PIC50_CONVERSION = re.compile(
     r'(?P<explain>解释为什么分类(?:和|与)回归结果不一致)))?'
     r'(?:\s*是多少)?[。.!！?？]?\s*', re.I)
 _PIC50_NATURAL_CONVERSION = re.compile(
-    r'\s*(?:请)?(?:把|将)?(?:这个|刚才的|上一轮的|它的|其)\s*pIC50\s*(?:换算|转换)\s*(?:成|为)\s*'
+    r'\s*(?:请)?(?:把|将)?(?:这个|刚才的|上一轮的|它的|其|(?P<position>第[0-9一二三四五六七八九十百]+个)(?:分子|候选)?的)'
+    r'\s*pIC50\s*(?:换算|转换)\s*(?:成|为)\s*'
     r'(?:多少)?\s*(?P<unit>微摩尔|μM|µM|uM|nM)\s*[？?。.!！]?\s*', re.I)
+_NAMED_ACTIVITY_BATCH = re.compile(
+    r'\s*(?:请)?(?:回到|回看)\s*(?:(?:刚才|之前|(?P<latest>最近展示))(?:的)?)?(?:那批)?\s*'
+    r'(?:含\s*(?P<anchor>[A-Za-z0-9@+\-\[\]().=#\\/:%*]+)\s*的\s*)?'
+    r'(?P<target>[A-Za-z][A-Za-z0-9_-]*)\s*(?:的)?活性预测(?:结果)?\s*[，,:：]\s*'
+    r'(?P<question>.+?)(?:\s*(?:只|仅)使用已有结果[。.!！]?)?\s*', re.I | re.S)
 
 
 def comparison_tools(query):
@@ -334,6 +340,45 @@ def _converted_activity(row, unit, explain):
             'success': not bool(review)}
 
 
+def named_activity_readback(query, history, session_id):
+    """Resolve a named batch within this socket, then use ordinary read-only evidence handling."""
+    from .activity_evidence_inspection import inspection_request
+    name = _NAMED_ACTIVITY_BATCH.fullmatch(query)
+    if not name or history is None:
+        return None
+    question = name['question']
+    if not (_PIC50_NATURAL_CONVERSION.fullmatch(question) or _PIC50_CONVERSION.fullmatch(question)
+            or isinstance(inspection_request(question), dict)):
+        return None
+    batches = {}
+    target = name['target'].casefold()
+    for entry in reversed(history):
+        record = entry.get('activity_evidence')
+        order = entry.get('activity_display_order')
+        if not (isinstance(record, dict) and order and session_id and record.get('session_id') == session_id
+                and record.get('trace_id') and (not name['anchor'] or name['anchor'] in order)):
+            continue
+        observations = record.get('observations')
+        if not isinstance(observations, list) or len(observations) != 1 or not isinstance(observations[0], dict):
+            continue
+        rows = observations[0].get('data')
+        if isinstance(rows, list) and rows and all(
+                isinstance(row, dict) and str(row.get('requested_target')).casefold() == target for row in rows):
+            batches.setdefault(record['trace_id'], entry)
+            if name['latest']:
+                break
+    if len(batches) != 1:
+        content = (f"找不到本会话近期展示的匹配 {name['target']} 活性批次。"
+                   if not batches else
+                   f"近期有多个 {name['target']} 活性批次。请指定其中一批独有的 SMILES，或说“回到最近展示的 {name['target']} 活性预测”并附上问题。")
+        return {'final_answer': content, 'status': 'not_calculated', 'success': False}
+    source, = batches.values()
+    view = followup_answer(question, [source], session_id)
+    if view and view.get('activity_evidence') is not None:
+        view['activity_display_order'] = source['activity_display_order']
+    return view
+
+
 def followup_answer(query, history, session_id):
     """Return None outside the deliberately closed follow-up grammar."""
     from .activity_evidence_inspection import inspection_request, inspection_answer, valid_inspection_evidence
@@ -400,6 +445,9 @@ def followup_answer(query, history, session_id):
     if conversion:
         request = {'unit': conversion['unit'], 'explain': bool(conversion.groupdict().get('explain'))}
         selector = conversion.groupdict().get('smiles')
+        if conversion.groupdict().get('position'):
+            from .activity_evidence_inspection import batch_reply_position
+            position = batch_reply_position(conversion['position'], current)
     elif owned and last.get('activity_conversion'):
         from .activity_evidence_inspection import batch_reply_position
         position = batch_reply_position(query, current, choices=order)

@@ -504,7 +504,7 @@ class WebTurnProjection:
                 context['selected_smiles'] = order[position - 1]
         return context
 
-    def followup(self, *, enable_tools, enable_rag=False, resolve_selection=None):
+    def followup(self, *, enable_tools, enable_rag=False, resolve_selection=None, activity_history=None):
         if self.mixed_activity_discussion:
             return None
         from src.literature.model_sources import model_source_followup
@@ -2020,12 +2020,17 @@ class WebTurnProjection:
                 self.entry['reverse_target_evidence'] = view['context']
             return {'content': view['content'],
                     'status': 'completed' if view['status'] == 'succeeded' else view['status']}
-        view = evidence_followup.followup_answer(self.query, self.history, self.session_id)
+        view = evidence_followup.named_activity_readback(self.query, activity_history, self.session_id)
+        if view is None:
+            view = evidence_followup.followup_answer(self.query, self.history, self.session_id)
         if view is not None:
             if view.get('activity_evidence') is not None:
                 self.entry['activity_evidence'] = deepcopy(view['activity_evidence'])
-                if self.history and 'activity_display_order' in self.history[-1]:
-                    self.entry['activity_display_order'] = list(self.history[-1]['activity_display_order'])
+                order = view.get('activity_display_order')
+                if order is None and self.history:
+                    order = self.history[-1].get('activity_display_order')
+                if order is not None:
+                    self.entry['activity_display_order'] = list(order)
                 for key in ('activity_position', 'activity_conversion'):
                     if view.get(key) is not None:
                         self.entry[key] = view[key]

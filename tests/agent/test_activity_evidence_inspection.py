@@ -296,6 +296,69 @@ def accepted_snapshot():
     return evidence
 
 
+NAMED_BATCH = '回到刚才那批 BuChE 活性预测，第二个分子的 pIC50 换算成多少 μM？只使用已有结果。'
+
+
+def test_explicit_batch_reference_restores_the_original_display_order_and_unit(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+    turn(handler, '预测 CCO 和 CCN 对 BuChE 的活性。', history, SESSION)
+    turn(handler, '第二个分子的分类与回归是否一致？', history, SESSION)
+    turn(handler, '解释一下什么是分子量。', history, SESSION)
+    view, _ = turn(handler, NAMED_BATCH, history, SESSION)
+    assert 'CCN' in view['content'] and '0.1995' in view['content'] and '需复核' in view['content']
+    first, _ = turn(handler, '那第一个呢？', history, SESSION)
+    assert 'CCO' in first['content'] and '50.12' in first['content'] and 'μM' in first['content']
+    assert len(activity.calls) == 1
+
+
+def test_named_batch_requires_a_unique_owned_trace_and_rechecks_accepted_evidence(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    record = {'activity_evidence': accepted_snapshot(), 'activity_display_order': ['CCN', 'CCO']}
+    other = deepcopy(record)
+    other['activity_evidence']['trace_id'] = 'second-lookup'
+    other['activity_display_order'] = ['CCO', 'CCN']
+    corrupt = deepcopy(record)
+    corrupt['activity_evidence']['observations'][0]['quality']['validated'] = False
+    for history, owner, message in (
+            ([record, other], SESSION, '多个'),
+            ([corrupt], SESSION, '无法确认'),
+            ([record], 'other-session', '找不到'),
+            ([record], SESSION, None)):
+        view, _ = turn(handler, NAMED_BATCH, list(history), owner)
+        if message:
+            assert view['status'] == 'not_calculated' and message in view['content']
+            assert all(value not in view['content'] for value in ('50.12', '0.1995'))
+        else:
+            assert 'CCO' in view['content'] and '50.12' in view['content']
+    latest, _ = turn(handler, NAMED_BATCH.replace('刚才那批', '最近展示的'), [record, other], SESSION)
+    assert 'CCN' in latest['content'] and '0.1995' in latest['content']
+    assert not activity.calls
+
+
+def test_named_batch_anchor_can_select_older_result_without_reprediction(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+    turn(handler, '预测 CCO 和 CCN 对 BuChE 的活性。', history, SESSION)
+    activity.rows = [prediction('CCC', 4.5), prediction('CCO', 4.3)]
+    turn(handler, '预测 CCC 和 CCO 对 BuChE 的活性。', history, SESSION)
+    ambiguous, _ = turn(handler, NAMED_BATCH, history, SESSION)
+    assert '多个' in ambiguous['content']
+    anchored, _ = turn(handler, NAMED_BATCH.replace('刚才那批', '含 CCN 的'), history, SESSION)
+    assert 'CCN' in anchored['content'] and '0.1995' in anchored['content']
+    missing, _ = turn(handler, NAMED_BATCH.replace('BuChE', 'PDE5A'), history, SESSION)
+    assert '找不到' in missing['content']
+    assert len(activity.calls) == 2
+
+
+def test_named_readback_leaves_new_work_and_implicit_references_to_the_current_turn():
+    from src.agent.evidence_followup import named_activity_readback
+
+    for query in ('那它呢？', NAMED_BATCH + '再预测 CCC 对 BuChE 的活性。',
+                  '回到刚才那批 BuChE 活性预测，重新预测所有分子。'):
+        assert named_activity_readback(query, [], SESSION) is None
+
+
 CONVERT = '把刚才预测的 pIC50 换算为 IC50（nM），并说明结果代表什么。'
 CONVERT_CCO = '把上一轮 CCO 的 pIC50 换算为 IC50（nM），并说明结果代表什么。'
 

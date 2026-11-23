@@ -1555,8 +1555,13 @@ class WebDecisionRuntime:
                 except ValueError:
                     raise DecisionAdmissionError('scientific_reference_unavailable') from None
 
+            # The last slot is this turn's pending delivery marker. Older turns may
+            # only be consulted by a readback explicitly scoped to a named batch.
+            activity_history = (sender.scientific_memory[:-1]
+                                if envelope.reference is None and envelope.selection is None else None)
             followup = None if turn.tool_free_consultation else await settle_owned_call(
                 lambda: projection.followup(enable_tools=envelope.enable_tools, enable_rag=envelope.enable_rag,
+                    activity_history=activity_history,
                     resolve_selection=resolve_selection if envelope.selection is not None else None),
                 worker_owner=turn.worker_owner)
             if turn.cancel_event.is_set():

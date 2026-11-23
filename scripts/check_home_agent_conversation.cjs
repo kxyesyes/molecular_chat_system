@@ -117,4 +117,10 @@ test("首页模型解释后仍沿用当前分子、单位和同次靶点记录",
   assert.ok(annotation.text.includes(record.function.split(/(?<=\.)\s+/)[0].slice(0, 70)));
   const isolated = await target("这个 pIC50 换算成多少 nM？", [], "not_calculated");
   assert.match(isolated.text, /无法确认/);
+  const named = "回到刚才那批 BuChE 活性预测，第二个分子的 pIC50 换算成多少 μM？只使用已有结果。";
+  const foreign = await target(named, [], "not_calculated");
+  assert.match(foreign.text, /找不到/);
+  await activity("请查询人 EGFR（UniProt P00533）的蛋白功能和实验结构。", ["target_database_search"]);
+  await checkConversion(named, rows[1]);
+  await checkConversion("那第一个呢？", rows[0]);
 });
