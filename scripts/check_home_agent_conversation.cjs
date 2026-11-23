@@ -1,0 +1,111 @@
+// Run against a local MedChat verification server using its own AGENT_STATE_DB.
+const assert = require("node:assert/strict");
+const { DatabaseSync } = require("node:sqlite");
+const { test } = require("node:test");
+const { chromium } = require("playwright");
+
+async function conversation(browser, executions, verifyModel = false) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const [socket] = await Promise.all([
+    page.waitForEvent("websocket", ws => new URL(ws.url()).pathname === "/ws"),
+    page.goto("http://127.0.0.1:6001/"),
+  ]);
+  if (verifyModel) {
+    const config = await page.evaluate(async () => {
+      const { config } = await (await fetch("/api/llm/config")).json();
+      return { provider: config.provider, model: config.model_name };
+    });
+    assert.equal(config.provider, "openai_compatible");
+    await page.locator("#settingsBtn").click();
+    const [response] = await Promise.all([
+      page.waitForResponse(r => new URL(r.url()).pathname === "/api/llm/test", { timeout: 120000 }),
+      page.locator("#testLlmConfig").click(),
+    ]);
+    const probe = await response.json();
+    assert.ok(probe.success && probe.model === config.model, "首页模型连接测试未通过");
+    await page.locator("#closeLlmSettings").click();
+  }
+
+  return async (question, tools = [], status = "completed") => {
+    const answers = page.locator(".assistant-message.complete");
+    const index = await answers.count();
+    await page.getByRole("textbox", { name: "消息" }).fill(question);
+    const [frame] = await Promise.all([
+      socket.waitForEvent("framereceived", {
+        predicate: event => JSON.parse(event.payload).type === "complete",
+        timeout: 180000,
+      }),
+      page.getByRole("button", { name: "发送消息", exact: true }).click(),
+    ]);
+    const done = JSON.parse(frame.payload);
+    assert.ok(done.trace_id, question);
+    assert.ok([].concat(status).includes(done.status), question + " returned " + done.status);
+    const calls = executions.all(done.trace_id);
+    assert.deepEqual(calls.map(row => row.tool_name), tools, question);
+    const answer = answers.nth(index);
+    await answer.waitFor();
+    return {
+      text: (await answer.innerText()).replace(/\s+/g, " ").trim(),
+      outputs: calls.map(row => JSON.parse(row.output_json)),
+    };
+  };
+}
+
+test("首页模型解释后仍沿用当前分子、单位和同次靶点记录", async t => {
+  assert.ok(process.env.AGENT_STATE_DB, "请指定验收服务使用的 AGENT_STATE_DB");
+  const db = new DatabaseSync(process.env.AGENT_STATE_DB, { readOnly: true });
+  t.after(() => db.close());
+  const executions = db.prepare("SELECT tool_name, output_json FROM tool_executions WHERE trace_id=? ORDER BY created_at, id");
+  const browser = await chromium.launch({ channel: "chrome" });
+  t.after(() => browser.close());
+  const activity = await conversation(browser, executions, true);
+  const target = await conversation(browser, executions);
+
+  const batch = await activity("预测 CCO 和 CCN 对 BuChE 的活性。", ["activity_predictor"], "partial");
+  const displayed = Array.from(batch.text.matchAll(/SMILES[：:]\s*(\S+)/g), m => m[1]);
+  assert.deepEqual([...displayed].sort(), ["CCN", "CCO"]);
+  const rows = displayed.map(smiles => batch.outputs[0].data.find(row => row.smiles === smiles));
+  assert.ok(rows.every(row => row && Number.isFinite(row.predicted_pIC50)));
+  async function checkConversion(question, row) {
+    const status = row.classification_regression_consistent ? "completed" : "partial";
+    const answer = await activity(question, [], status);
+    assert.ok(answer.text.includes(`分子 ${row.smiles} 对 BuChE`), question);
+    const amount = answer.text.match(/换算约为 ([\d.eE+-]+) (?:微摩尔（μM）|μM)/);
+    assert.ok(amount, question);
+    assert.equal(Number(amount[1]), Number((10 ** (6 - row.predicted_pIC50)).toPrecision(4)));
+    assert.equal(answer.text.includes("需复核"), !row.classification_regression_consistent);
+  }
+  const selected = rows[1];
+  const classification = await activity("第二个分子的分类与回归是否一致？", [],
+    selected.classification_regression_consistent ? "completed" : "partial");
+  assert.ok(classification.text.includes(selected.smiles));
+  await checkConversion("这个 pIC50 换算成多少微摩尔？", selected);
+  const explanation = await activity("请用自己的话解释刚才选中的那个分子，写出它的 SMILES，并说说两项预测为什么需要复核。");
+  assert.ok(explanation.text.includes(selected.smiles) && /复核|不一致/.test(explanation.text));
+  const values = await activity("不要调用任何工具。请复述刚才选中的分子的 SMILES、活性概率和预测 pIC50，两项数值都保留四位有效数字。",
+    [], ["completed", "partial"]);
+  assert.ok(values.text.includes(selected.smiles));
+  assert.ok(values.text.includes(selected.predicted_pIC50.toPrecision(4)), values.text);
+  assert.ok(values.text.includes(selected.activity_probability.toPrecision(4)) ||
+    values.text.includes((selected.activity_probability * 100).toPrecision(4) + "%"), values.text);
+  await checkConversion("那它呢？", selected);
+  await checkConversion("那第一个呢？", rows[0]);
+
+  const lookup = await target("请查询人 EGFR（UniProt P00533）的蛋白功能和实验结构。", ["target_database_search"]);
+  const record = lookup.outputs[0].data[0];
+  assert.equal(record.uniprot_id, "P00533");
+  const structures = record.recommended_structures.filter(row =>
+    row.structure_type === "experimental" && Number.isFinite(row.resolution));
+  assert.ok(structures.length && record.function);
+  const best = Math.min(...structures.map(row => row.resolution));
+  const discussion = await target("请用通俗的话解释刚才这个分辨率意味着什么，以及为什么有共晶配体还不能直接说受体已经准备好了。");
+  assert.match(discussion.text, /分辨率/);
+  const resolution = await target("刚才列出的结构中，哪个分辨率最高？");
+  assert.ok(resolution.text.includes(best + " Å"));
+  assert.ok(structures.some(row => row.resolution === best && resolution.text.includes(row.structure_id)));
+  const annotation = await target("这个靶点的生物学功能是什么？");
+  assert.ok(annotation.text.includes(record.function.split(/(?<=\.)\s+/)[0].slice(0, 70)));
+  const isolated = await target("这个 pIC50 换算成多少 nM？", [], "not_calculated");
+  assert.match(isolated.text, /无法确认/);
+});

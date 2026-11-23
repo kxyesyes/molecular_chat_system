@@ -989,9 +989,23 @@ class WebDecisionRuntime:
             turn_id=turn.turn_id, model_generation=generation,
             capability_generation=self.application.capability_generation)
         turn.intent_requests += 1
+        projection = turn.scientific_projection
+        records = projection.readback_contexts if projection is not None else {}
+        ordinary_history = bool(sender.memory) and (projection is None or projection.concept_history is None)
+        labels = []
+        if 'prior_target_context' in records:
+            labels.append('target structures')
+        if 'prior_candidate_context' in records:
+            labels.append('candidate results')
+        if 'prior_activity_context' in records:
+            selected = records['prior_activity_context'].get('selected_smiles')
+            labels.append('activity predictions (selected row)' if selected else 'activity predictions')
         messages = [
             {'role': 'system', 'content': _CONSULTATION_INTENT_INSTRUCTION +
-             'Prior conversation exists: ' + str(bool(sender.memory)).lower() + '.'},
+             'Prior ordinary conversation exists: ' + str(ordinary_history).lower() +
+             '. Accepted scientific records: ' + (', '.join(labels) or 'none') +
+             '. Interpretation of an available record alone is general_knowledge with history_relation=none. '
+             'Use prior_ordinary_turn only for a reference to an actual ordinary conversation.'},
             {'role': 'user', 'content': turn.payload['message']},
         ]
         try:
@@ -1011,7 +1025,7 @@ class WebDecisionRuntime:
         intent = response.intent
         if (intent.unresolved or intent.kind not in {
                 'general_knowledge', 'conversation', 'capability', 'follow_up'}
-                or (intent.kind == 'follow_up' and not sender.memory)):
+                or (intent.history_relation == 'prior_ordinary_turn' and not ordinary_history)):
             if rejection is None:
                 return False
             raise DecisionAdmissionError(rejection)
@@ -1944,7 +1958,7 @@ class WebDecisionRuntime:
                       and envelope.reference is None and envelope.selection is None
                       and turn.scientific_plan.original_query == execution_payload['message'] == envelope.query
                       and asks_about_given_information(envelope.query,
-                          prior_activity_context=projection.model_activity_context())):
+                          prior_activity_context=projection.readback_contexts.get('prior_activity_context'))):
                     # Keep the original rejection for mixed or executable requests.
                     if await self._classify_tool_free_consultation(
                             sender, turn, model, generation, handler._input_limit(), rejection=None):
@@ -2020,15 +2034,7 @@ class WebDecisionRuntime:
                             **({'history': ([] if turn.scientific_projection is not None
                                             and turn.scientific_projection.concept_history is not None
                                             else sender.memory),
-                                'prior_target_context': (turn.scientific_projection.model_target_context()
-                                    if turn.scientific_projection is not None
-                                    and turn.scientific_projection.concept_history is None else None),
-                                'prior_candidate_context': (turn.scientific_projection.model_candidate_context()
-                                    if turn.scientific_projection is not None
-                                    and turn.scientific_projection.concept_history is None else None),
-                                'prior_activity_context': (turn.scientific_projection.model_activity_context()
-                                    if turn.scientific_projection is not None
-                                    and turn.scientific_projection.concept_history is None else None),
+                                **projection.readback_contexts,
                                 'max_output_tokens': handler._model_max_tokens(model),
                                 'tool_free_consultation': turn.tool_free_consultation,
                                 'descriptor_repeat_of': projection.descriptor_repeat_of,

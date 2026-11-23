@@ -30,6 +30,9 @@ def test_rejected_phrase_about_selected_activity_can_only_resume_as_explanation(
     async def run():
         async def respond(payload):
             if len(bundle.calls) == 1:
+                instruction = ' '.join(m['content'] for m in payload['messages'] if m['role'] == 'system')
+                assert 'Accepted scientific records: activity predictions (selected row).' in instruction
+                assert 'CCN' not in instruction
                 return intent_http_response(intent)
             marker = '. Immutable result requirements (not a tool sequence): '
             prompt = next(m['content'] for m in payload['messages'] if marker in (m.get('content') or ''))
@@ -57,6 +60,7 @@ def test_rejected_phrase_about_selected_activity_can_only_resume_as_explanation(
                         assert selected in frames[-1]['content'] and value + ' nM' in frames[-1]['content']
                         assert not bundle.app.agent_state_store.get_tool_executions(result_of(frames)['trace_id'])
                     assert len(bundle.calls) == 2
+                assert not bundle.protocol_errors, bundle.protocol_errors
 
     asyncio.run(run())
 
@@ -72,6 +76,18 @@ def test_model_explanation_gets_the_selected_display_row_separately_from_tool_or
     assert WebTurnProjection(query, 'other', [previous]).model_activity_context() is None
     del previous['activity_position']
     assert 'selected_smiles' not in WebTurnProjection(query, 'owner', [previous]).model_activity_context()
+
+
+def test_model_can_quote_displayed_prediction_values_without_losing_raw_precision():
+    record = activity_evidence('owner')
+    raw = record['observations'][0]['data']
+    raw[1].update(activity_probability=.422556549, predicted_pIC50=5.00758934)
+    raw[0].pop('predicted_pIC50')
+    context = WebTurnProjection(QUESTION, 'owner', [{'activity_evidence': record}]).model_activity_context()
+    first, second = context['predictions']
+    assert second['display_values'] == {'activity_probability': '0.4226', 'predicted_pIC50': '5.008'}
+    assert second['predicted_pIC50'] == raw[1]['predicted_pIC50']
+    assert 'predicted_pIC50' not in first['display_values']
 
 
 def activity_evidence(session):

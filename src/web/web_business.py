@@ -4,6 +4,7 @@ The runtime creates one object per accepted turn. Its detached entry is publishe
 only after terminal delivery, separately from ordinary model conversation history.
 """
 from copy import deepcopy
+from functools import cached_property
 import html
 import json
 import logging
@@ -411,6 +412,16 @@ class WebTurnProjection:
         self.contextual_property = resolved != self.query
         return resolved
 
+    @cached_property
+    def readback_contexts(self):
+        """Accepted facts available to both intent classification and the answer for this turn."""
+        if self.concept_history is not None:
+            return {}
+        contexts = {'prior_target_context': self.model_target_context(),
+                    'prior_candidate_context': self.model_candidate_context(),
+                    'prior_activity_context': self.model_activity_context()}
+        return {key: value for key, value in contexts.items() if value is not None}
+
     def model_target_context(self):
         """Project accepted socket-local retrieval facts for ordinary explanations."""
         if self.acknowledgement:
@@ -462,6 +473,7 @@ class WebTurnProjection:
         if (not isinstance(evidence, dict) or not self.session_id
                 or evidence.get('session_id') != self.session_id or not evidence.get('trace_id')):
             return None
+        from .decision_chat import _display_prediction_value
         rows = []
         for prediction in evidence['observations'][0]['data']:
             row = {key: deepcopy(prediction[key]) for key in (
@@ -469,6 +481,9 @@ class WebTurnProjection:
                 'activity_class', 'activity_probability', 'predicted_pIC50', 'units',
                 'label_threshold', 'probability_threshold', 'classification_regression_consistent',
                 'errors', 'warnings') if key in prediction}
+            row['display_values'] = {key: _display_prediction_value(row[key])
+                                     for key in ('activity_probability', 'predicted_pIC50')
+                                     if row.get(key) is not None}
             provenance = prediction.get('provenance') or {}
             scope = provenance.get('scope', {})
             # Training-asset provenance is not the origin of this prediction.

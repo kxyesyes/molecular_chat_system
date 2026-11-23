@@ -100,6 +100,10 @@ Pi SDK 负责对话循环。首页另在当前连接中保留用户实际看到�
 
 回归覆盖直接追问、连续寒暄后追问、换会话和失败请求后再追问。浏览器验收用每轮 trace 对照实际工具执行次数，数值按首轮工具记录核对。见[会话证据回归](../tests/agent/test_scientific_readback_memory.py)和[活性追问回归](../tests/agent/test_activity_evidence_inspection.py)。
 
+意图分类只接收本轮可用的记录类型、是否已选中活性行，以及是否有普通对话历史。回答阶段从同一份会话记录取数。每条活性预测同时提供概率与 pIC50 的原始数值和首页展示值，复述可直接引用已展示的精度，换算保留原始精度。没有普通对话历史时，分类器仍能把已有预测作为可解读的资料。
+
+要复跑[真实首页多轮验收](../scripts/check_home_agent_conversation.cjs)，先将 `AGENT_STATE_DB` 指向本次测试专用的 SQLite 文件，按本机开发规范启动 6001 端口的服务。让测试进程使用同一个数据库路径，在已安装 Chrome、可加载 Playwright 且提供 `node:sqlite` 的 Node 环境执行 `node --test scripts/check_home_agent_conversation.cjs`。脚本使用首页保存的兼容云端模型，在两个独立的浏览器会话内核对活性换算、靶点读回及各轮工具执行次数。
+
 ## 4. 兼容代码与迁移状态
 
 | 保留项 | 原因与删除门槛 |
