@@ -203,6 +203,8 @@ _CONSULTATION_INTENT_INSTRUCTION = (
     'Classify the entire unchanged current request with ordinary_intent v1. '
     'Evaluate every clause, including any prohibition on tools. Interpreting user-supplied assay '
     'measurements or choosing a future experiment is a knowledge request. '
+    'For drafting example questions without answering them, use kind=conversation, '
+    'history_relation=none and unresolved=false. A separate request to execute those tasks is mixed. '
     'Concepts, methods, limitations and interpretation of already accepted records are knowledge requests, '
     'even when they mention ADMET, activity, docking, prediction or literature. '
     'An additional request for new scientific values, calculations, predictions, retrieval or external '
@@ -1931,7 +1933,7 @@ class WebDecisionRuntime:
             compile_query = envelope.query if turn.tool_free_consultation else projection.execution_query()
             if not turn.tool_free_consultation and (_should_compile_scientific_plan(envelope)
                     or ((projection.contextual_property or projection.property_bound_question or projection.concept_calculation is not None or projection.property_explanation is not None
-                         or projection.mixed_execution_query is not None)
+                         or projection.property_comparison_requested or projection.mixed_execution_query is not None)
                         and envelope.enable_tools
                         and envelope.reference is None and envelope.selection is None
                         and ScientificObligationCompiler.is_profile_candidate(compile_query))):

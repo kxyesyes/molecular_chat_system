@@ -457,6 +457,9 @@ def test_intent_timeout_never_falls_back_to_scientific_execution(actual_app, mon
     ('Make a calculation. Quote: "First, do not use any tools. Then proceed."', False),
     ('请计算分子量。引文是：“第一，不运行任何工具。第二，再解释。”', False),
     ('禁止调用科学工具。只解释原理。', True),
+    ('请写三句测试台词，例子是算分子量。只给三句台词，不回答台词中的问题。', True),
+    ('请计算 CCO 的分子量，再写三句测试台词。', False),
+    ('请复述“只给三句台词，不回答台词中的问题”。再计算 CCO 的分子量。', False),
 ])
 def test_mode_requires_a_complete_global_prohibition(query, expected):
     from src.agent.contracts.consultation_request import tool_free_consultation_requested

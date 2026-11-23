@@ -32,6 +32,9 @@ _ORDINAL_CONSISTENCY = re.compile(
     rf'(?:请\s*)?(?:(?:解释|说明|查看)\s*)?{_PRIOR_ZH}第\s*'
     rf'(?P<position>{_ORDINAL})\s*个\s*(?:分子|候选(?:分子)?)的'
     r'分类(?:和|与)回归(?:预测|结果)?(?:是否一致|一致吗|为什么不一致)')
+_BRIEF_CONSISTENCY = re.compile(
+    r'(?:这|那)两(?:种|项|个)(?:估计|预测|结果)(?:怎么|为什么|为啥)(?:对不上|不一致|有分歧)'
+    r'[，,？?]\s*(?:你能|请)?(?:用)?一句话(?:说说|说明|解释)(?:是怎么回事|一下|原因)?(?:吗)?[？?。]?\s*')
 _EXPLAIN = re.compile(
     r'(?:请\s*)?(?:并\s*)?解释(?:分类(?:与|和)回归不一致(?:意味着什么|的含义|的原因)?|'
     r'(?:上一轮|上次|刚才|上述)(?:的)?活性(?:结果|预测))|'
@@ -97,6 +100,8 @@ def inspection_request(query, *, batch=None):
         return None
     if batch:
         current = batch.get('activity_position')
+        if _BRIEF_CONSISTENCY.fullmatch(query.strip()):
+            return {'selectors': (), 'all': False, 'positions': (current,) if current else (), 'brief': True}
         choices = batch.get('activity_display_order', ()) if current is not None else ()
         position = batch_reply_position(query, current, choices=choices)
         if position is not None:
@@ -192,6 +197,26 @@ def inspection_answer(evidence, selection):
                 'status': 'not_calculated', 'success': False}
     selected = set(canonical) if canonical and not selection['all'] else set(evidence['smiles'])
     rows = [row for row in observation['data'] if _canonical(row['smiles']) in selected]
+    if selection.get('brief'):
+        if len(rows) != 1:
+            return {'final_answer': '请指定要解释的分子序号或 SMILES。', 'status': 'not_calculated',
+                    'success': False, 'activity_evidence': evidence}
+        row, = rows
+        consistent = row.get('classification_regression_consistent')
+        probability, value = row.get('activity_probability'), row.get('predicted_pIC50')
+        complete = all(item is not None for item in (consistent, row.get('activity_class'), probability, value))
+        reason = _exclusion(row)
+        if complete:
+            assessment = '标签一致' if consistent else '标签不一致，需复核'
+            explanation = (f"分类模型给出{_cell(row['activity_class'])}（活性概率 {probability:.4g}），"
+                           f"回归模型预测 pIC50 为 {value:.4g}，按模型阈值两者{assessment}")
+        else:
+            explanation = '缺少可核对的完整分类和回归结果，暂时无法判断两者是否一致'
+        if reason and consistent is not False:
+            explanation += '，' + reason
+        partial = not complete or reason is not None
+        return {'final_answer': f"对于 `{_cell(row['smiles'])}` 对 {_cell(row['requested_target'])} 的预测，{explanation}。",
+                'status': 'partial' if partial else 'completed', 'success': not partial, 'activity_evidence': evidence}
     lines = ['活性结果解读（复用上一轮证据）', '',
              '仅查看已验证的原始记录，未重新运行科学工具。模型预测非实验结论；需复核的值不能作为已确认活性。']
     summary_lines = ['活性预测解读', '', '复用已有模型预测，非实验测量；未重新计算。']

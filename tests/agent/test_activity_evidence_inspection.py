@@ -299,6 +299,55 @@ def accepted_snapshot():
 NAMED_BATCH = '回到刚才那批 BuChE 活性预测，第二个分子的 pIC50 换算成多少 μM？只使用已有结果。'
 
 
+@pytest.mark.parametrize('query', ['能把刚才那个微摩尔数值帮我换算成 nM 吗？', '那用纳摩尔呢？', '改用 nM'])
+def test_change_only_the_unit_of_the_selected_row(query):
+    selection = {'activity_evidence': accepted_snapshot(), 'activity_display_order': ['CCN', 'CCO'],
+                 'activity_position': 1, 'activity_conversion': {'unit': 'μM', 'explain': False}}
+    changed = followup_answer(query, [selection], SESSION)
+    assert changed and '199.5 nM' in changed['final_answer'] and 'CCO' not in changed['final_answer']
+    assert '需复核' in changed['final_answer']
+    following = followup_answer('那第二个呢？', [{**selection, **changed}], SESSION)
+    assert '5.012e+04 nM' in following['final_answer'] and 'CCO' in following['final_answer']
+    assert followup_answer(query, [selection], 'other') is None
+    assert followup_answer(query + ' 再预测 CCC。', [selection], SESSION) is None
+    waiting = followup_answer(query, [{**selection, 'activity_position': None}], SESSION)
+    assert waiting['status'] == 'not_calculated' and '序号或 SMILES' in waiting['final_answer']
+    assert waiting['activity_conversion']['unit'] == 'nM'
+
+
+def test_colloquial_two_weights_are_calculated_and_compared(tmp_path):
+    handler, activity, admet = handler_for(tmp_path, synthetic_rows())
+    view, _ = turn(handler, '麻烦你先查一下 CCO 和 CCN 各有多重，再告诉我哪个更重？', [], SESSION)
+    assert view['status'] == 'completed'
+    assert all(word in view['content'] for word in ('CCO', 'CCN', '46.07', '45.08', '第一个结构较高'))
+    assert not activity.calls and not admet.calls
+
+
+@pytest.mark.parametrize('position,smiles,score,conclusion', [(1, 'CCN', '6.7', '不一致'), (2, 'CCO', '4.3', '一致')])
+def test_one_sentence_checks_current_row_before_accepting_the_question(position, smiles, score, conclusion):
+    selection = {'activity_evidence': accepted_snapshot(), 'activity_display_order': ['CCN', 'CCO'],
+                 'activity_position': position, 'activity_conversion': {'unit': 'nM', 'explain': False}}
+    question = '这两种估计怎么对不上，你能用一句话说说是怎么回事吗？'
+    view = followup_answer(question, [selection], SESSION)
+    assert view and smiles in view['final_answer'] and score in view['final_answer']
+    assert conclusion in view['final_answer']
+    assert ('需复核' in view['final_answer']) == (position == 1)
+    assert view['activity_conversion'] == selection['activity_conversion']
+    assert view['activity_position'] == position
+
+
+def test_one_sentence_preserves_failed_row_without_borrowing_a_sibling_prediction():
+    evidence = accepted_snapshot()
+    evidence['observations'][0]['data'][0].update(
+        activity_class=None, activity_probability=None, predicted_pIC50=None,
+        classification_regression_consistent=None, status='failed', execution_status='failed',
+        success=False, errors={'classification': 'unavailable', 'regression': 'unavailable'})
+    history = [{'activity_evidence': evidence, 'activity_display_order': ['CCN', 'CCO'], 'activity_position': 2}]
+    answer = followup_answer('这两项结果为什么不一致，请一句话解释原因。', history, SESSION)
+    assert answer['status'] == 'partial' and '无法判断' in answer['final_answer']
+    assert 'CCO' in answer['final_answer'] and '6.7' not in answer['final_answer']
+
+
 def test_explicit_batch_reference_restores_the_original_display_order_and_unit(tmp_path):
     handler, activity, _ = handler_for(tmp_path, synthetic_rows())
     history = []

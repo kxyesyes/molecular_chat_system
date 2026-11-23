@@ -67,14 +67,17 @@ test("首页模型解释后仍沿用当前分子、单位和同次靶点记录",
   assert.deepEqual([...displayed].sort(), ["CCN", "CCO"]);
   const rows = displayed.map(smiles => batch.outputs[0].data.find(row => row.smiles === smiles));
   assert.ok(rows.every(row => row && Number.isFinite(row.predicted_pIC50)));
-  async function checkConversion(question, row) {
+  async function checkConversion(question, row, unit = "μM") {
     const status = row.classification_regression_consistent ? "completed" : "partial";
     const answer = await activity(question, [], status);
     assert.ok(answer.text.includes(`分子 ${row.smiles} 对 BuChE`), question);
-    const amount = answer.text.match(/换算约为 ([\d.eE+-]+) (?:微摩尔（μM）|μM)/);
+    const amount = answer.text.match(/换算约为 ([\d.eE+-]+) (微摩尔（μM）|μM|nM)/);
     assert.ok(amount, question);
-    assert.equal(Number(amount[1]), Number((10 ** (6 - row.predicted_pIC50)).toPrecision(4)));
+    assert.ok(amount[2].includes(unit), question);
+    const exponent = unit === "nM" ? 9 : 6;
+    assert.equal(Number(amount[1]), Number((10 ** (exponent - row.predicted_pIC50)).toPrecision(4)));
     assert.equal(answer.text.includes("需复核"), !row.classification_regression_consistent);
+    assert.ok(rows.every(other => other === row || !answer.text.includes(other.smiles)), question);
   }
   const selected = rows[1];
   const clarification = await activity("这个 pIC50 换算成多少微摩尔？", [], "not_calculated");
@@ -96,6 +99,27 @@ test("首页模型解释后仍沿用当前分子、单位和同次靶点记录",
   await checkConversion("那第一个呢？", rows[0]);
   await checkConversion(selected.smiles, selected);
   await checkConversion("我指的是第一个", rows[0]);
+  await checkConversion(selected.smiles, selected);
+  await checkConversion("能把刚才那个微摩尔数值帮我换算成 nM 吗？", selected, "nM");
+  const brief = "这两种估计怎么对不上，你能用一句话说说是怎么回事吗？";
+  const disagreement = await activity(brief, [], "partial");
+  assert.ok(disagreement.text.includes(selected.smiles) && !disagreement.text.includes(rows[0].smiles));
+  assert.ok(disagreement.text.includes(selected.predicted_pIC50.toPrecision(4)));
+  assert.match(disagreement.text, /标签不一致，需复核/);
+  await checkConversion("那第一个呢？", rows[0], "nM");
+  const premise = await activity(brief);
+  assert.ok(rows[0].classification_regression_consistent);
+  assert.ok(premise.text.includes(rows[0].smiles) && !premise.text.includes(selected.smiles), premise.text);
+  assert.match(premise.text, /标签一致/);
+  assert.ok(premise.text.includes(rows[0].predicted_pIC50.toPrecision(4)));
+  const weights = await activity("麻烦你先查一下 CCO 和 CCN 各有多重，再告诉我哪个更重？", ["property_calculator"]);
+  const measured = weights.outputs[0].data;
+  assert.deepEqual(measured.map(row => row.smiles), ["CCO", "CCN"]);
+  for (const row of measured) {
+    assert.ok(weights.text.includes(row.smiles) && weights.text.includes(row.properties.molecular_weight.toFixed(2)));
+  }
+  assert.ok(measured[0].properties.molecular_weight > measured[1].properties.molecular_weight);
+  assert.match(weights.text, /第一个结构较高/);
   const weight = await activity("请计算 CCO 的分子量。", ["property_calculator"]);
   const propertyRow = weight.outputs[0].data[0];
   assert.equal(propertyRow.smiles, "CCO");
@@ -123,4 +147,11 @@ test("首页模型解释后仍沿用当前分子、单位和同次靶点记录",
   await activity("请查询人 EGFR（UniProt P00533）的蛋白功能和实验结构。", ["target_database_search"]);
   await checkConversion(named, rows[1]);
   await checkConversion("那第一个呢？", rows[0]);
+  const editor = await conversation(browser, executions);
+  const copy = await editor("请帮我为对话界面写三句中文测试台词。第一句，用户已有微摩尔结果，想把同一个值改成纳摩尔，越口语越好。第二句，让助手把乙醇 CCO 和乙胺 CCN 的分子量算出来并指出哪个更重。第三句，用户只想用一句话听懂两项预测互相矛盾意味着什么。只给三句台词，不回答台词中的问题。");
+  assert.match(copy.text, /纳摩尔|nM/i);
+  assert.match(copy.text, /乙醇|CCO/);
+  assert.match(copy.text, /乙胺|CCN/);
+  assert.match(copy.text, /预测|矛盾|冲突|不一致|对不上/);
+  assert.doesNotMatch(copy.text, /46\.07|45\.08/);
 });

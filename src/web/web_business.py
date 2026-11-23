@@ -296,6 +296,18 @@ class WebTurnProjection:
         self.property_comparison_requested = comparison_request is not None
         if comparison_request:
             self.property_calculation_query = comparison_request.group(1)
+        else:
+            # A pair of explicit structures and a mass question can use the
+            # same reviewed batch calculation and comparison as a named metric.
+            smiles = r'[A-Za-z0-9@+\-\[\]()=#\\/%.:*]+'
+            weights = re.fullmatch(
+                rf'\s*(?:麻烦你|请)?(?:先)?(?:查一下|算一下|计算|查查|算算)?\s*'
+                rf'({smiles})\s*(?:和|与|、)\s*({smiles})\s*(?:各|分别)(?:有多重|的分子量)'
+                r'\s*[，,]\s*(?:再|并)?(?:告诉我|指出|比较|看看)?(?:哪一个|哪个)(?:更重|分子量更大)[？?。]?\s*',
+                query)
+            if weights:
+                self.property_calculation_query = f'计算 {weights[1]} 和 {weights[2]} 的分子量。'
+                self.property_comparison_requested = True
         origin = re.fullmatch(
             r'(.+?)[，,]\s*(?:并|以及)?\s*(?:指出|说明|标明)'
             r'(?:哪些指标是计算值|(?:这些|上述)(?:数值|结果|指标)是否(?:来自)?实验(?:测量|测定))'

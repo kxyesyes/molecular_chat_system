@@ -104,7 +104,7 @@ Pi SDK 负责对话循环。首页另在当前连接中保留用户实际看到�
 
 意图分类只接收本轮可用的记录类型、是否已选中活性行，以及是否有普通对话历史。回答阶段从同一份会话记录取数。每条活性预测同时提供概率与 pIC50 的原始数值和首页展示值，复述可直接引用已展示的精度，换算保留原始精度。没有普通对话历史时，分类器仍能把已有预测作为可解读的资料。
 
-要复跑[真实首页多轮验收](../scripts/check_home_agent_conversation.cjs)，先将 `AGENT_STATE_DB` 指向本次测试专用的 SQLite 文件，按本机开发规范启动 6001 端口的服务。让测试进程使用同一个数据库路径，在已安装 Chrome、可加载 Playwright 且提供 `node:sqlite` 的 Node 环境执行 `node --test scripts/check_home_agent_conversation.cjs`。脚本使用首页保存的兼容云端模型，在两个独立的浏览器会话内核对活性换算、靶点读回及各轮工具执行次数。
+要复跑[真实首页多轮验收](../scripts/check_home_agent_conversation.cjs)，先将 `AGENT_STATE_DB` 指向本次测试专用的 SQLite 文件，按本机开发规范启动 6001 端口的服务。让测试进程使用同一个数据库路径，在已安装 Chrome、可加载 Playwright 且提供 `node:sqlite` 的 Node 环境执行 `node --test scripts/check_home_agent_conversation.cjs`。脚本使用首页保存的云端模型，在独立浏览器会话中检查单位切换、一句话解读、计算后比较和只撰写问题。新增问法可先请首页模型拟写，再按当前展示的分子、首轮工具原始值及每轮实际工具调用判定是否通过。
 
 ## 4. 兼容代码与迁移状态
 

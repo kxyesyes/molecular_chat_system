@@ -37,6 +37,11 @@ _NAMED_ACTIVITY_BATCH = re.compile(
     r'(?:含\s*(?P<anchor>[A-Za-z0-9@+\-\[\]().=#\\/:%*]+)\s*的\s*)?'
     r'(?P<target>[A-Za-z][A-Za-z0-9_-]*)\s*(?:的)?活性预测(?:结果)?\s*[，,:：]\s*'
     r'(?P<question>.+?)(?:\s*(?:只|仅)使用已有结果[。.!！]?)?\s*', re.I | re.S)
+_CHANGE_CONCENTRATION_UNIT = re.compile(
+    r'\s*(?:能否?|可以|请|那)?(?:把|将)?(?:刚才)?(?:那个|这个)?'
+    r'(?:(?:微摩尔|纳摩尔|[μµun]M)?(?:数值|结果))?(?:帮我)?'
+    r'(?:换算[成为]|换[成为]|改用|换用|用)\s*(?P<unit>微摩尔|纳摩尔|[μµun]M)'
+    r'\s*(?:表示)?(?:吗|呢)?[？?。！!]?\s*', re.I)
 
 
 def comparison_tools(query):
@@ -450,8 +455,12 @@ def followup_answer(query, history, session_id):
             position = batch_reply_position(conversion['position'], current)
     elif owned and last.get('activity_conversion'):
         from .activity_evidence_inspection import batch_reply_position
-        position = batch_reply_position(query, current, choices=order)
-        if position is not None:
+        unit_change = _CHANGE_CONCENTRATION_UNIT.fullmatch(query)
+        if unit_change:
+            unit = unit_change['unit']
+            request = {**last['activity_conversion'],
+                       'unit': 'nM' if unit.casefold() in ('nm', '纳摩尔') else 'μM'}
+        elif (position := batch_reply_position(query, current, choices=order)) is not None:
             request = last['activity_conversion']
         elif current is None and re.fullmatch(r'[A-Za-z0-9@+\-\[\]().=#\\/:%*]+', query.strip()):
             if _canonical(query.strip()) is not None:
@@ -574,6 +583,8 @@ def followup_answer(query, history, session_id):
                 view = inspection_answer(evidence, inspection)
                 if single_position and 'activity_evidence' in view:
                     view['activity_position'] = positions[0]
+                    if inspection.get('brief') and last.get('activity_conversion'):
+                        view['activity_conversion'] = last['activity_conversion']
                 return view
             view = _render(evidence["smiles"], evidence["observations"], evidence["trace_id"],
                            ("activity_predictor",), reused=True)

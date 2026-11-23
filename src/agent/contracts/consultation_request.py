@@ -30,6 +30,9 @@ def tool_free_consultation_requested(query):
         return False
     # Quoted examples are objects of the request, including their punctuation.
     query = re.sub(r'''"[^"]*"|“[^”]*”|‘[^’]*’|「[^」]*」|(?<!\w)'[^']*'(?!\w)|`[^`]*`''', '_', query)
+    if re.search(r'(?:^|[。！？!?，,]\s*)只(?:给|写|输出)(?:[一二三四五六七八九十\d]+句)?(?:台词|问句|问题)'
+                 r'[，,]\s*(?:不要|不)(?:解答|回答)(?:台词中|其中|里面)?的?问题[。.!！]?\s*$', query):
+        return True
     return any(
         _NO_TOOLS.fullmatch(clause.strip()) for clause in re.split(
             r'[，,；;。!?！？\n]|\.(?=\s|$)', query))
