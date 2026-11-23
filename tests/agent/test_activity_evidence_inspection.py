@@ -300,7 +300,7 @@ CONVERT = '把刚才预测的 pIC50 换算为 IC50（nM），并说明结果代�
 CONVERT_CCO = '把上一轮 CCO 的 pIC50 换算为 IC50（nM），并说明结果代表什么。'
 
 
-@pytest.mark.parametrize('reply', ['第二个', 'CCN'])
+@pytest.mark.parametrize('reply', ['第二个', 'CCN', '2'])
 def test_batch_conversion_keeps_unit_selection_and_pending_clarification(tmp_path, reply):
     handler, activity, _ = handler_for(tmp_path, synthetic_rows())
     history = []
@@ -327,6 +327,28 @@ def test_batch_conversion_keeps_unit_selection_and_pending_clarification(tmp_pat
     second = ask(reply)
     assert second['status'] == 'partial' and '199.5 nM' in second['content'] and 'CCN' in second['content']
     assert '5.012e+04 nM' in ask('那第一个呢？')['content']
+    assert len(activity.calls) == 2
+
+
+def test_correcting_the_current_batch_selection_keeps_units_and_new_actions_separate(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+
+    def ask(question):
+        return turn(handler, question, history, SESSION)[0]
+
+    ask('预测 CCO 和 CCN 对 BuChE 的活性。')
+    ask('第二个分子的分类与回归是否一致？')
+    ask('这个 pIC50 换算成多少微摩尔？')
+    for question, smiles, amount in [('我指的是第一个', 'CCO', '50.12'), ('CCN', 'CCN', '0.1995'),
+                                     ('那它呢？', 'CCN', '0.1995')]:
+        answer = ask(question)['content']
+        assert smiles in answer and amount in answer and 'μM' in answer, question
+    assert len(activity.calls) == 1
+    assert followup_answer('我指的是第一个，再计算它的分子量。', history, SESSION) is None
+    assert followup_answer('请重新预测 CCO 对 BuChE 的活性。', history, SESSION) is None
+    assert followup_answer('我指的是第一个', history, 'different-session') is None
+    ask('预测 CCO 和 CCN 对 BuChE 的活性。')
     assert len(activity.calls) == 2
 
 

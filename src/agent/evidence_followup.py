@@ -402,7 +402,7 @@ def followup_answer(query, history, session_id):
         selector = conversion.groupdict().get('smiles')
     elif owned and last.get('activity_conversion'):
         from .activity_evidence_inspection import batch_reply_position
-        position = batch_reply_position(query, current)
+        position = batch_reply_position(query, current, choices=order)
         if position is not None:
             request = last['activity_conversion']
         elif current is None and re.fullmatch(r'[A-Za-z0-9@+\-\[\]().=#\\/:%*]+', query.strip()):

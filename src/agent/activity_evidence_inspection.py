@@ -74,8 +74,14 @@ def _position(number):
     return chinese.index(number) + 1 if number in chinese else 0
 
 
-def batch_reply_position(query, current):
-    match = re.fullmatch(rf'\s*(?:那)?(?:第({_ORDINAL})个(?:分子)?|它)(?:呢)?[？?。]?\s*', query)
+def batch_reply_position(query, current, *, choices=()):
+    reply = query.strip()
+    if choices:
+        if reply in choices:
+            return choices.index(reply) + 1
+        if re.fullmatch(_ORDINAL, reply):
+            return _position(reply)
+    match = re.fullmatch(rf'(?:那|我指的是)?\s*(?:第({_ORDINAL})个(?:分子)?|它)(?:呢)?[？?。]?', reply)
     if match:
         return _position(match[1]) if match[1] else current
     return None
@@ -90,7 +96,9 @@ def inspection_request(query, *, batch=None):
     if not isinstance(query, str):
         return None
     if batch:
-        position = batch_reply_position(query, batch.get('activity_position'))
+        current = batch.get('activity_position')
+        choices = batch.get('activity_display_order', ()) if current is not None else ()
+        position = batch_reply_position(query, current, choices=choices)
         if position is not None:
             query = f'第{position}个分子的分类与回归是否一致'
     clauses = [part.strip() for part in re.split(r'[，,；;。!?！？\n]|\.(?=\s|$)', query)

@@ -77,6 +77,9 @@ test("首页模型解释后仍沿用当前分子、单位和同次靶点记录",
     assert.equal(answer.text.includes("需复核"), !row.classification_regression_consistent);
   }
   const selected = rows[1];
+  const clarification = await activity("这个 pIC50 换算成多少微摩尔？", [], "not_calculated");
+  assert.match(clarification.text, /序号/);
+  await checkConversion("2", selected);
   const classification = await activity("第二个分子的分类与回归是否一致？", [],
     selected.classification_regression_consistent ? "completed" : "partial");
   assert.ok(classification.text.includes(selected.smiles));
@@ -91,6 +94,12 @@ test("首页模型解释后仍沿用当前分子、单位和同次靶点记录",
     values.text.includes((selected.activity_probability * 100).toPrecision(4) + "%"), values.text);
   await checkConversion("那它呢？", selected);
   await checkConversion("那第一个呢？", rows[0]);
+  await checkConversion(selected.smiles, selected);
+  await checkConversion("我指的是第一个", rows[0]);
+  const weight = await activity("请计算 CCO 的分子量。", ["property_calculator"]);
+  const propertyRow = weight.outputs[0].data[0];
+  assert.equal(propertyRow.smiles, "CCO");
+  assert.ok(Number.isFinite(propertyRow.properties.molecular_weight));
 
   const lookup = await target("请查询人 EGFR（UniProt P00533）的蛋白功能和实验结构。", ["target_database_search"]);
   const record = lookup.outputs[0].data[0];
