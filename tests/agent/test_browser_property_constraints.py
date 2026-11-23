@@ -88,6 +88,26 @@ def test_batch_lipinski_followup_uses_verified_previous_result():
     assert mismatch['pending'] == evidence
 
 
+def test_descriptor_reference_matches_the_rendered_table_when_tool_rows_are_reordered():
+    from types import SimpleNamespace
+    from src.web.decision_chat import scientific_display_answer
+    from src.web.property_comparison import accepted_batch_property_evidence, recorded_descriptor
+
+    result = _generation_result()
+    observation = result['tool_result_sequence'][1]
+    result['tool_result_sequence'] = [observation]
+    rows = observation['data']
+    for row in rows:
+        row['properties'].update(hba=1, hbd=1)
+    rendered = scientific_display_answer([SimpleNamespace(tool_name='property_calculator',
+        status=SimpleNamespace(value='succeeded'), data=rows)], concise=True, metrics=['mw'])
+    assert rendered.index('CCN') < rendered.index('CCO')
+    record = accepted_batch_property_evidence(result, '比较 CCO 和 CCN 的分子量。', 's')
+    selected = recorded_descriptor('帮我看一下第一行。', [{'batch_property_evidence': record,
+                                   'descriptor_metric': 'molecular_weight'}], 's')
+    assert selected['history_update']['property_evidence']['canonical_smiles'] == 'CCN'
+
+
 def test_batch_property_followup_reuses_evidence_after_lipinski():
     from src.web.web_business import WebTurnProjection
     evidence = {'session_id': 's', 'trace_id': 't', 'evidence_id': 'e',
@@ -132,6 +152,12 @@ def test_batch_ordinals_cover_all_supported_rows_and_reject_missing_row():
     history = [{'agent_used': True, 'batch_property_evidence': batch, 'descriptor_metric': 'logp'}]
     chosen = recorded_descriptor('那第十六个呢？', history, 's')
     assert chosen['history_update']['property_evidence']['canonical_smiles'] == rows[-1]['smiles']
+    corrected = recorded_descriptor('不好意思，其实我想看的是第一行。', [chosen['history_update']], 's')
+    assert corrected['history_update']['property_evidence']['canonical_smiles'] == rows[0]['smiles']
+    for reply, pos in [('下一行', 2), ('最后一行', 16), ('上一行', 15), ('看第8行', 8)]:
+        corrected = recorded_descriptor(reply, [corrected['history_update']], 's')
+        assert corrected['history_update']['property_evidence']['canonical_smiles'] == rows[pos - 1]['smiles']
+    assert recorded_descriptor('看第8行，再算 CCC', history, 's') is None
     invalid = recorded_descriptor('那第17个呢？', [chosen['history_update']], 's')
     assert invalid['status'] == 'not_calculated'
     assert invalid['history_update']['property_evidence'] == chosen['history_update']['property_evidence']

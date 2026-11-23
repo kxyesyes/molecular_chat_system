@@ -52,13 +52,92 @@ async function conversation(browser, executions, verifyModel = false) {
   };
 }
 
-test("首页模型解释后仍沿用当前分子、单位和同次靶点记录", async t => {
+async function verificationBrowser(t) {
   assert.ok(process.env.AGENT_STATE_DB, "请指定验收服务使用的 AGENT_STATE_DB");
   const db = new DatabaseSync(process.env.AGENT_STATE_DB, { readOnly: true });
   t.after(() => db.close());
   const executions = db.prepare("SELECT tool_name, output_json FROM tool_executions WHERE trace_id=? ORDER BY created_at, id");
   const browser = await chromium.launch({ channel: "chrome" });
   t.after(() => browser.close());
+  return { browser, executions };
+}
+
+test("澄清、纠正及越界后按各会话自己的表格和问题作答", async t => {
+  const { browser, executions } = await verificationBrowser(t);
+  const activity = await conversation(browser, executions, true);
+  const descriptors = await conversation(browser, executions);
+  const batch = await activity("预测 CCO 和 CCN 对 BuChE 的活性。", ["activity_predictor"], "partial");
+  const order = Array.from(batch.text.matchAll(/SMILES[：:]\s*(\S+)/g), m => m[1]);
+  assert.deepEqual(order, ["CCO", "CCN"]);
+  const brief = "这两种估计怎么对不上，你能用一句话说说是怎么回事吗？";
+  const clarify = await activity(brief, [], "not_calculated");
+  assert.match(clarify.text, /序号或 SMILES/);
+  const unavailable = await activity("CCC", [], "not_calculated");
+  assert.match(unavailable.text, /缺少所选分子/);
+
+  async function checkRow(query, index) {
+    const row = batch.outputs[0].data.find(r => r.smiles === order[index]);
+    const answer = await activity(query, [], row.classification_regression_consistent ? "completed" : "partial");
+    assert.ok(answer.text.includes(row.smiles) && !answer.text.includes(order[1 - index]), query);
+    assert.ok(answer.text.includes(row.predicted_pIC50.toPrecision(4)), query);
+    assert.ok(answer.text.includes(row.classification_regression_consistent ? "标签一致" : "标签不一致，需复核"), query);
+    assert.doesNotMatch(answer.text, /指标\s+结果/);
+  }
+  const second = "帮我看一下第二行。";
+  const first = "不好意思，其实我想看的是第一行。";
+  const beyond = "那第三行呢？";
+  await checkRow(second, 1);
+  const weights = await descriptors("查查 CCN 和 CCO 分别有多重，看看哪个更重？", ["property_calculator"]);
+  const properties = weights.outputs[0].data;
+  assert.deepEqual(properties.map(r => r.smiles), [...order].reverse());
+  async function checkWeight(query, index) {
+    const answer = await descriptors(query);
+    assert.ok(answer.text.includes(properties[index].smiles));
+    assert.ok(answer.text.includes(properties[index].properties.molecular_weight.toFixed(2) + " Da"));
+  }
+  await checkWeight(second, 1);
+  const summary = await descriptors("给没看到屏幕的同事写一句摘要，带上刚才选中行的 SMILES 和分子量，保留两位小数。");
+  assert.ok(summary.text.includes("CCO") && summary.text.includes("46.07") && !summary.text.includes("CCN"), summary.text);
+  await checkRow(first, 0);
+  await checkWeight(first, 0);
+  for (const ask of [activity, descriptors]) {
+    const missing = await ask(beyond, [], "not_calculated");
+    assert.match(missing.text, /序号/);
+  }
+  await checkRow("下一行", 1);
+  await checkWeight("最后一行", 1);
+  await checkRow("不是第二行，是第一行。", 0);
+  await checkWeight("上一行", 0);
+  const triple = await descriptors("比较 CCC、CCO 和 CCN 的分子量、LogP、HBA 和 HBD。", ["property_calculator"]);
+  const structures = triple.outputs[0].data.map(row => row.smiles);
+  assert.deepEqual(structures, ["CCC", "CCO", "CCN"]);
+  const pickTwo = await descriptors("根据刚才的结果，分别判断这两个分子是否符合 Lipinski 五规则。", [], "not_calculated");
+  assert.match(pickTwo.text, /3 个分子/);
+  const invalidPair = await descriptors("第三行和最后一行", [], "not_calculated");
+  assert.match(invalidPair.text, /不同/);
+  const pair = await descriptors("最后一行和第一行。");
+  assert.ok(pair.text.indexOf("CCN") >= 0 && pair.text.indexOf("CCN") < pair.text.indexOf("CCC"));
+  assert.ok(!pair.text.includes("CCO"));
+  assert.match(pair.text, /四项均未超过阈值/);
+  const logp = await descriptors("第二个的 logP 多少？");
+  const currentLogp = triple.outputs[0].data.find(r => r.smiles === "CCC").properties.logp.toFixed(3);
+  assert.ok(logp.text.includes("CCC") && logp.text.includes(currentLogp), logp.text);
+  const short = await descriptors("请用一句话概括刚才选中行的 SMILES 和 logP，保留三位小数。");
+  assert.ok(short.text.includes("CCC") && short.text.includes(currentLogp), short.text);
+  const next = await activity("预测 CCC 和 CCO 对 BuChE 的活性。", ["activity_predictor"], ["partial", "completed"]);
+  const nextOrder = Array.from(next.text.matchAll(/SMILES[：:]\s*(\S+)/g), m => m[1]);
+  assert.deepEqual(nextOrder, ["CCC", "CCO"]);
+  assert.match((await activity(brief, [], "not_calculated")).text, /序号或 SMILES/);
+  for (const [query, smiles] of [["OCC", "CCO"], ["上一行", "CCC"]]) {
+    const row = next.outputs[0].data.find(r => r.smiles === smiles);
+    const answer = await activity(query, [], row.classification_regression_consistent ? "completed" : "partial");
+    assert.ok(answer.text.includes(smiles) && answer.text.includes(row.predicted_pIC50.toPrecision(4)));
+    assert.match(answer.text, /标签/);
+  }
+});
+
+test("首页模型解释后仍沿用当前分子、单位和同次靶点记录", async t => {
+  const { browser, executions } = await verificationBrowser(t);
   const activity = await conversation(browser, executions, true);
   const target = await conversation(browser, executions);
 

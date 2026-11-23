@@ -577,10 +577,14 @@ def followup_answer(query, history, session_id):
                     if order and valid_inspection_evidence(evidence):
                         view.update(activity_evidence=evidence,
                                     activity_position=last.get('activity_position'))
+                        if inspection.get('brief'):
+                            view['activity_brief'] = True
                     return view
                 single_position = len(positions) == 1 and not inspection['selectors'] and not inspection['all']
                 inspection['selectors'] += tuple(order[pos - 1] for pos in positions)
                 view = inspection_answer(evidence, inspection)
+                if inspection.get('brief') and 'activity_evidence' in view and not last.get('activity_conversion'):
+                    view['activity_brief'] = True
                 if single_position and 'activity_evidence' in view:
                     view['activity_position'] = positions[0]
                     if inspection.get('brief') and last.get('activity_conversion'):

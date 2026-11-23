@@ -2,9 +2,18 @@
 import re
 
 
-def asks_about_given_information(query, *, prior_activity_context=None):
-    """Accept a reference to a server-resolved activity row or explicitly supplied evidence."""
+def selected_row_summary(query):
+    """A request to restate the chosen row, with no new labelled structure input."""
+    return (re.search(r'(?:选中|所选)(?:的)?(?:那|这)?一?(?:行|个分子|候选)|(?:当前这?|这|那)一?行|它的', query) is not None
+            and re.search(r'摘要|总结|概括|转述|复述|简述', query) is not None
+            and not re.search(r'SMILES\s*[:：=]', query, re.I))
+
+
+def asks_about_given_information(query, *, prior_activity_context=None, prior_candidate_context=None):
+    """Recognize readback of a resolved row or explicitly supplied evidence."""
     if prior_activity_context and prior_activity_context.get('selected_smiles'):
+        return True
+    if prior_candidate_context and prior_candidate_context.get('selected_smiles') and selected_row_summary(query):
         return True
     return re.search(
         r'(?:仅|只)(?:凭|据|根据|依据)(?:上述|以上|这些|现有|所给)(?:信息|数据|结果|证据)'

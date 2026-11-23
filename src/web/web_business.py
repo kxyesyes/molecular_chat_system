@@ -455,6 +455,16 @@ class WebTurnProjection:
 
     def model_candidate_context(self):
         """Project accepted calculation/prediction facts for ordinary explanations."""
+        from src.agent.contracts.consultation_request import selected_row_summary
+        if selected_row_summary(self.query):
+            descriptors = property_comparison.descriptor_context(self.history, self.session_id)
+            single = descriptors.get('property_evidence')
+            metric = descriptors.get('descriptor_metric')
+            smiles = single.get('canonical_smiles') if single else None
+            if (smiles and metric in ('molecular_weight', 'logp')
+                    and type(single.get(metric)) in (int, float) and math.isfinite(single[metric])):
+                return {'scope': 'selected_descriptor', 'selected_smiles': smiles,
+                        'candidates': [{'canonical_smiles': smiles, 'properties': {metric: single[metric]}}]}
         if not _PRIOR_RESULT_REFERENCE.search(self.query):
             return None
         evidence = self.history[-1].get('candidate_evidence') if self.history else None
@@ -2043,7 +2053,7 @@ class WebTurnProjection:
                     order = self.history[-1].get('activity_display_order')
                 if order is not None:
                     self.entry['activity_display_order'] = list(order)
-                for key in ('activity_position', 'activity_conversion'):
+                for key in ('activity_position', 'activity_conversion', 'activity_brief'):
                     if view.get(key) is not None:
                         self.entry[key] = view[key]
             return {'content': view['final_answer'],
@@ -2053,7 +2063,7 @@ class WebTurnProjection:
 
     def _retain_activity_selection(self):
         previous = self.history[-1]
-        for key in ('activity_display_order', 'activity_position', 'activity_conversion'):
+        for key in ('activity_display_order', 'activity_position', 'activity_conversion', 'activity_brief'):
             if key in previous:
                 self.entry[key] = previous[key]
 
@@ -2264,8 +2274,12 @@ class WebTurnProjection:
             for context_key, evidence_key in (
                     ('prior_activity_context', 'activity_evidence'),
                     ('prior_candidate_context', 'candidate_evidence')):
-                if getattr(context, 'metadata', {}).get(context_key) is not None:
-                    self.entry[evidence_key] = deepcopy(self.history[-1][evidence_key])
+                record = getattr(context, 'metadata', {}).get(context_key)
+                if record is not None:
+                    if context_key == 'prior_candidate_context' and record.get('scope') == 'selected_descriptor':
+                        self.entry['descriptor_carry'] = property_comparison.descriptor_context(self.history, self.session_id)
+                    else:
+                        self.entry[evidence_key] = deepcopy(self.history[-1][evidence_key])
             if getattr(context, 'metadata', {}).get('prior_activity_context') is not None:
                 self._retain_activity_selection()
                 answer = (view or {}).get('final_answer', result.final_answer)
@@ -2478,6 +2492,9 @@ class WebTurnProjection:
             batch_properties = property_comparison.accepted_batch_property_evidence(raw, query, self.session_id)
             if batch_properties is not None:
                 self.entry['batch_property_evidence'] = batch_properties
+                metrics = context.metadata.get('metrics', ())
+                if len(metrics) == 1 and metrics[0] in {'mw', 'logp'}:
+                    self.entry['descriptor_metric'] = {'mw': 'molecular_weight', 'logp': 'logp'}[metrics[0]]
             if (context.workflow_name == 'web-property-batch-v1' and result.success
                     and 'drug_likeness_assessment' in {item['tool_name'] for item in raw['tool_result_sequence']}):
                 from .decision_chat import web_scientific_display

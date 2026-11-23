@@ -9,7 +9,7 @@ from src.agent.candidate_evidence_followup import accepted_candidate_evidence
 from src.web.web_business import WebTurnProjection
 from src.web.web_request import prepare_web_request
 from tests.agent.test_candidate_evidence_followup import observation
-from tests.agent.test_web_decision_runtime import actual_app, ActualSocket, cookie_for, chat_decision
+from tests.agent.test_web_decision_runtime import actual_app, ActualSocket, cookie_for, chat_decision, result_of
 
 
 QUESTION = ('先别算新的数据。请把刚才的两个预测数值放在一起解释一下：'
@@ -113,6 +113,62 @@ def test_oversized_referenced_evidence_reports_capacity_not_ambiguous_intent():
             session_id='owner', trace_id='batch', prior_candidate_context=record)
     message = terminal_message_for_reason('decision_input_budget_exceeded')
     assert '上下文' in message and '预算' in message
+
+
+ROW_SUMMARY = '给没看到屏幕的同事写一句摘要，带上刚才选中行的 SMILES 和分子量，保留两位小数。'
+
+
+def test_summary_needs_an_owned_selection_and_does_not_replace_new_structures():
+    source = {'session_id': 'owner', 'trace_id': 't', 'evidence_id': 'e', 'canonical_smiles': 'CCO',
+              'molecular_weight': 46.07, 'logp': 0.123}
+    history = [{'property_evidence': source, 'descriptor_metric': 'molecular_weight'}]
+    assert WebTurnProjection(ROW_SUMMARY, 'foreign', history).model_candidate_context() is None
+    new_structure = ROW_SUMMARY + '再计算 SMILES: X_INVALID 的性质。'
+    assert WebTurnProjection(new_structure, 'owner', history).model_candidate_context() is None
+    assert WebTurnProjection(ROW_SUMMARY, 'owner', []).model_candidate_context() is None
+
+
+@pytest.mark.parametrize('kind,metric', [('general_knowledge', 'molecular_weight'), ('general_knowledge', 'logp'),
+                                        ('mixed', 'molecular_weight')])
+def test_summary_of_selected_property_row_is_read_only_and_preserves_navigation(actual_app, kind, metric):
+    from tests.agent.ordinary_chat_fixtures import intent_http_response
+
+    async def run():
+        async def respond(payload):
+            if len(bundle.calls) == 1:
+                return intent_http_response(kind)
+            marker = '. Immutable result requirements (not a tool sequence): '
+            prompt = next(m['content'] for m in payload['messages'] if marker in (m.get('content') or ''))
+            requirements = json.loads(prompt.split(marker, 1)[1])
+            assert requirements['steps'] == []
+            record = requirements['request']['metadata']['prior_candidate_context']
+            assert 'calculated mass in Da' in prompt and 'Recorded classification scores, including BBB' not in prompt
+            assert record['selected_smiles'] == 'CCO'
+            assert record['candidates'] == [{'canonical_smiles': 'CCO', 'properties': {metric: rows[1][metric]}}]
+            return chat_decision(f"当前选中的 CCO 的计算值为 {rows[1][metric]}。")
+
+        async with actual_app(ordinary_policy=None, respond=respond) as bundle:
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                sender, = bundle.app.decision_runtime.sockets
+                source = {'session_id': sender.scope['agent_session_id'], 'trace_id': 't', 'evidence_id': 'e'}
+                rows = [{'smiles': 'CCN', 'molecular_weight': 45.08, 'logp': -.035},
+                        {'smiles': 'CCO', 'molecular_weight': 46.07, 'logp': -.001}]
+                sender.scientific_memory[:] = [{'batch_property_evidence': {**source, 'rows': rows},
+                    'property_evidence': {**source, **rows[1], 'canonical_smiles': 'CCO'}, 'descriptor_metric': metric}]
+                question = ROW_SUMMARY if kind == 'general_knowledge' else ROW_SUMMARY + '再预测 CCC 对未知靶点的活性。'
+                if metric == 'logp':
+                    question = '请用一句话概括刚才选中行的 SMILES 和 logP，保留三位小数。'
+                frames = await socket.turn({'message': question, 'enable_rag': False})
+                result = result_of(frames)
+                assert result['success'] == (kind == 'general_knowledge'), (len(bundle.calls), result.get('metadata'))
+                assert not bundle.app.agent_state_store.get_tool_executions(result['trace_id'])
+                if kind == 'general_knowledge':
+                    assert str(rows[1][metric]) in frames[-1]['content']
+                    frames = await socket.turn({'message': '上一行', 'enable_rag': False})
+                    assert 'CCN' in frames[-1]['content'] and str(rows[0][metric]) in frames[-1]['content']
+                    assert len(bundle.calls) == 2
+    asyncio.run(run())
 
 
 def test_candidate_context_retains_requested_values_and_units_without_authority():

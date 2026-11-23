@@ -299,6 +299,33 @@ def accepted_snapshot():
 NAMED_BATCH = '回到刚才那批 BuChE 活性预测，第二个分子的 pIC50 换算成多少 μM？只使用已有结果。'
 
 
+def test_brief_activity_clarification_survives_row_corrections_and_bounds(tmp_path):
+    handler, tool, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+    turn(handler, '预测 CCO 和 CCN 对 BuChE 的活性。', history, SESSION)
+    brief = '这两种估计怎么对不上，你能用一句话说说是怎么回事吗？'
+    def ask(question):
+        return turn(handler, question, history, SESSION)[0]
+
+    assert '序号或 SMILES' in ask(brief)['content']
+    assert '缺少所选分子' in ask('CCC')['content']
+    for question, selected, result in (
+        ('帮我看一下第二行。', 'CCN', '标签不一致'),
+        ('不好意思，其实我想看的是第一行。', 'CCO', '标签一致'),
+        ('那第三行呢？', None, '序号'),
+        ('下一行', 'CCN', '标签不一致'),
+        ('不是第二行，是第一行。', 'CCO', '标签一致'),
+        ('CCO', 'CCO', '标签一致'),
+    ):
+        view = ask(question)
+        assert result in view['content']
+        if selected:
+            assert selected in view['content'] and '指标 | 结果' not in view['content']
+        else:
+            assert view['status'] == 'not_calculated' and '4.3' not in view['content']
+    assert len(tool.calls) == 1
+
+
 @pytest.mark.parametrize('query', ['能把刚才那个微摩尔数值帮我换算成 nM 吗？', '那用纳摩尔呢？', '改用 nM'])
 def test_change_only_the_unit_of_the_selected_row(query):
     selection = {'activity_evidence': accepted_snapshot(), 'activity_display_order': ['CCN', 'CCO'],

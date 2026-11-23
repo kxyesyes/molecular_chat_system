@@ -1965,7 +1965,8 @@ class WebDecisionRuntime:
                       and envelope.reference is None and envelope.selection is None
                       and turn.scientific_plan.original_query == execution_payload['message'] == envelope.query
                       and asks_about_given_information(envelope.query,
-                          prior_activity_context=projection.readback_contexts.get('prior_activity_context'))):
+                          prior_activity_context=projection.readback_contexts.get('prior_activity_context'),
+                          prior_candidate_context=projection.readback_contexts.get('prior_candidate_context'))):
                     # Keep the original rejection for mixed or executable requests.
                     if await self._classify_tool_free_consultation(
                             sender, turn, model, generation, handler._input_limit(), rejection=None):
@@ -2058,7 +2059,10 @@ class WebDecisionRuntime:
                             # The classifier cannot authorize computation or resolve a candidate.
                             reviewable = self.full_web and (
                                 exc.code == 'activity_target_conflict_or_unknown' and mentions_assay_concentration(envelope.query)
-                                or exc.code == 'scientific_reference_unavailable' and asks_about_given_information(envelope.query))
+                                or exc.code == 'scientific_reference_unavailable' and asks_about_given_information(
+                                    envelope.query, prior_candidate_context=projection.readback_contexts.get('prior_candidate_context'))
+                                or exc.code == 'molecular_input_required' and projection.readback_contexts.get(
+                                    'prior_candidate_context', {}).get('scope') == 'selected_descriptor')
                             if not (reviewable
                                     and turn.scientific_plan is None and not turn.tool_free_consultation
                                     and envelope.reference is None and envelope.selection is None
