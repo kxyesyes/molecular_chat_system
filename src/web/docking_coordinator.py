@@ -1012,9 +1012,10 @@ class DockingRequestCoordinator:
                 and result.get("ok") is False and result.get("code") == "SOURCE_DNS_RESTRICTED"):
             raise _Unavailable("source_dns_restricted")
         if (owner.snapshot()["settled"] is True and type(result) is dict
-                and result.get("ok") is False and result.get("code") == "RCSB_SOURCE_INVALID"
-                and result.get("reason") in ("context_unsupported", "unknown_element")):
-            raise _Unavailable("source_" + result["reason"])
+                and result.get("ok") is False and result.get("code") == "RCSB_SOURCE_INVALID"):
+            if result.get("reason") in ("context_unsupported", "unknown_element"):
+                raise _Unavailable("source_" + result["reason"])
+            raise _Unavailable("source_verification_failed")
         if (owner.snapshot()["settled"] is not True or type(result) is not dict
                 or result.get("ok") is not True):
             raise _Unavailable("source_preparation_unavailable")

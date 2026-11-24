@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 _PREFLIGHT_MESSAGES = {
+    'source_verification_failed': (
+        '实验结构文件已取得，但未通过受体校验，本次未启动对接。'
+        '可以继续查看本次靶点检索结果，或选择另一份实验结构。'),
     'source_unknown_element': (
         '这份实验结构将部分原子的元素标为 X，无法可靠准备受体，本次未启动对接。'
         '请从该靶点的实验结构中选择元素标注完整的记录。'),

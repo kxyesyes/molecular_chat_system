@@ -290,8 +290,13 @@ def test_restricted_dns_exposes_specific_preparation_failure(tmp_path, target_ca
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('reason', ['context_unsupported', 'unknown_element'])
-def test_unsupported_structure_is_not_misreported_as_download_failure(tmp_path, target_case, monkeypatch, reason):
+@pytest.mark.parametrize('reason, message_code', [
+    ('context_unsupported', 'source_context_unsupported'),
+    ('unknown_element', 'source_unknown_element'),
+    ('source_invalid', 'source_verification_failed'),
+    ('inventory_mismatch', 'source_verification_failed'),
+])
+def test_unsupported_structure_is_not_misreported_as_download_failure(tmp_path, target_case, monkeypatch, reason, message_code):
     rig, pointer = source_rig(tmp_path, target_case)
     async def unavailable(**kwargs):
         return {'ok': False, 'code': 'RCSB_SOURCE_INVALID', 'reason': reason}
@@ -301,7 +306,7 @@ def test_unsupported_structure_is_not_misreported_as_download_failure(tmp_path, 
             coordinator = rig.coordinator(client)
             view = await rig.begin(coordinator, structure_context=pointer)
             assert view['phase'] == 'UNAVAILABLE'
-            assert view['reason_code'] == 'source_' + reason
+            assert view['reason_code'] == message_code
             assert_not_ready(view)
     asyncio.run(run())
 
