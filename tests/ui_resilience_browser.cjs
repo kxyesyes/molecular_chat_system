@@ -1322,12 +1322,13 @@ test("structure actions accept one request per double click and recover after fa
   assert.equal(detailRequests, 2);
 });
 
-test("PDB handoff retries offline, prepares the selected receptor once and preserves direct links", {timeout: 30000}, async t => {
+test("PDB handoff retries offline and opens only the latest selection after repeated switches", {timeout: 30000}, async t => {
   const target = {target_id: 1, gene_symbol: "TEST"};
   const structures = [{id: 21, structure_id: "1AAA"}, {id: 32, structure_id: "2BBB"}];
   const pdb = id => `HEADER    RECEPTOR ${id}\nATOM      1  CA  ALA A   1       ${id === 21 ? "1" : "2"}.000   0.000   0.000  1.00  0.00           C\nEND\n`;
   const reads = [], creates = [];
-  const firstPrepared = Promise.withResolvers(), lastPrepared = Promise.withResolvers();
+  const pending = Array.from({length: 4}, () => Promise.withResolvers());
+  let attempt = 0;
   let offline = false;
   const page = await pageFor(t, "https://medchat.test/target-search", async (route, url) => {
     if (url.pathname.endsWith("/search")) return route.fulfill({json: {query: "TEST", results: [target]}});
@@ -1342,7 +1343,8 @@ test("PDB handoff retries offline, prepares the selected receptor once and prese
       const preflight = {...structure, can_download: true, cache_status: "available", docking_grade: "A"};
       if (match[2] === "send-to-docking") {
         if (offline) return route.continue();
-        await (structure.id === 21 ? firstPrepared : lastPrepared).promise;
+        const status = await pending[attempt++].promise;
+        if (status === 503) return route.fulfill({status, json: {detail: "stale preparation"}});
         return route.fulfill({json: {structure_db_id: structure.id, file_format: "pdb", preflight}});
       }
       if (match[2] === "preflight") return route.fulfill({json: preflight});
@@ -1375,30 +1377,45 @@ test("PDB handoff retries offline, prepares the selected receptor once and prese
   offline = false;
   await page.context().setOffline(false);
   const first = page.locator(".structure-item").filter({hasText: "1AAA"}).getByRole("button", {name: "准备并打开分子对接"});
+  // Observe settlement of the real click handlers while the server replies out of order.
+  await page.evaluate(() => {
+    const send = TargetSearchApp.sendToDocking;
+    window.handoffs = [];
+    TargetSearchApp.sendToDocking = (...args) => {
+      const task = send(...args);
+      window.handoffs.push(task);
+      return task;
+    };
+  });
   try {
     await first.click();
     await launch.dblclick();
     assert(await launch.isDisabled());
-    firstPrepared.resolve();
-    await first.click({trial: true});
+    await first.click();
+    await launch.click();
+    pending[1].resolve(503);
+    pending[0].resolve(200);
+    pending[2].resolve(200);
+    await page.evaluate(() => Promise.all(window.handoffs.slice(0, 3)));
     assert.equal(new URL(page.url()).pathname, "/target-search");
     assert(await launch.isDisabled());
+    assert.doesNotMatch(await page.locator("#targetMessage").innerText(), /stale preparation/);
   } finally {
-    firstPrepared.resolve();
-    lastPrepared.resolve();
+    for (const request of pending) request.resolve(200);
   }
   await page.waitForURL("**/molecular-docking*");
   await verifyReceptor(structures[1]);
   const prepare = ["POST", 32, "send-to-docking", "pdb"];
-  assert.deepEqual(reads, [prepare, ["POST", 21, "send-to-docking", "pdb"], prepare, ["GET", 32, "preflight", "pdb"], ["GET", 32, "download", "pdb"]]);
+  const prepareFirst = ["POST", 21, "send-to-docking", "pdb"];
+  assert.deepEqual(reads, [prepare, prepareFirst, prepare, prepareFirst, prepare, ["GET", 32, "preflight", "pdb"], ["GET", 32, "download", "pdb"]]);
   await page.reload();
-  assert.equal(reads.length, 5);
+  assert.equal(reads.length, 7);
   for (const key of ["target_structure", "target_structure_id"]) {
     await page.goto(`https://medchat.test/molecular-docking?${key}=21&keep=yes#viewer`);
     await verifyReceptor(structures[0]);
     assert.equal(new URL(page.url()).search + new URL(page.url()).hash, "?keep=yes#viewer");
   }
-  assert.deepEqual(reads.slice(5), Array(2).fill([["GET", 21, "preflight", "pdb"], ["GET", 21, "download", "pdb"]]).flat());
+  assert.deepEqual(reads.slice(7), Array(2).fill([["GET", 21, "preflight", "pdb"], ["GET", 21, "download", "pdb"]]).flat());
   assert.deepEqual(creates, []);
 });
 

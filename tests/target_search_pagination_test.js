@@ -89,6 +89,25 @@ test("only the last structure selected for docking can navigate", async () => {
   assert.equal(location.href, "/molecular-docking?target_structure=22");
 });
 
+test("A can be selected again before its first preparation finishes", async () => {
+  const { app, handoffs, location, element } = createBrowser();
+  const a = {}, b = {};
+  const oldA = app.sendToDocking(11, a);
+  const oldB = app.sendToDocking(22, b);
+  assert.equal(a.disabled, false);
+  const currentA = app.sendToDocking(11, a);
+  assert.equal(b.disabled, false);
+  handoffs[0].resolve(prepared(11));
+  handoffs[1].reject(new Error("stale B"));
+  await Promise.all([oldA, oldB]);
+  assert.equal(a.disabled, true);
+  assert.doesNotMatch(element("targetMessage").textContent, /stale B/);
+  assert.equal(location.href, "/target-search");
+  handoffs[2].resolve(prepared(11));
+  await currentA;
+  assert.equal(location.href, "/molecular-docking?target_structure=11");
+});
+
 test("a superseded handoff cannot replace a failure or navigate after clearing the search", async () => {
   const { app, handoffs, location, element } = createBrowser();
   const first = app.sendToDocking(11, {});
