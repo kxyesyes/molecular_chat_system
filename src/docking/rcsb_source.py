@@ -144,7 +144,8 @@ class _Cif:
             budget.reserve(count * (512 + width * 320))
             normalized = []
             for tag in tags:
-                _require(len(tag) <= 128 and re.fullmatch(r"_[A-Za-z0-9_]+\.[A-Za-z0-9_-]+(?:\[[0-9]+\])*", tag))
+                _require(len(tag) <= 128 and re.fullmatch(
+                    r"_[A-Za-z0-9_]+\.[A-Za-z0-9_-]+(?:\[[0-9]+\])*(?:_esd)?", tag, re.I | re.ASCII))
                 tag = tag.lower()
                 _require(tag not in seen)
                 seen.add(tag)
