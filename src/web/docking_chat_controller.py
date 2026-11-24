@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 
 
 _PREFLIGHT_MESSAGES = {
+    'source_verification_failed': (
+        '实验结构文件已取得，但未通过受体校验，本次未启动对接。'
+        '可以继续查看本次靶点检索结果，或选择另一份实验结构。'),
+    'source_unknown_element': (
+        '这份实验结构将部分原子的元素标为 X，无法可靠准备受体，本次未启动对接。'
+        '请从该靶点的实验结构中选择元素标注完整的记录。'),
     'source_context_unsupported': (
         '实验结构文件已获取，但其中的结构语境暂不受当前核验流程支持；本次未启动对接。'
         '请尝试其他实验结构。'),
@@ -76,11 +82,10 @@ class DockingChatController:
         sequence = result.get('tool_result_sequence') if type(result) is dict else None
         logger.info("chat docking source capture sequence_items=%s pointer=%s",
                     len(sequence) if type(sequence) is list else -1, pointer is not None)
-        if (pointer is None or not self._live(sender)
-                or sender.websocket.scope.get('agent_session_id') != owner):
+        if not self._live(sender) or sender.websocket.scope.get('agent_session_id') != owner:
             return False
         sender._docking_structure = pointer
-        return True
+        return pointer is not None
 
     def _live(self, sender, attachment=None):
         return (not self.runtime.closing and sender in self.runtime.sockets

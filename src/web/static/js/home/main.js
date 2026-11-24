@@ -74,7 +74,9 @@
   function updateScientificReferenceSelection(outgoing) {
     const selected = outgoing?.selection || null;
     document.querySelectorAll(".molecule-selection-button").forEach(button => {
-      const isSelected = Boolean(selected
+      const presentation = button.getAttribute("data-presentation-id");
+      button.disabled = !scientificReferences.isConfirmed(presentation);
+      const isSelected = Boolean(selected && presentation === outgoing.reference.presentation_id
         && button.getAttribute("data-observation-id") === selected.observation_id
         && button.getAttribute("data-candidate-id") === selected.candidate_id);
       button.textContent = isSelected ? "已选择" : "选择此分子";
@@ -83,6 +85,8 @@
       button.style.color = isSelected ? "#047857" : "#475569";
       button.style.border = isSelected ? "1px solid #10b981" : "1px solid #cbd5e1";
       button.style.fontWeight = isSelected ? "600" : "500";
+      button.style.cursor = button.disabled ? "default" : "pointer";
+      button.style.opacity = button.disabled ? "0.6" : "1";
     });
   }
 
@@ -200,7 +204,7 @@
       (typeof dockingUI !== "undefined" && dockingUI?.blocked()) ||
       (decisionMode && Boolean(decisionActive() || decisionWaiting || decisionAbandonAwait));
     if (!decisionControls) return;
-    decisionControls.box.hidden = !decisionMode || !(decisionActive() || decisionWaiting);
+    decisionControls.box.hidden = !decisionMode || decisionTurn?.phase === "handoff" || !(decisionActive() || decisionWaiting);
     decisionControls.stop.hidden = !decisionActive();
     decisionControls.resume.hidden = decisionControls.fresh.hidden = !decisionWaiting || Boolean(decisionActive());
     decisionControls.stop.disabled = !decisionMode || !decisionActive() || !decisionTurn.turnId ||
@@ -245,7 +249,7 @@
     decisionAwaitingReady = true; // every new socket must announce its own mode
     if (decisionMode) {
       scientificReferences?.startRequest(); // invalidate pending ACKs/restores, never replay
-      if (decisionActive()) {
+      if (decisionActive() && decisionTurn.phase !== "handoff") {
         if (!decisionTurn.result) {
           finishPendingSourceCheck(decisionTurn, "disconnected", "连接已断开，结果未确认", "is-warning");
         }
@@ -390,6 +394,14 @@
       return true;
     }
     if (!turn || turn.socket !== socket || turn.phase === "ended") return true;
+    if (turn.phase === "handoff") {
+      if (message.type === "followup_ready" && message.turn_id === turn.turnId && message.trace_id === turn.traceId) {
+        turn.phase = "ended";
+        updateDecisionControls();
+        if (turn.repeatAfterHandoff) sendDecisionMessage(false, turn.repeat);
+      }
+      return true;
+    }
     if (message.type === "request_accepted") {
       if (turn.phase !== "pending" || !/^[a-f0-9]{32}$/.test(message.turn_id || "") ||
         !/^[a-f0-9]{32}$/.test(message.trace_id || "") || decisionSeenTurns.has(message.turn_id) ||
@@ -489,7 +501,7 @@
       }
       decisionStatus(turn, deliveryStatus + retrievalNotice);
       turn.box.setAttribute("data-content", text);
-      turn.box.querySelector(".message-content").innerHTML = HomeFormatters.formatContent(text,
+      renderAssistantContent(turn.box.querySelector(".message-content"), text,
         {displayKind: message.metadata?.display_kind});
       updateDecisionControls(); return true;
     }
@@ -575,7 +587,7 @@
           turn.box.appendChild(notice);
         }
       }
-      turn.phase = "ended";
+      turn.phase = message.metadata?.structure_handoff_pending === true ? "handoff" : "ended";
       if (projectionFailed) {
         setDecisionWaiting(null);
       } else if (status === "waiting_for_input" && /^[a-f0-9]{32}$/.test(metadata.continuation_id || "") &&
@@ -589,7 +601,8 @@
         if (repeat.runs.length === 1 && message.model_generation) {
           repeat.payload.expected_model_generation = message.model_generation;
         }
-        sendDecisionMessage(false, repeat);
+        if (turn.phase === "handoff") turn.repeatAfterHandoff = true;
+        else sendDecisionMessage(false, repeat);
       }
       return true;
     }
@@ -1976,7 +1989,11 @@
     messageWrapper.appendChild(messageContainer);
     elements.chatContainer.appendChild(messageWrapper);
 
-    if (typeof dockingUI !== "undefined") dockingUI?.begin(ws, messageWrapper);
+    if (typeof dockingUI !== "undefined") dockingUI?.begin(ws, tag => {
+      const response = document.createElement(tag);
+      messageWrapper.parentNode?.insertBefore(response, messageWrapper.nextSibling);
+      return response;
+    });
   }
 
   // 添加助手消息 - 美化版
@@ -2044,7 +2061,7 @@
     timeStamp.textContent = HomeChatRenderer.getCurrentTime();
 
     const messageContent = document.createElement("div");
-      messageContent.innerHTML = HomeFormatters.formatContent(content);
+    renderAssistantContent(messageContent, content);
 
     messageBox.appendChild(timeStamp);
     messageBox.appendChild(messageContent);
@@ -2143,7 +2160,7 @@
     const currentContent = lastMessage.getAttribute("data-content") || "";
     const newContent = currentContent + content;
     lastMessage.setAttribute("data-content", newContent);
-      messageContent.innerHTML = HomeFormatters.formatContent(newContent);
+    renderAssistantContent(messageContent, newContent);
 
     // 添加光标闪烁效果
     if (!messageContent.querySelector(".cursor")) {
@@ -2227,7 +2244,7 @@
           lastMessage.querySelector(".message-content") ||
           lastMessage.querySelector("div:last-child");
         if (messageContent) {
-          messageContent.innerHTML = HomeFormatters.formatContent(content, displayOptions);
+          renderAssistantContent(messageContent, content, displayOptions);
         }
       }
 
@@ -2253,6 +2270,17 @@
     } finally {
       moleculeCandidateLifecycle.clear();
       if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
+    }
+  }
+
+  function renderAssistantContent(target, content, displayOptions) {
+    try {
+      target.innerHTML = HomeFormatters.formatContent(content, displayOptions);
+    } catch {
+      const plain = document.createElement("span");
+      plain.style.whiteSpace = "pre-wrap";
+      plain.textContent = content;
+      target.replaceChildren(plain);
     }
   }
 
@@ -3602,6 +3630,8 @@
         const selectBtn = document.createElement("button");
         selectBtn.type = "button";
         selectBtn.className = "molecule-selection-button";
+        selectBtn.disabled = true;
+        selectBtn.setAttribute("data-presentation-id", payload.reference.presentation_id);
         selectBtn.style.cssText = `
           flex: 1;
           background: #fff;
@@ -3610,7 +3640,8 @@
           border-radius: 6px;
           padding: 8px 12px;
           font-size: 12px;
-          cursor: pointer;
+          cursor: default;
+          opacity: 0.6;
           font-weight: 500;
         `;
         const compoundKey = payload.reference.ordered_keys.find(k => k[1] === candidate.candidate_id);

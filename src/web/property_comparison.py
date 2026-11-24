@@ -55,10 +55,11 @@ def _adjacent_molecule_label(query, smiles):
     return label
 
 
+_PRIOR_TURN = r'(?:刚才|上轮|上一轮|之前|前面)'
 _DESCRIPTOR_QUESTION = re.compile(
-    r'(?:请问\s*|请\s*)?(?P<prior>(?:使用|根据|基于|查看)?\s*(?:刚才|上轮|上一轮|之前|前面)的?'
+    rf'(?:请问\s*|请\s*)?(?P<prior>(?:使用|根据|基于|查看)?\s*{_PRIOR_TURN}的?'
     r'(?:(?:计算)?(?:结果|记录)[，,：:]\s*)?)?'
-    r'(?P<subject>[\w-]{1,80}?)?(?:的)?\s*'
+    rf'(?P<subject>[\w-]{{1,80}}?)?(?P<subject_prior>{_PRIOR_TURN}(?=的))?(?:的)?\s*'
     r'(?:(?P<metric>分子量|MW|log\s*P)\s*(?:分别)?(?:是多少|为多少|多少|呢)|有多重)'
     r'(?:来着)?[？?。]?\s*(?P<read_only>(?:请)?(?:不要|不用|无需)重新计算[。.!！]?)?', re.I)
 _DEICTIC = ('它', '那', '这个', '那个', '该分子', '这个分子', '那个分子')
@@ -101,7 +102,7 @@ class DescriptorQuestion:
         match = _DESCRIPTOR_QUESTION.fullmatch(query.strip())
         if match:
             metric = 'logp' if (match['metric'] or '').lower().startswith('log') else 'molecular_weight'
-            return cls(match['subject'], metric, bool(match['prior']), bool(match['read_only']))
+            return cls(match['subject'], metric, bool(match['prior'] or match['subject_prior']), bool(match['read_only']))
 
 
 def recorded_descriptor(query, history, session_id, *, selected_smiles=None):

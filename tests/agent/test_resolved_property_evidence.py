@@ -131,6 +131,23 @@ def test_repeat_direct_two_metric_card_request(tmp_path):
         assert set(history[-1]["property_evidence"]["requested_metrics"]) == {"logp", "mw"}
 
 
+def test_selected_candidate_descriptor_recall_and_explicit_rerun(tmp_path):
+    store, references, pointer = confirmed(tmp_path)
+    chat, properties = handler(store, references)
+    history = []
+    for query, count in [
+        ("请计算这个分子的分子量。", 1),
+        ("它刚才的分子量是多少？", 1),
+        ("这个分子上一轮的 logP 是多少？", 1),
+        ("请把这个分子的分子量重新算一次。", 2),
+    ]:
+        result = turn(chat, query, history, reference=pointer, selection={"ordinal": 2})
+        assert result["status"] == "completed", (query, result["content"])
+        assert properties.calls == ["CCN"] * count
+        expected = properties.calculate_properties("CCN")
+        assert (f"{expected['logp']:.3f}" if "logP" in query else "45.08") in result["content"]
+
+
 def test_explicit_card_reruns_use_current_selection_once_per_request(tmp_path):
     store, references, pointer = confirmed(tmp_path)
     chat, properties = handler(store, references)

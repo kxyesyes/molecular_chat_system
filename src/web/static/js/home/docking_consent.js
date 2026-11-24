@@ -155,11 +155,12 @@
       const validClick = () => state.epoch === epoch && live(state) && !state.pending;
       const box = state.box;
       box.replaceChildren(); box.className = "docking-consent-card"; box.setAttribute("data-task-id", event.task_id);
+      const showResult = event.view_status === "SUCCEEDED" && !state.stopped && !state.readOnly;
       const header = node("div", undefined, box); header.className = "docking-card-heading";
-      node("span", "MOLECULAR DOCKING", header).className = "docking-eyebrow";
+      if (!showResult) node("span", "分子对接", header).className = "docking-eyebrow";
       const heading = node("h3", state.stopped ? (state.stopHeading || "结果未确认 / 本次确认已失效") : statuses[event.view_status][1], header);
       heading.setAttribute("role", "status");
-      node("p", `任务 ${event.task_id} · 修订 ${event.revision}`, box).className = "docking-identity";
+      if (!showResult) node("p", `任务 ${event.task_id} · 修订 ${event.revision}`, box).className = "docking-identity";
       if (state.notice) node("p", state.notice, box).className = "docking-notice";
       if (state.drainedFailure) return;
       if (event.cleanup_status === "pending" || event.persistence_pending || !event.segment_complete)
@@ -169,13 +170,20 @@
         el.addEventListener("click", handler); return el;
       };
       if (state.readOnly) {action("刷新状态（只读）", () => {if (state.epoch === epoch) watch(state, true);}); return;}
-      if (event.view_status === "SUCCEEDED" && !state.stopped) {
+      if (showResult) {
         const result = event.result;
-        node("p", "以下为 Vina 计算预测，不代表实验验证的结合活性。", box);
-        table(box, [["最佳 Vina 评分 (kcal/mol)", result.best_energy_kcal_mol], ["构象数", result.pose_count],
-          ["工具", result.tool_version], ["评分类型", result.score_kind], ["构象文件 SHA-256", result.pose.sha256],
+        const metrics = node("dl", undefined, box); metrics.className = "docking-result-metrics";
+        for (const [label, value] of [["最佳 Vina 预测评分", `${result.best_energy_kcal_mol} kcal/mol`], ["构象数", result.pose_count]]) {
+          const metric = node("div", undefined, metrics);
+          node("dt", label, metric); node("dd", String(value), metric);
+        }
+        const link = node("a", "下载已验证构象", box); link.setAttribute("href", result.pose.download_path);
+        const details = node("details", undefined, box);
+        node("summary", "计算与文件校验信息", details);
+        table(details, [["任务编号", event.task_id], ["修订", event.revision], ["工具", result.tool_version],
+          ["评分类型", result.score_kind], ["构象文件 SHA-256", result.pose.sha256],
           ["输入 SHA-256", result.input_hash], ["配置 SHA-256", result.config_hash], ["工具策略 SHA-256", result.tool_policy_digest]]);
-        const link = node("a", "下载已验证构象", box); link.setAttribute("href", result.pose.download_path); return;
+        return;
       }
       if (event.terminal) {
         // Logical terminal status can precede physical/durable cleanup. Keep
@@ -299,10 +307,10 @@
     }
     return {
       configure(currentSocket, available) {socket = currentSocket; enabled = available === true; pending = null; notify();},
-      begin(currentSocket, host) {
-        if (enabled && currentSocket === socket && host) {
+      begin(currentSocket, mountResponse) {
+        if (enabled && currentSocket === socket && mountResponse) {
           for (const state of cards.values()) state.ownsComposer = false;
-          pending = {socket, host, accepted: null};
+          pending = {socket, mountResponse, accepted: null};
         }
       },
       accepted(message, currentSocket) {
@@ -328,7 +336,7 @@
               stop(state, notice, heading);
               options.onSegment?.({origin_turn_id: message.turn_id, request_id: message.trace_id});
             } else {
-              pending.failureBox ||= node("p", undefined, pending.host);
+              pending.failureBox ||= pending.mountResponse("p");
               pending.failureBox.textContent = notice;
               pending = null;
             }
@@ -337,7 +345,7 @@
           }
           const failure = message.code === "docking_unavailable" && typeof message.docking_segment_complete === "boolean" && (attached || awaiting);
           if (rejected) {
-            node("p", "对接请求未完成；未获得新的执行授权。请检查状态后重新发起。", pending.host);
+            pending.mountResponse("p").textContent = "对接请求未完成；未获得新的执行授权。请检查状态后重新发起。";
             pending = null;
             options.onRejected?.();
             notify();
@@ -353,7 +361,7 @@
               stop(state, notice);
             } else {
               pending.failed = true;
-              pending.failureBox ||= node("p", undefined, pending.host);
+              pending.failureBox ||= pending.mountResponse("p");
               pending.failureBox.textContent = notice;
               if (complete) pending = null;
             }
@@ -372,7 +380,7 @@
           if (!pending?.accepted || pending.socket !== socket || pending.accepted.root !== event.request_id || pending.accepted.turn !== event.origin_turn_id) return true;
           const notice = pending.failureBox?.textContent;
           pending.failureBox?.parentNode?.removeChild(pending.failureBox);
-          state = {socket, event, box: node("section", undefined, pending.host), epoch: 0, source: null, pending: false, ownsComposer: true,
+          state = {socket, event, box: pending.mountResponse("section"), epoch: 0, source: null, pending: false, ownsComposer: true,
             proof: null, stopped: Boolean(pending.failed), notice, readOnly: false, blocked: false, pollTimer: null, expiryTimer: null, workTimer: null};
           cards.set(event.request_id, state); pending = null;
           // Old DOM may remain visible, but no more than 32 live controller records.
@@ -420,7 +428,7 @@
         if (currentSocket !== socket) return;
         if (pending?.socket === currentSocket && pending.accepted) {
           pending.failed = true;
-          pending.failureBox ||= node("p", undefined, pending.host);
+          pending.failureBox ||= pending.mountResponse("p");
           pending.failureBox.textContent = "本地等待已超时，结果未确认；不会接受迟到的成功。";
         }
         for (const state of cards.values()) if (state.socket === currentSocket && !state.event.terminal)

@@ -29,6 +29,8 @@ _AFFINITY_INFERENCE = re.compile(
 _PRIOR_RESULT_REFERENCE = re.compile(
     r'刚才|之前|先前|上一轮|上次|上述|前述|上面(?:的)?(?=(?:这|两|候选|分子|结果|计算|预测))|这(?:个|些|两|说明|意味|能)|'
     r'那(?:个|些|两)|两者|二者|它|第\s*[一二三四五六七八九十0-9]+\s*个|'
+    r'(?:所选的?|当前选中的?|选中的)(?:那|这)?(?:一?个)?(?:分子|候选|行)|'
+    r'\b(?:selected|chosen)\s+(?:molecule|candidate|row)\b|'
     r'\b(?:previous|prior|earlier|above|these|those|this|that|they|them|it|both|first|second)\b', re.I)
 UNVERIFIED_NAME_WARNING = '名称与所给结构的对应关系未核验；结果基于提供的 SMILES。'
 _IC50_KI_CONDITIONS = (
@@ -526,6 +528,25 @@ class WebTurnProjection:
                 context['selected_smiles'] = order[position - 1]
         return context
 
+    def selected_activity_values(self):
+        from src.agent.activity_evidence_inspection import inspection_answer
+        previous = self.history[-1] if self.history else {}
+        evidence = previous.get('activity_evidence')
+        if (not self.session_id or not evidence or evidence.get('session_id') != self.session_id
+                or not evidence.get('trace_id')):
+            return {'content': '本会话没有可核对的活性预测记录。', 'status': 'not_calculated'}
+        order = previous.get('activity_display_order', ())
+        position = previous.get('activity_position')
+        if position is None or not 1 <= position <= len(order):
+            self.entry['activity_evidence'] = evidence
+            self._retain_activity_selection()
+            return {'content': '请先指定本批分子的序号或 SMILES。', 'status': 'not_calculated'}
+        view = inspection_answer(evidence, {'selectors': [order[position - 1]], 'all': False, 'brief': True})
+        if 'activity_evidence' in view:
+            self.entry['activity_evidence'] = view['activity_evidence']
+            self._retain_activity_selection()
+        return {'content': view['final_answer'], 'status': view['status']}
+
     def followup(self, *, enable_tools, enable_rag=False, resolve_selection=None, activity_history=None):
         if self.mixed_activity_discussion:
             return None
@@ -596,10 +617,16 @@ class WebTurnProjection:
             if descriptor is not None:
                 self.entry.update(descriptor.pop('history_update', {}))
                 return descriptor
-        if enable_tools and re.fullmatch(r'\s*(?:请)?(?:重新|再)(?:计算|算)(?:一次|一遍)[。.!！]?\s*', self.query):
+        repeat = re.fullmatch(
+            r'\s*(?:请)?(?:(?:把|将)?(?:它|(?:这|那)个分子|该分子|所选分子)的\s*'
+            r'(?P<metric>分子量|MW|log\s*P)\s*)?(?:重新|再)(?:计算|算)(?:一次|一遍)[。.!！]?\s*',
+            self.query, re.I)
+        if enable_tools and repeat:
             prior = property_comparison.descriptor_context(self.history, self.session_id)
             evidence = prior.get('property_evidence')
             metric = {'molecular_weight': '分子量', 'logp': 'LogP'}.get(prior.get('descriptor_metric'))
+            if repeat['metric']:
+                metric = 'LogP' if repeat['metric'].lower().startswith('log') else '分子量'
             if evidence and (metric or evidence.get('requested_metrics')):
                 self.repeated_batch = prior.get('batch_property_evidence')
                 fields = metric or ' 和 '.join('分子量' if key == 'mw' else 'LogP'
@@ -2696,7 +2723,10 @@ class WebTurnProjection:
                         for row in rows)]
                     warnings = []
                     if missing:
-                        answer += '\n\n模型未返回或无法使用请求端点：' + '、'.join(missing) + '。'
+                        mixed_batch = any(item.tool_name == 'admet_predictor' and item.status.value == 'partial'
+                                          for item in result.tool_results)
+                        label = '整批分子未能全部获得请求端点：' if mixed_batch else '模型未返回或无法使用请求端点：'
+                        answer += '\n\n' + label + '、'.join(missing) + '。'
                         warnings.append('部分请求端点未返回。')
                     if self.solubility_requested_smiles is not None:
                         from src.agent.candidate_evidence_followup import solubility_prediction_comparison

@@ -39,6 +39,11 @@ class Element {
   focus() {}
   get isConnected() {return this.root === true || Boolean(this.parentNode?.isConnected);}
   get lastChild() {return this.children.at(-1);}
+  get nextSibling() {
+    if (!this.parentNode) return null;
+    const siblings = this.parentNode.children;
+    return siblings[siblings.indexOf(this) + 1] ?? null;
+  }
   contains(c) {return c === this || this.children.some(x => x.contains(c));}
   get textContent() {return this._text + this.children.map(c => c.textContent).join("");}
   set textContent(s) {this.replaceChildren(); this._text = String(s);}
@@ -72,7 +77,7 @@ class Element {
   closest(selector) {return this.matches(selector) ? this : this.parentNode?.closest(selector) || null;}
 }
 
-function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = null,
+function loadHome({request, fetchDetails, format = String, storedPointer = null, storedWaiting = null,
                    advancedConfig = {ragCount: 3, temperature: 0.7, molCount: 1}} = {}) {
   const body = new Element("body"); body.root = true;
   const composer = body.appendChild(new Element("div")); composer.className = "chat-composer";
@@ -115,7 +120,7 @@ function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = 
     }};
   const context = vm.createContext({window, document, WebSocket: Socket, TextEncoder, AbortController, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
-    HomeChatRenderer: renderer, HomeFormatters: {formatContent: (s, options) => {formatCalls.push(options); return String(s);}},
+    HomeChatRenderer: renderer, HomeFormatters: {formatContent: (s, options) => {formatCalls.push(options); return format(s);}},
     HomeAdvancedOptions: {getConfig: () => ({...advancedConfig})},
     setTimeout: (fn, ms) => {timers.set(++timer, {fn, ms}); return timer;}, clearTimeout: id => timers.delete(id),
     fetch: async (url, options) => {requests.push([url, JSON.parse(options.body)]);
@@ -184,6 +189,19 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
+  await test("a delivered target stays readable and the next draft waits for its own handoff", () => {
+    const h = loadHome(); h.ready("pi", true); start(h);
+    h.socket.emit(result("completed"));
+    h.socket.emit({...complete("completed"), metadata: {structure_handoff_pending: true}});
+    h.input.value = "用这个结构对接"; h.send();
+    assert.equal(h.input.value, "用这个结构对接");
+    assert(h.chat.textContent.includes("Measured value"));
+    const ready = {type: "followup_ready", turn_id: turn, trace_id: trace};
+    h.socket.emit({...ready, trace_id: nonce}); h.send();
+    assert.equal(h.socket.sent.filter(f => f.type === "chat").length, 1);
+    h.socket.emit(ready); h.send(); h.send();
+    assert.deepEqual(h.socket.sent.filter(f => f.type === "chat").map(f => f.message), ["Explain logP", "用这个结构对接"]);
+  });
   await test("first send opens the chat and enables system messages in the renderer", () => {
     const h = loadHome(); h.ready("pi");
     assert.equal(h.chat.style.display, "none");
@@ -833,7 +851,10 @@ async function run() {
         view_status: "ACTIVE", task_status: "unavailable", cleanup_status: "pending", reason_code: "status_active",
         persistence_pending: false, missing_fields: [], preview: null, result: null};
       h.socket.emit(event);
-      assert(h.chat.textContent.includes("MOLECULAR DOCKING"), "normal homepage must mount its actual C event");
+      assert(h.chat.textContent.includes("分子对接"), "normal homepage must mount its actual C event");
+      const card = h.chat.querySelector(".docking-consent-card");
+      assert(card.parentNode === h.chat, "docking response needs its own chat row");
+      assert(h.chat.querySelector(".user-wrapper").nextSibling === card, "response must follow its original request");
       const count = h.socket.sent.filter(frame => frame.type === "chat").length;
       h.input.value = "another message"; h.send();
       assert.strictEqual(h.socket.sent.filter(frame => frame.type === "chat").length, count);
@@ -980,6 +1001,23 @@ async function run() {
     assert.equal(box.querySelector('.rag-info-container details').textContent, '显示 SMILESCCCl');
     assert(box.querySelector('[data-candidate-id="' + candidateEvent().candidate_set.candidates[0].candidate_id + '"]'));
     assert.equal(h.requests.length, 1, 'the confirmed selection must still belong to the generated collection');
+  });
+  await test('a formatting error keeps the accepted text, scientific status and next turn', () => {
+    const text = 'CCO · logP -0.001\n<img src=x onerror=alert(1)>';
+    const h = loadHome({format(value) {
+      if (value.includes(text)) throw new Error('formatting failed');
+      return value;
+    }});
+    h.ready('pi'); start(h);
+    h.socket.emit({...result('partial'), display_answer: text});
+    h.socket.emit(complete('partial'));
+    const box = h.chat.querySelector('.assistant-message.complete');
+    assert.equal(h.socket.readyState, 1, 'a local display failure must not close the session');
+    assert(box && box.querySelector('.message-content').textContent.includes(text));
+    assert.equal(box.querySelector('img'), null);
+    assert(box.querySelector('.decision-runtime-status').textContent.includes('部分完成'));
+    h.input.value = '继续解释 logP'; h.send();
+    assert.deepEqual(h.socket.sent.filter(f => f.type === 'chat').map(f => f.message), ['Explain logP', '继续解释 logP']);
   });
   await test('a retrieval card render failure retains the accepted answer and releases the turn', () => {
     const h = loadHome(); h.ready('pi'); start(h);
@@ -1247,10 +1285,13 @@ async function run() {
     assert.equal(h.socket.sent.at(-1).message, message);
     assert.equal(h.input.value, "", "successful send clears the textarea");
   });
-  await test("active main script cache version includes multiline composer binding", () => {
+  await test("the homepage loads the matching candidate selection controller before its consumer", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
-    const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261121-card-carousels"]);
+    const scripts = [...template.matchAll(/<script\s+src="([^"]*\/home\/(?:main|scientific_references)\.js[^"]*)"/g)].map(m => m[1]);
+    assert.deepEqual(scripts, [
+      "/static/js/home/scientific_references.js?v=20261124-selection-confirmation",
+      "/static/js/home/main.js?v=20261124-selection-confirmation",
+    ]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
@@ -1311,6 +1352,29 @@ async function run() {
     assert.equal(buttons[0].getAttribute("aria-pressed"), "false");
     assert.equal(buttons[1].textContent, "已选择");
     assert.equal(buttons[1].getAttribute("aria-pressed"), "true");
+  });
+  await test("only cards from a confirmed current presentation are selectable", async () => {
+    let resolveAck;
+    const h = loadHome({request: () => new Promise(resolve => {resolveAck = resolve;})});
+    h.ready("pi"); start(h);
+    h.socket.emit(result("partial")); h.socket.emit(candidateEvent()); h.socket.emit(complete("partial"));
+    await tick();
+    const old = h.body.querySelectorAll(".molecule-selection-button")[0];
+    assert(old.disabled);
+    resolveAck({confirmed: true}); await tick();
+    assert(!old.disabled); old.click();
+    const nextTurn = "4".repeat(32), nextTrace = "5".repeat(32);
+    h.input.value = "重新生成两个候选"; h.send(); h.socket.emit(accepted(nextTurn, nextTrace));
+    const batch = candidateEvent(nextTrace);
+    batch.reference.presentation_id = "22222222-2222-4222-8222-222222222222";
+    h.socket.emit(result("partial", nextTurn, nextTrace)); h.socket.emit(batch);
+    h.socket.emit(complete("partial", nextTurn, nextTrace)); await tick();
+    const fresh = h.body.querySelectorAll(".molecule-selection-button").at(-2);
+    assert(old.disabled && fresh.disabled);
+    resolveAck({confirmed: true}); await tick(); fresh.click();
+    assert(old.disabled && !fresh.disabled);
+    assert.equal(old.getAttribute("aria-pressed"), "false");
+    assert.equal(fresh.getAttribute("aria-pressed"), "true");
   });
   for (const fault of ["detached", "partial"]) await test(`${fault} candidate mount cannot ACK`, async () => {
     const h = loadHome(); h.ready("pi"); start(h); h.socket.emit(result("partial"));

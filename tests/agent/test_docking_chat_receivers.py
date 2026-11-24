@@ -421,6 +421,38 @@ def test_delivered_ordinary_turn_accepts_immediate_followup_with_chat_docking_en
     asyncio.run(run())
 
 
+def test_unverified_target_result_replaces_previous_docking_source(tmp_path, target_case, monkeypatch):
+    async def run():
+        async with source_receiver(tmp_path, target_case, monkeypatch) as case:
+            await case.socket.send({'message': '解释分子量', 'enable_rag': False})
+            await case.socket.until(lambda f: f['type'] == 'followup_ready')
+            sender = case.captures[0][0]
+            assert sender._docking_structure
+            unverified = {**case.captures[0][1], 'trace_id': 'unverified-target'}
+            assert not await case.controller.accept_result(sender, unverified)
+            assert sender._docking_structure is None
+    asyncio.run(run())
+
+
+def test_failed_followup_ready_delivery_closes_socket_after_delivering_result(tmp_path, target_case, monkeypatch):
+    async def run():
+        async with source_receiver(tmp_path, target_case, monkeypatch) as case:
+            send = case.socket.send_text
+
+            async def fail_ready(text):
+                if json.loads(text)['type'] == 'followup_ready':
+                    raise ConnectionError('handoff notification failed')
+                await send(text)
+
+            monkeypatch.setattr(case.socket, 'send_text', fail_ready)
+            await case.socket.send({'message': '解释分子量', 'enable_rag': False})
+            terminal = await case.socket.until(lambda f: f['type'] == 'complete')
+            assert terminal['status'] == 'completed'
+            await settle(case.runtime)
+            assert case.socket.close_codes == [1011]
+    asyncio.run(run())
+
+
 def test_a2_does_not_admit_new_turn_until_accepted_source_capture_finishes(tmp_path, target_case, monkeypatch):
     async def run():
         async with source_receiver(tmp_path, target_case, monkeypatch) as case:
@@ -433,13 +465,16 @@ def test_a2_does_not_admit_new_turn_until_accepted_source_capture_finishes(tmp_p
             monkeypatch.setattr(case.controller, 'accept_result', held)
             try:
                 await case.socket.send({'message': '解释分子量', 'enable_rag': False})
-                await case.socket.until(lambda f: f['type'] == 'complete')
-                await asyncio.sleep(.02)
-                assert entered.is_set(), 'capture must be part of the accepted turn task'
+                complete = await case.socket.until(lambda f: f['type'] == 'complete')
+                assert complete['metadata']['structure_handoff_pending'] is True
+                await asyncio.wait_for(entered.wait(), 2)
                 await case.socket.send({'message': QUERY})
                 frame = await case.socket.until(lambda f: f['type'] in {'error', 'request_accepted'})
                 assert frame.get('code') == 'turn_in_progress'
                 assert not case.rig.calls
+                release.set()
+                ready = await case.socket.until(lambda f: f['type'] == 'followup_ready')
+                assert (ready['turn_id'], ready['trace_id']) == (complete['turn_id'], complete['trace_id'])
             finally:
                 release.set()
                 await settle(case.runtime)

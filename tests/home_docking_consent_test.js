@@ -67,7 +67,7 @@ function rig() {
     request: async (url, body) => {requests.push({url, body: body === undefined ? undefined : JSON.parse(JSON.stringify(body))}); return responder(url, body);},
     onSegment: event => segments.push(event), onBusy: value => busy.push(value)});
   ui.configure(socket, true);
-  ui.begin(socket, host);
+  ui.begin(socket, tag => host.appendChild(document.createElement(tag)));
   ui.accepted({type: "request_accepted", trace_id: root, turn_id: turn}, socket);
   return {ui, host, socket, sent, requests, segments, busy, timers,
     setNow: value => {now = value;}, respond: fn => {responder = fn;}};
@@ -267,6 +267,14 @@ async function run() {
     assert(r.host.textContent.includes("-7.2") && r.host.textContent.includes("预测"));
     const link = all(r.host).find(node => node.tagName === "a");
     assert.strictEqual(link.attributes.href, `/api/agent/docking/tasks/${task}/artifacts/pose`);
+    const card = link.parentNode;
+    const details = card.children.find(el => el.tagName === "details");
+    assert(details && !details.open, "verification details start collapsed");
+    assert(card.children.indexOf(link) < card.children.indexOf(details));
+    assert(details.textContent.includes(hash) && details.textContent.includes(task));
+    const overview = card.children.filter(el => el !== details).map(el => el.textContent).join(" ");
+    assert(overview.includes("kcal/mol") && overview.includes("构象"));
+    assert(!overview.includes(hash) && !overview.includes(task) && !overview.includes("MOLECULAR DOCKING"));
   }
   for (const mutate of [v => {v.result.pose.download_path = "javascript:alert(1)";},
     v => {v.result.best_energy_kcal_mol = NaN;}, v => {v.result.pose_count = true;},
@@ -278,7 +286,7 @@ async function run() {
     const captured = JSON.parse(fs.readFileSync(0, "utf8"));
     for (const event of captured.views) {
       const r = rig(); r.ui.handle(event, r.socket);
-      assert(r.host.textContent.includes("MOLECULAR DOCKING"), `actual ${event.view_status} was not mounted`);
+      assert(all(r.host).some(el => el.attributes["data-task-id"] === event.task_id), `actual ${event.view_status} was not mounted`);
     }
     const r = rig();
     r.respond(async (url, body) => {

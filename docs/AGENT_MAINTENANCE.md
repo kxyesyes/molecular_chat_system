@@ -20,6 +20,7 @@ Pi 入口核对日期：2026-10-23。当前分支的网页通用 Agent 唯一运
 
 接手首页时，可以从以下用户操作追踪输入和结果的去向。
 
+- 靶点检索后立即追问对接时，首页在收到 `complete` 后展示结果。仅当 `metadata.structure_handoff_pending` 为 `true` 时，保留输入草稿并等待同一连接、同一 `turn_id` 和 `trace_id` 的 `followup_ready`，再开放发送。该事件只表示可以继续提问。受体是否可用取决于本会话的结构核验，运行 Vina 仍需确认。[服务端交接](../src/web/decision_runtime.py) · [浏览器回归](../tests/home_decision_runtime_test.js)
 - 同一条回复显示两批候选，点击“候选 32”后要求计算 logP，见[从卡片追到工具输入](#从卡片追到工具输入)。
 - 比较分子后追问“哪一个的 logP 更低？”时，从 [WebTurnProjection.followup](../src/web/web_business.py) 进入 [batch_property_followup](../src/web/property_comparison.py)，这里读取上轮已核验的分子、顺序和数值。运行 [test_short_lower_logp_followup_uses_the_displayed_pair](../tests/agent/test_web_scientific_execution.py) 可核对页面回答和工具调用次数。
 - 上传两个同名文档后，对其中一份提问时，从 [workspace_routes.py 的 ask](../src/web/routes/workspace_routes.py) 跟踪 `doc_id`。运行 [test_same_named_uploads_keep_their_source_in_project_and_history](../tests/test_home_workspace.py) 可核对送给模型的文档内容、项目详情及历史记录中的来源。
@@ -107,6 +108,10 @@ Pi SDK 负责对话循环。首页另在当前连接中保留用户实际看到�
 意图分类只接收本轮可用的记录类型、是否已选中活性行，以及是否有普通对话历史。回答阶段从同一份会话记录取数。每条活性预测同时提供概率与 pIC50 的原始数值和首页展示值，复述可直接引用已展示的精度，换算保留原始精度。没有普通对话历史时，分类器仍能把已有预测作为可解读的资料。
 
 要复跑[真实首页多轮验收](../scripts/check_home_agent_conversation.cjs)，先将 `AGENT_STATE_DB` 指向本次测试专用的 SQLite 文件，按本机开发规范启动 6001 端口的服务。让测试进程使用同一个数据库路径，在已安装 Chrome、可加载 Playwright 且提供 `node:sqlite` 的 Node 环境执行 `node --test scripts/check_home_agent_conversation.cjs`。脚本使用首页保存的云端模型，在独立浏览器会话中检查单位切换、一句话解读、计算后比较和只撰写问题。新增问法可先请首页模型拟写，再按当前展示的分子、首轮工具原始值及每轮实际工具调用判定是否通过。
+
+加入真实候选生成验收时，在测试进程设置 `MEDCHAT_VERIFY_HOME_GENERATION=1`。单跑该项可执行 `node --test --test-name-pattern="首页生成两个候选" scripts/check_home_agent_conversation.cjs`。它从第二张卡片发起性质计算，按该候选的结构和原始分子量核对复述与重算，并逐轮核对工具调用次数。
+
+在 Windows 上，如果导入 NumPy 和 FAISS 后提交内存明显下降，可在启动验收服务的 PowerShell 中设置 `$env:OPENBLAS_NUM_THREADS='2'` 和 `$env:OMP_NUM_THREADS='2'`，再使用原安全启动器。设置只对该终端及其子进程生效。启动生成模型前再次核对可用物理内存和提交内存，验收后关闭测试服务并释放本次加载的模型。
 
 ## 4. 兼容代码与迁移状态
 

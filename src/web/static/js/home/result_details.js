@@ -34,7 +34,7 @@
     rag_search: "知识库检索", molecular_docking: "分子对接", vina_docking: "分子对接"});
   const FIELD = Object.freeze({status: "状态", success: "成功", data: "计算结果", results: "结果",
     tool_name: "工具标识", tool_result_sequence: "计算步骤", error: "错误", warnings: "提示",
-    quality: "结果质量", provenance: "来源", artifacts: "产物", step_id: "步骤标识",
+    quality: "结果质量", verified_partial_rows: "成功行已核验", provenance: "来源", artifacts: "产物", step_id: "步骤标识",
     display_redacted: "已脱敏", smiles: "SMILES", molecular_weight: "分子量", logp: "LogP",
     tpsa: "极性表面积", hbd: "氢键供体", hba: "氢键受体", value: "值", units: "单位", unit: "单位",
     target: "靶点", target_name: "靶点名称", pic50: "pIC50", pIC50: "pIC50", score: "评分",
@@ -383,9 +383,11 @@
     state.body.replaceChildren();
     const p = data.payload;
     for (const step of p.tool_result_sequence) {
-      if (step.tool_name !== "admet_predictor" || step.status !== "succeeded" || step.success !== true
-          || step.error !== null || !record(step.quality) || step.quality.validated !== true
-          || step.quality.scientific_usable === false || !Array.isArray(step.data)) continue;
+      if (step.tool_name !== "admet_predictor" || !Array.isArray(step.data)) continue;
+      const completeBatch = step.status === "succeeded" && step.success === true && step.error === null
+        && record(step.quality) && step.quality.validated === true && step.quality.scientific_usable !== false;
+      const mixedBatch = p.status === "partial" && step.status === "partial" && step.verified_partial_rows === true;
+      if (!completeBatch && !mixedBatch) continue;
       for (const molecule of step.data) {
         if (!record(molecule) || molecule.status !== "succeeded" || typeof molecule.smiles !== "string"
             || !record(molecule.admet) || !record(molecule.admet.endpoints)) continue;

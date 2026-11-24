@@ -27,20 +27,25 @@ async function conversation(browser, executions, verifyModel = false) {
     await page.locator("#closeLlmSettings").click();
   }
 
-  return async (question, tools = [], status = "completed") => {
+  return async (question, tools = [], status = "completed", { stopAfterAcceptance = false } = {}) => {
     const answers = page.locator(".assistant-message.complete");
     const index = await answers.count();
     await page.getByRole("textbox", { name: "消息" }).fill(question);
+    const stop = stopAfterAcceptance && socket.waitForEvent("framereceived", {
+      predicate: event => JSON.parse(event.payload).type === "request_accepted",
+    }).then(() => page.getByRole("button", { name: "停止", exact: true }).click());
     const [frame] = await Promise.all([
       socket.waitForEvent("framereceived", {
         predicate: event => JSON.parse(event.payload).type === "complete",
         timeout: 180000,
       }),
       page.getByRole("button", { name: "发送消息", exact: true }).click(),
+      stop,
     ]);
     const done = JSON.parse(frame.payload);
     assert.ok(done.trace_id, question);
-    assert.ok([].concat(status).includes(done.status), question + " returned " + done.status);
+    assert.ok([].concat(status).includes(done.status),
+      question + " returned " + done.status + " (" + (done.error?.code || done.content || done.trace_id) + ")");
     const calls = executions.all(done.trace_id);
     assert.deepEqual(calls.map(row => row.tool_name), tools, question);
     const answer = answers.nth(index);
@@ -48,6 +53,8 @@ async function conversation(browser, executions, verifyModel = false) {
     return {
       text: (await answer.innerText()).replace(/\s+/g, " ").trim(),
       outputs: calls.map(row => JSON.parse(row.output_json)),
+      traceId: done.trace_id,
+      answer,
     };
   };
 }
@@ -61,6 +68,98 @@ async function verificationBrowser(t) {
   t.after(() => browser.close());
   return { browser, executions };
 }
+
+// Opt in only when the local generation model and MedChat can run together.
+test("首页生成两个候选，选中第二个后复述和重算都使用同一结构", {
+  skip: process.env.MEDCHAT_VERIFY_HOME_GENERATION !== "1",
+}, async t => {
+  const { browser, executions } = await verificationBrowser(t);
+  const ask = await conversation(browser, executions, true);
+  const generated = await ask("请生成两个类药候选分子。", ["llm_molecular_generator"]);
+  const batch = generated.outputs[0].data;
+  assert.equal(batch.requested_count, 2);
+  assert.equal(batch.unique_count, 2);
+  assert.equal(batch.candidates.length, 2);
+  const cards = generated.answer.page().locator(".molecule-card");
+  await cards.nth(1).waitFor();
+  assert.deepEqual(await cards.evaluateAll(nodes => nodes.map(n => n.dataset.candidateId)),
+    batch.candidates.map(row => row.candidate_id));
+  for (const [i, row] of batch.candidates.entries()) {
+    assert.equal(row.metadata.model, "gmm-llama:latest");
+    assert.equal(row.validation.valid, true);
+    await cards.nth(i).getByText("显示 SMILES", { exact: true }).click();
+    assert.ok(await cards.nth(i).getByText(row.canonical_smiles, { exact: true }).isVisible());
+  }
+  const chosen = cards.nth(1).getByRole("button", { name: "选择此分子" });
+  await chosen.click();
+  assert.equal(await cards.nth(1).getByRole("button", {name: "已选择"}).getAttribute("aria-pressed"), "true");
+  const result = await ask("请计算这个分子的分子量。", ["property_calculator"]);
+  const [row] = result.outputs[0].data;
+  assert.equal(result.outputs[0].data.length, 1);
+  assert.equal(row.smiles, batch.candidates[1].canonical_smiles);
+  const weight = row.properties.molecular_weight.toFixed(2);
+  assert.ok(result.text.includes(weight));
+  const recalled = await ask("它刚才的分子量是多少？");
+  assert.ok(recalled.text.includes(weight));
+  const repeated = await ask("请把这个分子的分子量重新算一次。", ["property_calculator"]);
+  assert.deepEqual(repeated.outputs[0].data.map(r => [r.smiles, r.properties.molecular_weight]),
+    [[row.smiles, row.properties.molecular_weight]]);
+  assert.ok(repeated.text.includes(weight));
+});
+
+test("停止知识咨询后可在原会话重试并继续计算分子性质", async t => {
+  const { browser, executions } = await verificationBrowser(t);
+  const ask = await conversation(browser, executions, true);
+  const question = "请用通俗的中文解释分配系数 logP 在药物研发中的用途，不用举具体分子的例子。";
+  const stopped = await ask(question, [], "cancelled", { stopAfterAcceptance: true });
+  assert.match(stopped.text, /已取消/);
+  const retried = await ask(question);
+  assert.notEqual(stopped.traceId, retried.traceId);
+  assert.match(retried.text, /logP|分配系数/i);
+  assert.match(retried.text, /亲[脂油]|脂溶|疏水|(?:油|有机相).{0,12}水/);
+  const result = await ask("请计算 CCO 的分子量。", ["property_calculator"]);
+  const [row] = result.outputs[0].data;
+  assert.equal(row.smiles, "CCO");
+  assert.ok(result.text.includes(row.properties.molecular_weight.toFixed(2)));
+});
+
+test("性质与 ADMET 的组合比较逐行对应两个工具的原始数据", async t => {
+  const { browser, executions } = await verificationBrowser(t);
+  const ask = await conversation(browser, executions, true);
+  const { outputs: [properties, admet], answer } = await ask(
+    "请比较 CCO 和 CCN 的分子量、logP 和 ADMET，并列出各自的 hERG 预测值。",
+    ["property_calculator", "admet_predictor"]);
+  const structures = ["CCO", "CCN"];
+  for (const output of [properties, admet]) {
+    assert.deepEqual(output.data.map(row => row.smiles), structures);
+  }
+  const tables = await answer.locator("table").evaluateAll(nodes => nodes.map(table =>
+    Array.from(table.rows, row => Array.from(row.cells, cell => cell.innerText.trim()))));
+  const propertyTable = tables.find(([header]) => header.includes("分子量 (Da)") && header.includes("logP"));
+  assert.ok(propertyTable, "回答中缺少分子性质比较表");
+  const [header, ...rows] = propertyTable;
+  assert.deepEqual(rows.map(row => row[header.indexOf("SMILES")]), structures);
+  for (const [i, row] of rows.entries()) {
+    for (const [label, key] of [["分子量 (Da)", "molecular_weight"], ["logP", "logp"]]) {
+      const cell = row[header.indexOf(label)];
+      assert.ok(cell && Number.isFinite(properties.data[i].properties[key]));
+      assert.equal(Number(cell), properties.data[i].properties[key]);
+    }
+  }
+  const endpointTable = tables.find(([labels]) => labels[0] === "端点" && labels.includes("CCN"));
+  assert.ok(endpointTable, "回答中缺少按分子比较的 ADMET 端点表");
+  assert.deepEqual(endpointTable[0].slice(1), structures);
+  const hERG = endpointTable.find(row => row[0] === "hERG");
+  assert.ok(hERG, "端点表缺少用户指定的 hERG");
+  for (const [i, row] of admet.data.entries()) {
+    const endpoint = row.admet.endpoints.hERG;
+    assert.equal(endpoint.source, "admet_ai_model");
+    assert.equal(endpoint.task_type, "classification");
+    assert.ok(Number.isFinite(endpoint.value));
+    const displayed = Number.parseFloat(hERG[i + 1]);
+    assert.equal(displayed, Number(endpoint.value.toPrecision(4)));
+  }
+});
 
 test("澄清、纠正及越界后按各会话自己的表格和问题作答", async t => {
   const { browser, executions } = await verificationBrowser(t);
@@ -180,8 +279,10 @@ test("首页模型解释后仍沿用当前分子、单位和同次靶点记录",
   const explanation = await activity("请用自己的话解释刚才选中的那个分子，写出它的 SMILES，并说说两项预测为什么需要复核。");
   assert.ok(explanation.text.includes(selected.smiles) && /复核|不一致/.test(explanation.text), explanation.text);
   const values = await activity("不要调用任何工具。请复述刚才选中的分子的 SMILES、活性概率和预测 pIC50，两项数值都保留四位有效数字。",
-    [], ["completed", "partial"]);
+    [], selected.classification_regression_consistent ? "completed" : "partial");
   assert.ok(values.text.includes(selected.smiles));
+  assert.ok(!values.text.includes(rows[0].smiles), values.text);
+  assert.equal(values.text.includes("需复核"), !selected.classification_regression_consistent);
   assert.ok(values.text.includes(selected.predicted_pIC50.toPrecision(4)), values.text);
   assert.ok(values.text.includes(selected.activity_probability.toPrecision(4)) ||
     values.text.includes((selected.activity_probability * 100).toPrecision(4) + "%"), values.text);

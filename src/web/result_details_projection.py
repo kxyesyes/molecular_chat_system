@@ -3,6 +3,7 @@ import re
 from src.agent.contracts import AgentResult, ToolResult
 from src.agent.scientific_session.decision_bounds import observation_value, prediction_batch_limits, validate_json
 from src.agent.scientific_session.decision_policy import DecisionBoundaryError
+from src.agent.validators.partial_observations import verified_mixed_admet
 from src.system.scientific_public_data import MAX_DETAIL_BYTES, MAX_DETAIL_NODES, public_scientific_data
 
 
@@ -142,6 +143,11 @@ def project_result_details(result, *, summary, status, error, warnings):
         # The legacy formatted rendering duplicates data and is never authority.
         value.pop('formatted', None)
         value['step_id'] = str(observation.quality.get('step_id') or f'{observation.tool_name}:{index}')
+        if (status == 'partial' and observation.tool_name == 'admet_predictor' and value['status'] == 'partial'
+                and result.metadata.get('scientific_plan_status') == 'ready'):
+            plan = result.metadata.get('scientific_plan')
+            if isinstance(plan, dict) and verified_mixed_admet(observation, plan.get('smiles')):
+                value['verified_partial_rows'] = True
         if observation.tool_name == 'activity_predictor' and observation.quality.get('evidence_id') in species_rejected:
             hide_species_mismatch(value)
             value.pop('formatted', None)

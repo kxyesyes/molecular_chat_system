@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi import WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from src.agent.contracts import (
     AgentContext,
@@ -34,7 +35,8 @@ from src.agent.contracts.ordinary_admission import (
 )
 from src.agent.decision_transport import IntentJournal
 from src.agent.contracts.consultation_request import (
-    asks_about_given_information, mentions_assay_concentration, tool_free_consultation_requested)
+    asks_about_given_information, mentions_assay_concentration, selected_activity_values_requested,
+    tool_free_consultation_requested)
 from src.agent.pi_runtime.runtime import PiAgentRuntime
 from src.agent.scientific_session.decision_history import HistoryUpdate, history_pairs, history_prefix, retain_history_pair
 from src.agent.scientific_session.decision_inputs import (
@@ -649,7 +651,10 @@ class WebDecisionRuntime:
             if op.sender is sender and op.kind == 'send':
                 op.seal('undeliverable')
                 op.cancel_once()
-        if sender._docking_used and not sender.close_attempted:
+        # The ASGI receive side has already observed the peer closing. Sending
+        # a second close would create an unfulfillable cleanup obligation.
+        peer_closed = getattr(sender.websocket, 'client_state', None) is WebSocketState.DISCONNECTED
+        if sender._docking_used and not sender.close_attempted and not peer_closed:
             sender.close_attempted = True  # Shared close-once claim.
             sender._docking_close = _docking._PhysicalOperation(sender, 'close')
             self.docking_operations.add(sender._docking_close)
@@ -1346,7 +1351,8 @@ class WebDecisionRuntime:
                     if failed:
                         result.final_answer = (
                             '以下分子的 ADMET 预测失败：' + '、'.join(failed)
-                            + '。本次未交付批量预测结果，请重试。'
+                            + ('。其余分子的预测已保留。' if result.outcome == RunOutcome.PARTIAL
+                               else '。本次未交付批量预测结果，请重试。')
                         )
             result.metadata.update(self._compiled_plan_metadata(plan))
             result.metadata.update(
@@ -1566,11 +1572,16 @@ class WebDecisionRuntime:
             # only be consulted by a readback explicitly scoped to a named batch.
             activity_history = (sender.scientific_memory[:-1]
                                 if envelope.reference is None and envelope.selection is None else None)
-            followup = None if turn.tool_free_consultation else await settle_owned_call(
-                lambda: projection.followup(enable_tools=envelope.enable_tools, enable_rag=envelope.enable_rag,
-                    activity_history=activity_history,
-                    resolve_selection=resolve_selection if envelope.selection is not None else None),
-                worker_owner=turn.worker_owner)
+            followup = None
+            if (envelope.reference is None and envelope.selection is None
+                    and selected_activity_values_requested(envelope.query)):
+                followup = await settle_owned_call(projection.selected_activity_values, worker_owner=turn.worker_owner)
+            elif not turn.tool_free_consultation:
+                followup = await settle_owned_call(
+                    lambda: projection.followup(enable_tools=envelope.enable_tools, enable_rag=envelope.enable_rag,
+                        activity_history=activity_history,
+                        resolve_selection=resolve_selection if envelope.selection is not None else None),
+                    worker_owner=turn.worker_owner)
             if turn.cancel_event.is_set():
                 raise asyncio.CancelledError()
             if followup is not None:
@@ -2314,11 +2325,16 @@ class WebDecisionRuntime:
         if sender.writable and turn.pending_complete is not None:
             try:
                 capture_delivered = False
-                terminal_status = json.loads(turn.pending_complete).get('status')
+                frame = json.loads(turn.pending_complete)
+                terminal_status = frame.get('status')
+                controller = _enabled_docking_controller(handler, self)
+                handoff = terminal_status == 'completed' and turn.docking_result is not None and controller is not None
                 if turn.history_update is not None:
-                    frame = json.loads(turn.pending_complete)
                     frame['metadata'] = {'history_omission': turn.history_update.omission,
                                          'history_evicted_pairs': turn.history_update.evicted_pairs}
+                if handoff:
+                    frame.setdefault('metadata', {})['structure_handoff_pending'] = True
+                if turn.history_update is not None or handoff:
                     turn.pending_complete = json.dumps(frame, ensure_ascii=False, allow_nan=False)
                 def completed():
                     nonlocal capture_delivered
@@ -2352,11 +2368,16 @@ class WebDecisionRuntime:
                     turn.terminal_sent = True
                 await sender.send_text(turn.pending_complete,
                     on_sent=completed)
-                controller = _enabled_docking_controller(handler, self)
-                if capture_delivered and turn.docking_result is not None and controller is not None:
+                if capture_delivered and handoff:
                     await _capture_docking_result(controller, sender, turn.docking_result)
+                    turn.docking_result = None
+                    if sender.writable and not self.closing:
+                        await sender.send({'type': 'followup_ready', 'turn_id': turn.turn_id,
+                                           'trace_id': turn.trace_id})
             except (asyncio.CancelledError, ConnectionError, WebSocketDisconnect, asyncio.TimeoutError):
                 sender.writable = False
+                if capture_delivered and handoff and sender.receiver_attached and not self.closing:
+                    await sender.close_failed_delivery()
                 if self.semantic:
                     sender.waiting = None
                     turn.next_waiting = None

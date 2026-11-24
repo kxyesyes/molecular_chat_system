@@ -25,10 +25,11 @@ from src.target_search.remote_clients import _validate_uniprot_accession
 _DOCKING_TEXT_REVISION = 'docking-whole-text-v1'
 _DOCKING_FIELDS = ('receptor_ref', 'ligand_ref', 'center', 'size', 'exhaustiveness', 'num_modes')
 _SPACE = r'[ \t\r\n]*'
+_REQUEST_LEAD = r'(?:请(?:帮我)?|帮我|我想|我希望)'
 _ACTION = r'(?:(?:做(?:一次)?|进行(?:一次)?)' + _SPACE + r')?'
 _DOCK = r'(?:真实)?(?:分子对接|对接|(?:AutoDock[ \t]+Vina[ \t]+)?docking)'
 _NATURAL_DOCKING = re.compile(
-    r'(?:请)?' + _SPACE + r'(?:用|使用)' + _SPACE
+    _REQUEST_LEAD + '?' + _SPACE + r'(?:用|使用)' + _SPACE
     # A fixed label is syntax, not a chemical name resolver. Arbitrary text in
     # the label position must not conceal another requested operation.
     + r'(?:(?:阿司匹林|配体|分子)' + _SPACE + r')?'
@@ -37,7 +38,7 @@ _NATURAL_DOCKING = re.compile(
     + r'(?P<pdb_id>[1-9][A-Z0-9]{3})' + _SPACE + _ACTION + _DOCK
 )
 _NATURAL_DOCKING_REVERSED = re.compile(
-    r'(?:请)?' + _SPACE + r'(?:用|使用)' + _SPACE
+    _REQUEST_LEAD + '?' + _SPACE + r'(?:用|使用)' + _SPACE
     # Keep the free-form structure label bounded; only the exact PDB token is
     # promoted to an input identity and no label text is interpreted as I/O.
     + r'[^，,。；;!?！？\n]{0,96}?(?:PDB[ \t]+)?'
@@ -48,7 +49,7 @@ _NATURAL_DOCKING_REVERSED = re.compile(
     + _ACTION + _DOCK
 )
 _BARE_DOCKING = re.compile(
-    r'(?:(?:请)' + _SPACE + _ACTION + _DOCK
+    r'(?:' + _REQUEST_LEAD + _SPACE + _ACTION + _DOCK
     + r'|(?:Please[ \t]+)?(?:run|perform)[ \t]+(?:real[ \t]+)?'
     + r'(?:AutoDock[ \t]+Vina[ \t]+)?docking)', re.IGNORECASE | re.ASCII
 )

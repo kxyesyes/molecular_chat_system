@@ -143,6 +143,19 @@ async function run() {
     api.mount(failedContainer, {traceId, reference, load: async () => failed});
     await open(failedContainer);
     assert(!failedContainer.all().some(n => n.tagName === "summary" && n.textContent.startsWith("ADMET 端点")));
+    const partial = copy(fixture);
+    partial.payload.status = "partial";
+    const step = partial.payload.tool_result_sequence[0];
+    Object.assign(step, {status: "partial", success: false, error: {message: "CCO 预测失败"}, quality: {}});
+    step.data[0].status = "failed";
+    for (const verified of [false, true]) {
+      const mixed = host();
+      if (verified) step.verified_partial_rows = true;
+      api.mount(mixed, {traceId, reference, load: async () => partial});
+      await open(mixed);
+      const headers = mixed.all().filter(n => n.tagName === "summary" && n.textContent.startsWith("ADMET 端点"));
+      assert.deepEqual(headers.map(n => n.textContent), verified ? ["ADMET 端点：CCN（1）"] : []);
+    }
   });
   await test("401 is an authentication error, never reads diagnostics, and retries only its own GET", async () => {
     const container = host(), calls = [];

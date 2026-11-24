@@ -31,6 +31,12 @@ assert(summaryTable.includes('>0.758019</td>'));
 assert(render('| SMILES | MW |\n| --- | --- |\n| `CCO` | 46.07 |', {displayKind: 'scientific_summary'})
   .includes('<td class="home-structure-cell">CCO</td>'));
 const combined = render(input + "\n类药性评估结果\nLipinski 五规则：符合。", {displayKind:"scientific_summary"});
+const chiral = "N[C@@H](C)C(=O)O";
+for (const [heading, options] of [["SMILES", {}], ["候选 SMILES", {displayKind: "scientific_summary"}]]) {
+  const table = render("| " + heading + " | 值 |\n| --- | --- |\n| " + chiral + " | 1 |", options);
+  assert(table.includes('<td class="home-structure-cell">' + chiral + '</td>'),
+    "the displayed structure must retain its stereocenter and branch in either view");
+}
 assert(combined.includes("<table") && combined.includes("Lipinski"));
 assert(!combined.includes("药物相似性与成药性分析"), "a single tool card cannot label a multi-tool summary");
 assert(!render("计算步骤未完成。").includes("逆合成"), "ordinary progress text is not a synthesis route");
@@ -52,7 +58,7 @@ for (const value of ["CCO", "46.07", "0", "6.123", "unavailable"]) {
   assert(wide.includes(">" + value + "</td>"), "all scientific values must remain intact: " + value);
 }
 const template = fs.readFileSync(path.join(__dirname, "../src/web/templates/index.html"), "utf8");
-assert(template.includes('/static/js/home/formatters.js?v=20261114-progress-v2'), "refresh must load the accessible formatter");
+assert(template.includes('/static/js/home/formatters.js?v=20261124-smiles'), "refresh must load the structure-preserving formatter");
 
 const unsafe = render("| 分子 | 来源 |\n| --- | --- |\n| <img src=x onerror=alert(1)> | [link](javascript:alert) |");
 assert(!unsafe.includes("<img"), "Table cells must retain HTML escaping");

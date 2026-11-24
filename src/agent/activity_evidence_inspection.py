@@ -205,9 +205,12 @@ def inspection_answer(evidence, selection):
             assessment = '标签一致' if consistent else '标签不一致，需复核'
             explanation = (f"分类模型给出{_cell(row['activity_class'])}（活性概率 {probability:.4g}），"
                            f"回归模型预测 pIC50 为 {value:.4g}，按模型阈值两者{assessment}")
+        elif probability is not None:
+            explanation = (f"分类模型给出{_cell(row['activity_class'])}（活性概率 {probability:.4g}），"
+                           "回归预测 pIC50 缺失，无法判断两者是否一致")
         else:
-            explanation = '缺少可核对的完整分类和回归结果，暂时无法判断两者是否一致'
-        if reason and consistent is not False:
+            explanation = '分类和回归都缺少可核对的预测值，无法判断两者是否一致'
+        if complete and reason and consistent is not False:
             explanation += '，' + reason
         partial = not complete or reason is not None
         return {'final_answer': f"对于 `{_cell(row['smiles'])}` 对 {_cell(row['requested_target'])} 的预测，{explanation}。",

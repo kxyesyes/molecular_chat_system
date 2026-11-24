@@ -8,7 +8,7 @@ import logging
 import re
 import threading
 from src.target_identifiers import canonical_target_identifier, target_mentions
-from src.target_search.exact_pdb import requested_pdb_id, target_text_without_pdb
+from src.target_search.exact_pdb import parse_gene_structure_lookup, requested_pdb_id, target_text_without_pdb
 
 from .base_tool import BaseMolecularTool
 from .target_observation import resolution_preview, target_planning_data
@@ -49,7 +49,7 @@ _EXPLICIT_ACCESSION_QUERY = re.compile(
     r"|[，,。]\s*列出(?:可用于对接的)?实验结构(?:编号与配体信息|，说明物种、结构编号和共晶配体信息)?"
     r"|的实验结构\s+列出结构信息和配体)?"
     r"(?:[，,]\s*列出\s*PDB\s*编号(?:及|和|与)结构方法)?"
-    r"[。.！!]?\s*", re.I,
+    r"\s*[。.！!]?\s*", re.I,
 )
 
 # Full evidence and model input have distinct limits. Leave envelope headroom
@@ -142,6 +142,14 @@ class TargetDatabaseTool(BaseMolecularTool):
             return result
         if isinstance(query, dict) and 'query' in query:
             query = query['query']
+        query = parse_gene_structure_lookup(query) or query
+        if isinstance(query, dict) and 'pdb_id' in query and 'organism' in query:
+            species = query['organism']
+            if species not in ('Homo sapiens', 'Mus musculus') or (organism and organism != species):
+                result.update(status='invalid_input', message='Please clarify the target organism.',
+                              error={'code': 'validation_error', 'message': 'Invalid or conflicting target organism.'})
+                return result
+            organism = species
         try:
             pdb_id = requested_pdb_id(query)
         except ValueError:
@@ -159,6 +167,9 @@ class TargetDatabaseTool(BaseMolecularTool):
                 re.fullmatch(_ACCESSION, keyword, re.I) for keyword in search_queries
             ))
         ) else ()
+        if pdb_id and isinstance(target_query, dict) and target_query.get('gene_symbol'):
+            symbol = target_query['gene_symbol']
+            named_targets = (canonical_target_identifier(symbol) or symbol.strip().upper(),)
         accession_names = {}
         if (type(target_query) is str and _ACCESSION_LABEL.search(target_query)
                 and search_queries and all(re.fullmatch(_ACCESSION, keyword, re.I) for keyword in search_queries)):

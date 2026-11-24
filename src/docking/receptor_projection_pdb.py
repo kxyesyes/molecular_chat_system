@@ -72,6 +72,10 @@ def _require(condition, reason="raw_invalid"):
         raise ProjectionInvalid(reason)
 
 
+class UnknownAtomElement(ProjectionInvalid):
+    """The input explicitly marks the atom's element as unknown (X)."""
+
+
 class AllocationBudget:
     """Native-integer, fail-before-allocation ledger; never above 512 MiB."""
 
@@ -240,6 +244,8 @@ def _atom(line, raw, index, model, segment):
     charge = line[78:]
     _require(not charge.strip() or re.fullmatch(r"[1-9][+-]", charge) is not None)
     element = line[76:78].strip().capitalize()
+    if element == "X":
+        raise UnknownAtomElement()
     _require(element in _ELEMENTS)
     return ParsedAtom(
         _integer(line[6:11], 1, 99999), _text(line[12:16], r"[A-Za-z0-9'_*+-]{1,4}"),

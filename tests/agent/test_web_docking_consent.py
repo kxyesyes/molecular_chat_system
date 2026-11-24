@@ -29,9 +29,12 @@ def text_boundary(query, **flags):
     _S10,
     '请进行真实分子对接。',
     '请做一次对接',
+    '我想做一次分子对接。',
+    '请帮我进行对接。',
     'Please run AutoDock Vina docking.',
     '用配体 CCO 与 PDB 1ABC 进行分子对接。使用共晶配体定义口袋。',
     '用 CCO 与 1ABC 对接。',
+    '我希望用 CCO 与 PDB 1ABC 进行分子对接。',
     '请进行 docking；receptor_ref=receptor-1；ligand_ref=ligand-1；'
     'center=[5.99,3.01,17.345]；size=[20,20,20]；exhaustiveness=4；num_modes=3。',
 ])
@@ -92,6 +95,7 @@ def test_d2_accepts_precheck_without_losing_request_or_authorizing_execution(sep
 
 @pytest.mark.parametrize('query', [
     '不要做分子对接。', '能否进行分子对接？', '如何进行分子对接？',
+    '我想了解怎么做分子对接。', '我不想做分子对接。', '我想做一次分子对接，然后预测活性。',
     'Do not run docking.', 'Can you run docking?', '请进行 docking 吗？',
     '如果可以，请做一次对接。', '请做两次对接。', '请做一次共价对接。',
     '请做一次盲对接。', '请做一次对接，然后预测毒性。',

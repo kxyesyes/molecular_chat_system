@@ -65,11 +65,81 @@ def test_rejected_phrase_about_selected_activity_can_only_resume_as_explanation(
     asyncio.run(run())
 
 
-def test_model_explanation_gets_the_selected_display_row_separately_from_tool_order():
+def test_selected_activity_values_come_from_one_display_row_without_model_prose(actual_app):
+    from tests.agent.ordinary_chat_fixtures import intent_http_response
+
+    query = ('不要调用任何工具。请复述刚才选中的分子的 SMILES、活性概率和预测 pIC50，'
+             '两项数值都保留四位有效数字。')
+
+    async def run():
+        async def respond(payload):
+            if len(bundle.calls) == 1:
+                return intent_http_response('general_knowledge')
+            return chat_decision('CCN 的活性概率为 0.3444，预测 pIC50 为 4.354。')
+
+        async with actual_app(ordinary_policy=None, respond=respond) as bundle:
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                sender, = bundle.app.decision_runtime.sockets
+                record = activity_evidence(sender.scope['agent_session_id'])
+                rows = record['observations'][0]['data']
+                rows[0].update(activity_probability=.34441, predicted_pIC50=4.35379)
+                rows[1].update(activity_probability=.42256, predicted_pIC50=5.00759,
+                               success=False, status='partial', execution_status='passed',
+                               classification_regression_consistent=False)
+                record['observations'][0].update(status='partial', success=False)
+                for position, smiles, expected, other in (
+                    (1, 'CCN', ('0.4226', '5.008'), ('0.3444', '4.354')),
+                    (2, 'CCO', ('0.3444', '4.354'), ('0.4226', '5.008')),
+                ):
+                    sender.scientific_memory[:] = [{'activity_evidence': record,
+                        'activity_display_order': ['CCN', 'CCO'], 'activity_position': position,
+                        'activity_conversion': {'unit': 'nM', 'explain': False}}]
+                    frames = await socket.turn({'message': query, 'enable_rag': False})
+                    answer = frames[-1]['content']
+                    assert smiles in answer and all(value in answer for value in expected), answer
+                    assert not any(value in answer for value in other)
+                    assert ('需复核' in answer) == (smiles == 'CCN')
+                    assert not bundle.app.agent_state_store.get_tool_executions(result_of(frames)['trace_id'])
+                    assert sender.scientific_memory[-1]['activity_conversion']['unit'] == 'nM'
+                assert not bundle.calls
+
+    asyncio.run(run())
+
+
+def test_selected_activity_readback_requires_current_batch_and_session():
+    previous = {'activity_evidence': activity_evidence('owner'), 'activity_display_order': ['CCN', 'CCO']}
+    own = WebTurnProjection('', 'owner', [previous])
+    assert '请先指定' in own.selected_activity_values()['content']
+    assert own.entry['activity_display_order'] == ['CCN', 'CCO']
+    previous['activity_position'] = 2
+    for session, history in [('other', [previous]), ('owner', [previous, {}])]:
+        projection = WebTurnProjection('', session, history)
+        assert projection.selected_activity_values()['status'] == 'not_calculated'
+        assert 'activity_evidence' not in projection.entry
+
+
+def test_selected_activity_readback_only_matches_the_requested_operation():
+    from src.agent.contracts.consultation_request import selected_activity_values_requested
+
+    request = '列出当前选中候选的预测 pIC50 和活性概率'
+    assert selected_activity_values_requested(request + '，无需运行工具。')
+    assert selected_activity_values_requested('刚才选中的那个分子的活性概率和 pIC50 分别是多少？')
+    for query in (request + '，再预测 CCC 的活性。', request + '，并解释原因。',
+                  '请比较这两个候选的活性概率和预测 pIC50。', f'请翻译“{request}”。'):
+        assert not selected_activity_values_requested(query)
+
+
+@pytest.mark.parametrize('query', [
+    '请用自己的话解释刚才选中的那个分子。',
+    '所选分子的分类概率应该怎么理解？',
+    '当前选中候选的回归预测为什么需要复核？',
+    'How should I interpret the selected molecule’s activity probability?',
+])
+def test_model_explanation_gets_the_selected_display_row_separately_from_tool_order(query):
     record = activity_evidence('owner')
     previous = {'activity_evidence': record, 'activity_display_order': ['CCN', 'CCO'],
                 'activity_position': 2}
-    query = '请用自己的话解释刚才选中的那个分子。'
     context = WebTurnProjection(query, 'owner', [previous]).model_activity_context()
     assert context['display_order'] == ['CCN', 'CCO']
     assert context['selected_smiles'] == 'CCO'

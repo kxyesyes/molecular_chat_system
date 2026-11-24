@@ -95,6 +95,31 @@ def compile_sample(sample, **kwargs):
     return api().compile_rcsb_source(*sample, pdb_id="1ABC", target=kwargs.get("target", {"uniprot_id": "P06276", "taxonomy_id": 9606}))
 
 
+def test_unknown_element_marker_cannot_be_used_for_receptor_preparation(sample):
+    pdb, cif, components = sample
+    lines = pdb.splitlines(keepends=True)
+    index = next(i for i, line in enumerate(lines) if line.startswith(b"HETATM"))
+    lines[index] = lines[index][:76] + b" X" + lines[index][78:]
+    result = compile_sample((b"".join(lines), cif, components))
+    assert result == {"ok": False, "code": "RCSB_SOURCE_INVALID", "reason": "unknown_element"}
+
+
+@pytest.mark.parametrize("item,valid", [(b"T[1][1]_esd", True), (b"T[1][x]_esd", False)])
+def test_indexed_tls_uncertainty_fields_in_experimental_structures(sample, item, valid):
+    pdb, cif, components = sample
+    annotated = cif + b"\n_pdbx_refine_tls." + item + b" 0.001\n"
+    result = compile_sample((pdb, annotated, components))
+    assert result["ok"] is valid
+    if valid:
+        source = result["source"].copy()
+        baseline = compile_sample(sample)["source"].copy()
+        assert source.pop("provenance")["proof_id"] != baseline.pop("provenance")["proof_id"]
+        assert source == baseline
+        assert result["evidence"]["cif_sha256"] == hashlib.sha256(annotated).hexdigest()
+    else:
+        assert result["reason"] == "cif_invalid"
+
+
 def rejected(result):
     assert result["ok"] is False
     assert result["code"] == "RCSB_SOURCE_INVALID"

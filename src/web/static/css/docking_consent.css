@@ -21,6 +21,16 @@
 .docking-consent-card dt, .docking-consent-card dd {padding: 7px 0; border-bottom: 1px solid #edf0f2;}
 .docking-consent-card dt {color: #65717c;}
 .docking-consent-card dd {font-family: Consolas, "SFMono-Regular", monospace;}
+.docking-consent-card .docking-result-metrics {
+  display: flex; flex-wrap: wrap; gap: 8px 32px; margin: 14px 0 8px;
+}
+.docking-consent-card .docking-result-metrics :is(dt, dd) {
+  margin: 0; padding: 0; border: 0;
+}
+.docking-consent-card .docking-result-metrics dt {font-size: 13px;}
+.docking-consent-card .docking-result-metrics dd {
+  font: inherit; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
 .docking-consent-card label {display: block; margin: 12px 0; font-size: 13px;}
 .docking-consent-card input:not([type="checkbox"]):not([type="radio"]), .docking-consent-card textarea, .docking-consent-card select {
   display: block; width: 100%; margin-top: 5px; padding: 9px 10px;

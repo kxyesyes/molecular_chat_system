@@ -173,8 +173,12 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False, requested_en
     """Render only validated ADMET-AI fields for the Web result card."""
     rows = []
     for row in data or ():
-        if (not isinstance(row, dict)
-                or row.get('status', 'succeeded') not in {'succeeded', 'passed'}):
+        if not isinstance(row, dict):
+            continue
+        if row.get('status') in {'failed', 'invalid_input', 'unavailable'}:
+            rows.append((row, {}, {}))
+            continue
+        if row.get('status', 'succeeded') not in {'succeeded', 'passed'}:
             continue
         admet = row.get('admet')
         if not isinstance(admet, dict) or admet.get('prediction_method') != 'admet_ai':
@@ -183,7 +187,8 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False, requested_en
         if not isinstance(endpoints, dict) or not endpoints:
             continue
         rows.append((row, admet, endpoints))
-    if not rows:
+    first = next((admet for _, admet, _ in rows if admet), None)
+    if first is None:
         return ''
 
     if focused_only and concise and requested_endpoints:
@@ -193,6 +198,9 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False, requested_en
         for name in requested_endpoints:
             values = []
             for _, admet, endpoints in rows:
+                if not admet:
+                    values.append('该分子预测失败')
+                    continue
                 endpoint = next((value for key, value in endpoints.items() if key.casefold() == name.casefold()), None)
                 if not isinstance(endpoint, dict) or endpoint.get('source') != 'admet_ai_model':
                     values.append('未返回可用预测')
@@ -224,7 +232,6 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False, requested_en
         lines.append('\n其他预测及异常见明细。')
         return '\n'.join(lines)
 
-    first = rows[0][1]
     model_name = _display_cell(first.get('model_name'))
     model_version = _display_cell(first.get('model_version'))
     lines = ['## ADMET 预测结果' if concise else '## ADMET-AI 预测结果', '']
@@ -246,7 +253,10 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False, requested_en
                       '|---|' + '---|' * len(rows)])
         for endpoint_id in endpoint_ids[:max(8, len(requested_endpoints))]:
             values = []
-            for _, _, endpoints in rows:
+            for _, admet, endpoints in rows:
+                if not admet:
+                    values.append('该分子预测失败')
+                    continue
                 endpoint = endpoints.get(endpoint_id)
                 if not isinstance(endpoint, dict):
                     values.append('未返回')
@@ -263,6 +273,9 @@ def _admet_display_answer(data, evidence_id=None, *, concise=False, requested_en
         if len(endpoint_ids) > max(8, len(requested_endpoints)):
             lines.extend(['', '完整端点请展开“查看明细”。'])
     for row, admet, endpoints in rows:
+        if not admet:
+            lines.append(f"\n分子 `{_display_cell(row.get('smiles'))}` 的 ADMET 预测失败。")
+            continue
         lines.extend([
             '',
             f"SMILES：`{_display_cell(row.get('smiles'))}`",
@@ -525,15 +538,20 @@ def _compiled_display_observations(result):
             or any(type(item) is not ToolResult or item.tool_name not in required
                    for item in result.tool_results)):
         return None
+    from src.agent.validators.partial_observations import verified_mixed_admet
+    plan = metadata.get('scientific_plan')
+    expected = plan.get('smiles') if isinstance(plan, dict) else None
     blocks = []
     for item in result.tool_results:
         provenance = item.provenance
-        if (item.status.value not in {'succeeded', 'partial'} or item.success is not True
-                or item.error is not None or item.quality.get('validated') is not True
-                or type(item.quality.get('evidence_id')) is not str or not item.quality['evidence_id']
+        if (type(item.quality.get('evidence_id')) is not str or not item.quality['evidence_id']
                 or type(provenance) is not ToolProvenance
                 or provenance.tool_name != item.tool_name or not provenance.input_digest
                 or provenance.demo_mode or provenance.fallback_used):
+            continue
+        accepted = (item.status.value in {'succeeded', 'partial'} and item.success
+                    and item.error is None and item.quality.get('validated') is True)
+        if not accepted and not verified_mixed_admet(item, expected):
             continue
         blocks.append({'tool': item.tool_name, 'data': item.data,
                        'status': item.status.value, 'evidence_id': item.quality['evidence_id']})
