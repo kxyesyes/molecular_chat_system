@@ -235,7 +235,6 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
 
     def test_design_page_exposes_feedback_and_comparison_surfaces(self):
         template = (PROJECT_ROOT / "src/web/templates/molecular_design.html").read_text(encoding="utf-8")
-        config_js = (PROJECT_ROOT / "src/web/static/js/design/config.js").read_text(encoding="utf-8")
         main_js = (PROJECT_ROOT / "src/web/static/js/design/main.js").read_text(encoding="utf-8")
         editor_js = (PROJECT_ROOT / "src/web/static/js/design/molecule_editor.js").read_text(encoding="utf-8")
         css = (PROJECT_ROOT / "src/web/static/css/molecular_design.css").read_text(encoding="utf-8")
@@ -246,9 +245,6 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         self.assertIn('id="uploadInput"', template)
         self.assertNotIn('class="props-panel"', template)
         self.assertNotIn("<footer>", template)
-        self.assertIn("candidates: []", config_js)
-        self.assertIn("addCandidateComparison", editor_js)
-        self.assertIn("renderCandidateComparison", editor_js)
         self.assertIn("restoreCandidate", editor_js)
         self.assertIn("setFeedback", main_js)
         self.assertIn(".candidate-compare", css)
@@ -265,9 +261,8 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         self.assertNotIn('class="props-panel"', template)
         self.assertNotIn("<footer>", template)
 
-    def test_design_frontend_uses_backend_goals_and_generation_order(self):
+    def test_design_frontend_uses_backend_goals_and_scopes_property_updates(self):
         properties_js = (PROJECT_ROOT / "src/web/static/js/design/properties_panel.js").read_text(encoding="utf-8")
-        editor_js = (PROJECT_ROOT / "src/web/static/js/design/molecule_editor.js").read_text(encoding="utf-8")
         api_js = (PROJECT_ROOT / "src/web/static/js/design/api_client.js").read_text(encoding="utf-8")
         main_js = (PROJECT_ROOT / "src/web/static/js/design/main.js").read_text(encoding="utf-8")
 
@@ -276,10 +271,6 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         self.assertIn("reference_smiles", api_js)
         self.assertIn("requestToken", properties_js)
         self.assertIn("propsRequestSeq", main_js)
-        self.assertNotIn("candidateScore", editor_js)
-        self.assertIn("findIndex", editor_js)
-        self.assertNotIn("candidates.sort", editor_js)
-        self.assertIn("S.candidates.push", editor_js)
 
     def test_design_smiles_polling_is_debounced_visibility_aware_and_non_reentrant(self):
         main_js = (PROJECT_ROOT / "src/web/static/js/design/main.js").read_text(encoding="utf-8")

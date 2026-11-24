@@ -39,7 +39,6 @@ assert.match(templateSource, /id="topK"[\s\S]*value="100"/);
 assert.match(mainSource, /function\s+applyReverseTargetPreset\s*\(/);
 assert.match(mainSource, /threshold\.value\s*=\s*"0\.5"/);
 assert.match(mainSource, /topK\.value\s*=\s*"100"/);
-assert.match(mainSource, /window\.lastReverseTargetSummary\s*=\s*data/);
 assert.match(fs.readFileSync(path.join(projectRoot, "src", "web", "static", "js", "reverse_target", "results_renderer.js"), "utf8"), /unique_target_count_before_top_k/);
 
 // A 3D request deliberately lowers the prefilter threshold for recall. The
@@ -47,14 +46,11 @@ assert.match(fs.readFileSync(path.join(projectRoot, "src", "web", "static", "js"
 // can point to an empty result set.
 const vm = require("node:vm");
 const context = vm.createContext({
-  window: {
-    lastThreshold: "0.5",
-    lastReverseTargetSummary: { prefilter_threshold: 0.3 },
-  },
+  window: {},
   document: {},
   FEAT_META: {},
 });
 const renderer = vm.runInContext(`${rendererSource}\nRtResults;`, context);
-assert.strictEqual(renderer._test.detailsThreshold(), 0.3);
+assert.strictEqual(renderer._test.detailsThreshold({mode: "3d", threshold: 0.5, summary: {prefilter_threshold: 0.3}}), 0.3);
 
 console.log("reverse target broad-recall defaults checks passed");

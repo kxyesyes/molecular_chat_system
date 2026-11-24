@@ -310,8 +310,11 @@ def decision_system_message(request_kind, required_tools, catalog, requirement_p
     # Scientific failure guidance must not consume ordinary-chat history budget.
     # Keep the established chat prompt byte-identical, including capability suffixes.
     finish_instructions = (
-        'Let authorized tools validate supplied molecular input and obtain evidence before finishing. '
-        'Do not reject supplied SMILES based on your own assessment; use an authorized molecular tool '
+        ('Use action "tool" first when the current user supplies molecular input and requests a calculation. '
+         'Pass all supplied structures, including possibly invalid ones, to the required authorized tool for validation. '
+         if binding_profile is None else
+         'Let authorized tools validate supplied molecular input and obtain evidence before finishing. ')
+        + 'Do not reject supplied SMILES based on your own assessment; use an authorized molecular tool '
         'when the required inputs are present. If required input is missing, choose clarify. '
         'For scientific finish, scientific evidence_ids must be nonempty, unique IDs '
         'from actual observations usable for the requested result. The existing server-authorized '

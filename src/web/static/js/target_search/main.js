@@ -1,7 +1,7 @@
 const TargetSearchApp = (() => {
   const STRUCTURES_PER_PAGE = 8;
   let searchVersion = 0;
-  let detailVersion = 0;
+  let selectionVersion = 0;
   let selectedTargetId = null;
   let currentDetail = null;
   let structurePage = 1;
@@ -194,7 +194,7 @@ const TargetSearchApp = (() => {
   async function runSearch(query) {
     const trimmed = (query || "").trim();
     const version = ++searchVersion;
-    ++detailVersion;
+    ++selectionVersion;
     selectedTargetId = null;
     currentDetail = null;
     structurePage = 1;
@@ -298,7 +298,7 @@ const TargetSearchApp = (() => {
   }
 
   async function loadDetail(targetId) {
-    const version = ++detailVersion;
+    const version = ++selectionVersion;
     currentDetail = null;
     hideMessage();
     selectedTargetId = Number(targetId);
@@ -315,14 +315,14 @@ const TargetSearchApp = (() => {
 
     try {
       const data = await TargetSearchApi.detail(targetId);
-      if (version !== detailVersion) return;
+      if (version !== selectionVersion) return;
       currentDetail = data;
       selectedTargetId = Number(data.target_id);
       detail.innerHTML = renderDetail(data);
       hydrateExternalLinks(detail, data.external_links);
       refreshSelectedCards();
     } catch (error) {
-      if (version !== detailVersion) return;
+      if (version !== selectionVersion) return;
       renderInlineError(detail, "detail-empty", "详情加载失败", "", error.message);
     }
   }
@@ -636,23 +636,23 @@ const TargetSearchApp = (() => {
   }
 
   async function sendToDocking(structureId, button) {
+    const version = ++selectionVersion;
     if (button) button.disabled = true;
     showMessage("正在准备对接结构…", "info");
     try {
-      const preflight = await TargetSearchApi.preflight(structureId, "cif");
-      showMessage(formatPreflightMessage(preflight, "docking"), preflight.suitable_for_direct_docking ? "success" : "info");
       const data = await TargetSearchApi.sendToDocking(structureId);
-      if (data.status === "error") {
-        throw new Error(data.message || "结构文件准备失败");
+      if (version === selectionVersion) {
+        if (data.file_format !== "pdb" || data.structure_db_id !== Number(structureId)) {
+          throw new Error("未取得所选结构的 PDB 文件，请重试。");
+        }
+        showMessage(formatPreflightMessage(data.preflight, "docking"), data.preflight.suitable_for_direct_docking ? "success" : "info");
+        window.location.href = `/molecular-docking?target_structure=${encodeURIComponent(structureId)}`;
+        return;
       }
-      showMessage(`${data.message}：${data.protein_file}。${formatPreflightMessage(preflight, "docking")}`, "success");
-      const targetId = data.structure_db_id || structureId;
-      window.location.href = `/molecular-docking?target_structure=${encodeURIComponent(targetId)}&target_structure_id=${encodeURIComponent(targetId)}`;
     } catch (error) {
-      showMessage(formatStructureActionError(error), "error");
-    } finally {
-      if (button) button.disabled = false;
+      if (version === selectionVersion) showMessage(formatStructureActionError(error), "error");
     }
+    if (button) button.disabled = false;
   }
 
   function formatPreflightMessage(preflight, intent) {

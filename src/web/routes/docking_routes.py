@@ -834,7 +834,7 @@ def setup_docking_routes(
     async def submit_batch_docking_job(
         request: Request,
         protein_file: UploadFile = File(...),
-        ligand_files: Optional[List[UploadFile]] = File(None),
+        ligand_files: List[UploadFile] = File([]),
         batch_smiles: str = Form(""),
         center_x: float = Form(0.0),
         center_y: float = Form(0.0),
@@ -852,7 +852,6 @@ def setup_docking_routes(
         if not docking_service:
             raise HTTPException(status_code=503, detail="分子对接服务不可用")
 
-        ligand_files = ligand_files or []
         smiles_rows = [
             line.strip()
             for line in (batch_smiles or "").splitlines()

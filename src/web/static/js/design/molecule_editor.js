@@ -87,12 +87,12 @@ var MoleculeEditor = (function () {
     });
   }
 
-  async function setSMILES(smi) {
+  async function setSMILES(smi, preparedStructure) {
     var k = getK();
     if (!k) return smi;
     S.editorWriteSeq = (S.editorWriteSeq || 0) + 1;
     var writeSeq = S.editorWriteSeq;
-    var mutationSeq = S.mutationSeq;
+    var mutationToken = S.mutationSeq;
     var frame = document.getElementById("ketcher-frame");
     if (!S.editorWriteDepth) S.editorPreviousInert = !!frame.inert;
     frame.inert = true;
@@ -102,11 +102,12 @@ var MoleculeEditor = (function () {
     var previous = S.editorWriteQueue || Promise.resolve();
     var operation = previous.catch(function () {}).then(async function () {
       try {
-        await loadEditorMolecule(k, labelEditorAttachmentPoints(smi));
+        if (preparedStructure && mutationToken !== S.mutationSeq) return;
+        await loadEditorMolecule(k, preparedStructure || labelEditorAttachmentPoints(smi));
         // Capture the editor's canonical/CXSMILES form before releasing the
         // write guard, so polling cannot mistake our import for a user edit.
         var exported = await k.getSmiles();
-        if (writeSeq === S.editorWriteSeq && mutationSeq === S.mutationSeq) S.smiles = exported;
+        if (writeSeq === S.editorWriteSeq) S.smiles = exported;
         return exported;
       } finally {
         S.editorWriteDepth = Math.max(0, (S.editorWriteDepth || 1) - 1);
@@ -132,138 +133,54 @@ var MoleculeEditor = (function () {
     }
   }
 
-  function formatProp(value) {
-    var n = PropertiesPanel.numeric(value);
-    return n === null ? "—" : n.toFixed(2);
-  }
-
-  function metricDelta(beforeProps, afterProps, key) {
-    var beforeValue = PropertiesPanel.numeric(beforeProps && beforeProps[key]);
-    var afterValue = PropertiesPanel.numeric(afterProps && afterProps[key]);
-    var hasDelta = beforeValue !== null && afterValue !== null;
-    return hasDelta ? afterValue - beforeValue : null;
-  }
-
-  function renderDelta(label, beforeProps, afterProps, key) {
-    var afterValue = afterProps && afterProps[key];
-    var delta = metricDelta(beforeProps, afterProps, key);
-    var hasDelta = delta !== null;
-    return (
-      '<div class="candidate-metric">' +
-      '<span class="metric-label">' +
-      label +
-      "</span>" +
-      '<strong class="metric-value">' +
-      formatProp(afterValue) +
-      "</strong>" +
-      (hasDelta
-        ? '<span class="metric-delta">' + (delta >= 0 ? "+" : "") + delta.toFixed(2) + "</span>"
-        : '<span class="metric-delta">—</span>') +
-      "</div>"
-    );
-  }
-
-  function renderCandidateComparison(beforeProps, afterProps, smiles, fragmentLabel) {
-    addCandidateComparison(beforeProps, afterProps, smiles, fragmentLabel);
-  }
-
-  function renderCandidateBoard() {
-    var box = document.getElementById("candidateCompare");
-    if (!box) return;
-    var candidates = S.candidates || [];
-    var header =
-      '<div class="candidate-compare-title">' +
-      "<span>候选分子对比</span><small>按生成顺序</small>" +
-      "</div>";
-    if (!candidates.length) {
-      box.innerHTML =
-        header +
-        '<div class="candidate-compare-empty">执行一次取代后，这里会显示新旧分子的关键属性变化。</div>';
-      return;
-    }
-    box.innerHTML =
-      header +
-      '<div class="candidate-list">' +
-      candidates
-        .map(function (c) {
-          return (
-            '<div class="candidate-row">' +
-            '<div class="candidate-row-main">' +
-            '<div class="candidate-row-top"><strong>#' +
-            c.step +
-            " " +
-            UI.escText(c.fragmentLabel || "fragment") +
-            "</strong>" +
-            '<button class="ghost-mini" onclick="restoreCandidate(\'' +
-            UI.escInlineJs(c.smiles) +
-            "')\">恢复</button></div>" +
-            '<div class="candidate-smiles">' +
-            UI.escText(c.smiles || "") +
-            "</div>" +
-            '<div class="candidate-metrics">' +
-            renderDelta("QED", c.beforeProps, c.props, "qed") +
-            renderDelta("LogP", c.beforeProps, c.props, "logp") +
-            renderDelta("MW", c.beforeProps, c.props, "mw") +
-            renderDelta("TPSA", c.beforeProps, c.props, "tpsa") +
-            "</div></div>"
-          );
-        })
-        .join("") +
-      "</div>";
-  }
-
-  function addCandidateComparison(beforeProps, afterProps, smiles, fragmentLabel) {
-    if (!afterProps) return;
-    S.candidates = S.candidates || [];
-    var existingIndex = S.candidates.findIndex(function (candidate) {
-      return candidate.smiles === smiles;
-    });
-    if (existingIndex >= 0) {
-      // A repeated structure is not a new design result. Refresh its
-      // evidence in place so the list remains unique and generation-ordered.
-      S.candidates[existingIndex].beforeProps = beforeProps || {};
-      S.candidates[existingIndex].props = Object.assign({}, afterProps);
-      S.candidates[existingIndex].fragmentLabel = fragmentLabel;
-      renderCandidateBoard();
-      return;
-    }
-    S.candidates.push({
-      step: S.iter,
-      smiles: smiles,
-      fragmentLabel: fragmentLabel,
-      beforeProps: beforeProps || {},
-      props: Object.assign({}, afterProps),
-    });
-    renderCandidateBoard();
-  }
-
-  async function restoreCandidate(smiles, successMessage) {
-    if (!smiles) return;
-    resetConnectionState();
-    var mutationToken = (S.mutationSeq || 0) + 1;
-    S.mutationSeq = mutationToken;
+  async function loadStructure(source, successMessage) {
+    if (!source) return;
+    var mutationToken = ++S.mutationSeq;
+    S.propsRequestSeq++;
+    clearTimeout(S.propsDebounceTimer);
+    S.pendingPropsSmiles = "";
     var loadingOverlay = document.getElementById("loadingOverlay");
     if (loadingOverlay) loadingOverlay.style.display = "none";
-    S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
+    function isCurrent() { return mutationToken === S.mutationSeq; }
+    var smiles = source, prepared;
+    try {
+      if (typeof source !== "string") {
+        var text = await source.text();
+        if (!isCurrent()) return;
+        smiles = window.MedChatSmilesFile.extractUploadedSmiles(source.name, text);
+        if (!smiles) { UI.toast("文件中没有找到 SMILES", "error"); return; }
+      }
+      var k = getK();
+      if (!k) { UI.toast("请等待分子编辑器就绪后重试", "error"); return; }
+      // Ketcher's setMolecule detaches SMILES parsing. Prepare its native KET
+      // layout first so malformed input rejects before changing the canvas.
+      var options = k.editor.options();
+      prepared = await k.structService.layout({
+        struct: labelEditorAttachmentPoints(smiles), output_format: "chemical/x-indigo-ket"
+      }, {"dearomatize-on-load": options["dearomatize-on-load"], "ignore-no-chiral-flag": options.ignoreChiralFlag});
+    } catch (_) {
+      if (isCurrent()) UI.toast("结构导入失败，请检查文件或 SMILES 后重试", "error");
+      return;
+    }
+    if (!isCurrent()) return;
+    try {
+      smiles = await setSMILES(smiles, prepared.struct);
+    } catch (error) {
+      if (isCurrent()) UI.toast(error.message || "分子载入失败", "error");
+      return;
+    }
+    if (!isCurrent()) return;
+    resetConnectionState();
     S.curProps = null;
     S.prevProps = null;
     S.curGoals = null;
     S.propsSmiles = "";
-    S.pendingPropsSmiles = "";
-    smiles = await setSMILES(smiles);
-    if (mutationToken !== S.mutationSeq) return;
     S.smiles = smiles;
     document.getElementById("curSmiles").textContent = smiles;
     var result = await PropertiesPanel.calcProps(smiles);
-    if (mutationToken !== S.mutationSeq) return;
-    if (!result || result.stale || !result.success) return;
+    if (!isCurrent() || !result || result.stale || !result.success) return;
     UI.setFeedback(successMessage || "已恢复候选分子，可继续选择片段做下一轮设计。", "success");
     return true;
-  }
-
-  function resetCandidateComparison() {
-    S.candidates = [];
-    renderCandidateBoard();
   }
 
   /* ── 位点检测 ── */
@@ -355,11 +272,7 @@ var MoleculeEditor = (function () {
           UI.setFeedback("结构取代已完成，但属性计算失败；该候选未加入历史，请检查计算工具后重试。", "warn");
           return;
         }
-        S.iter++;
-        var iterEl = document.getElementById("iterCount");
-        if (iterEl) iterEl.textContent = S.iter;
-        HistoryManager.addHist(productSmiles, S.curProps);
-        renderCandidateComparison(beforeProps, S.curProps, productSmiles, fragment.label);
+        HistoryManager.recordSubstitution(productSmiles, S.curProps, beforeProps, fragment.label);
         resetConnectionState();
         UI.setFeedback("取代完成，候选分子的属性变化已更新。", "success");
         UI.toast("取代成功", "success");
@@ -384,13 +297,7 @@ var MoleculeEditor = (function () {
       UI.toast("请输入 SMILES", "error");
       return;
     }
-    if (smi) {
-      try {
-        if (await restoreCandidate(smi, "已导入分子，属性已更新。")) UI.closeImport();
-      } catch (_) {
-        UI.toast("分子载入失败，请检查 SMILES；若编辑器超时请刷新页面。", "error");
-      }
-    }
+    if (await loadStructure(smi, "已导入分子，属性已更新。")) UI.closeImport();
   }
 
   /* ── 导出 / 复制 / 清空 ── */
@@ -422,7 +329,6 @@ var MoleculeEditor = (function () {
     HistoryManager.clearHist();
     document.getElementById("curSmiles").textContent = "等待绘制...";
     PropertiesPanel.clearPropsUI();
-    resetCandidateComparison();
     UI.setFeedback("", "info");
     await setSMILES("");
   }
@@ -432,9 +338,8 @@ var MoleculeEditor = (function () {
     getSMILES: getSMILES,
     setSMILES: setSMILES,
     resetConnectionState: resetConnectionState,
-    addCandidateComparison: addCandidateComparison,
-    renderCandidateComparison: renderCandidateComparison,
-    restoreCandidate: restoreCandidate,
+    loadStructure: loadStructure,
+    restoreCandidate: loadStructure,
     detectSites: detectSites,
     execSubstitute: execSubstitute,
     confirmImport: confirmImport,

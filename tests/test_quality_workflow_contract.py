@@ -26,6 +26,7 @@ AGENT_CORE_TARGET = "tests/agent " + " ".join(
 )
 AGENT_DOCKING_TARGET = "tests/agent/test_*docking*.py"
 AGENT_PUBLICATION_TARGET = "tests/agent/test_docking_publication*.py"
+AGENT_WEB_REPEAT_TARGET = "tests/agent/test_web_repeat_corrections.py"
 AGENT_PI_PARTITIONS = {
     'agent-browser-chat': 'tests/agent/test_browser_*.py tests/agent/test_chat_*.py',
     'agent-decision-bindings': 'tests/agent/test_decision_binding*.py',
@@ -50,6 +51,11 @@ def test_real_pi_work_is_split_into_bounded_disjoint_file_families():
                    for pattern in target.split())
     assert AGENT_PI_PARTITIONS['agent-decision-bindings'] in matrix['agent-decision']['pytest_exclude'].split()
     assert all(path in matrix['agent-web']['pytest_exclude'].split() for path in AGENT_WEB_TARGET.split())
+    assert AGENT_WEB_REPEAT_TARGET in matrix['agent-web']['pytest_exclude'].split()
+    assert matrix['agent-web-repeat'] == {
+        'name': 'agent-web-repeat', 'pytest_target': AGENT_WEB_REPEAT_TARGET,
+        'pytest_args': '-vv --durations=25', 'command_timeout': 1200,
+    }
     assert jobs['python-tests']['timeout-minutes'] == 30
     assert jobs['offline-quality']['needs'] == ['python-tests', 'static-quality']
 
@@ -122,7 +128,7 @@ def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None
         "${{ matrix.pytest_target }} -q -p no:cacheprovider "
         "${{ matrix.pytest_args }}"
     ) in workflow
-    assert workflow.count("command_timeout:") == 16
+    assert workflow.count("command_timeout:") == workflow.count("pytest_target:")
     assert "command_timeout: 180" in workflow
     for target in (
         AGENT_CORE_TARGET,
@@ -201,14 +207,14 @@ def test_root_partition_preserves_deadlines_and_all_jobs_gate():
     jobs = _quality_jobs()
     python = jobs["python-tests"]
     matrix = {row["name"]: row for row in python["strategy"]["matrix"]["include"]}
-    assert set(matrix) == {"agent", "agent-web-lifecycle", "agent-docking", "agent-docking-publication", "sandbox-api", "sandbox-core", "task-runtime", "task-runtime-chat", "root", "root-docking", "root-activity"} | set(AGENT_PI_PARTITIONS)
+    assert set(matrix) == {"agent", "agent-web-repeat", "agent-web-lifecycle", "agent-docking", "agent-docking-publication", "sandbox-api", "sandbox-core", "task-runtime", "task-runtime-chat", "root", "root-docking", "root-activity"} | set(AGENT_PI_PARTITIONS)
     assert python["strategy"]["fail-fast"] is False
     assert matrix["root"]["pytest_target"] == "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"
     assert matrix["root"]["pytest_args"] == "-vv --durations=25"
     assert matrix["root-activity"]["pytest_target"] == "tests/test_activity*.py"
     assert matrix["root-activity"]["pytest_args"] == ""
     assert all(row["command_timeout"] == (
-                   1200 if name in {"agent", "agent-docking", "agent-docking-publication"} | set(AGENT_PI_PARTITIONS) else
+                   1200 if name in {"agent", "agent-web-repeat", "agent-docking", "agent-docking-publication"} | set(AGENT_PI_PARTITIONS) else
                    900 if name == "root-activity" else
                    180 if name == "sandbox-api" else 600)
                for name, row in matrix.items())
@@ -560,7 +566,7 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
     matrix = {row['name']: row for row in rows}
     assert len(matrix) == len(rows)
     assert 'agent-docking' in matrix, 'missing bounded docking partition'
-    files = (*AGENT_WEB_TARGET.split(), 'tests/agent/test_future_agent.py',
+    files = (*AGENT_WEB_TARGET.split(), AGENT_WEB_REPEAT_TARGET, 'tests/agent/test_future_agent.py',
              'tests/agent/test_ordinary_web_runtime_future.py',
              'tests/agent/future/test_nested.py',
              'tests/agent/future/test_web_decision_runtime_lifecycle.py',
@@ -644,7 +650,7 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
                 "        global _offset, _exits\n"
                 "        result = super().__exit__(*args)\n"
                 "        _exits += 1\n"
-                "        if _exits == 10:\n            _offset += 181\n"
+                "        if _exits == 11:\n            _offset += 181\n"
                 "        return result\n"
                 "tempfile.TemporaryDirectory = DelayedFinalCleanup\n" + code)
     configuration = tmp_path / '.github/workflows/quality.yml'
@@ -660,18 +666,18 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
     if fault is None:
         assert completed.returncode == 0, completed.stdout
         assert completed.stdout.strip() == (
-            'AGENT_COLLECTION_OK baseline=46 agent=18 agent-browser-chat=4 '
+            'AGENT_COLLECTION_OK baseline=48 agent=18 agent-browser-chat=4 '
             'agent-decision-bindings=2 agent-decision=2 agent-pi=2 agent-web=2 '
-            'agent-web-lifecycle=6 agent-docking=6 agent-docking-publication=4')
+            'agent-web-repeat=2 agent-web-lifecycle=6 agent-docking=6 agent-docking-publication=4')
         baseline = _collect_agent_with_actual_bash(tmp_path,
             dict(name='baseline', pytest_target='tests/agent', pytest_args=''), environment)
-        names = ('agent', *AGENT_PI_PARTITIONS, 'agent-web-lifecycle', 'agent-docking', 'agent-docking-publication')
+        names = ('agent', *AGENT_PI_PARTITIONS, 'agent-web-repeat', 'agent-web-lifecycle', 'agent-docking', 'agent-docking-publication')
         partitions = [_collect_agent_with_actual_bash(tmp_path, matrix[name], environment) for name in names]
         expected = {f'{path}::test_case[{n}]' for path in files for n in (1, 2)}
         assert baseline == expected
         assert set.union(*partitions) == baseline
         assert all(left.isdisjoint(right) for i, left in enumerate(partitions) for right in partitions[i + 1:])
-        assert [len(ids) for ids in partitions] == [18, 4, 2, 2, 2, 2, 6, 6, 4]
+        assert [len(ids) for ids in partitions] == [18, 4, 2, 2, 2, 2, 2, 6, 6, 4]
         assert 'tests/agent/future/test_docking_publication_future.py::test_case[1]' in partitions[0]
         assert 'tests/agent/test_docking_publication_extra/test_nested_publication.py::test_case[2]' in partitions[0]
         assert 'tests/agent/future/test_pi_future.py::test_case[1]' in partitions[0]

@@ -1,11 +1,12 @@
 """Bounded, socket-local descriptor context; never infer numbers from prose.
 
-Only one validated molecule per turn can be reused. No shared cache, database
-search, model-generated value, or implicit molecular identity is consulted.
+Single-molecule and batch follow-ups use verified records from the prior turn.
 """
 import math
 import re
 from collections.abc import Mapping
+from copy import deepcopy
+from dataclasses import dataclass
 
 from src.agent.planning.request_parsing import positive_intent_text, restricted_properties
 from src.agent.utils.validators import InputValidator
@@ -53,32 +54,116 @@ def _adjacent_molecule_label(query, smiles):
     return label
 
 
-def recorded_descriptor(query, history, session_id):
-    """Read a requested value from the immediately preceding, session-bound record."""
-    if deictic_property_match(query):
-        # The property workflow resolves this structure or asks which molecule to use.
+_DESCRIPTOR_QUESTION = re.compile(
+    r'(?:请问\s*|请\s*)?(?P<prior>(?:使用|根据|基于|查看)?\s*(?:刚才|上轮|上一轮|之前|前面)的?'
+    r'(?:(?:计算)?(?:结果|记录)[，,：:]\s*)?)?'
+    r'(?P<subject>[\w-]{1,80}?)?(?:的)?\s*'
+    r'(?:(?P<metric>分子量|MW|log\s*P)\s*(?:分别)?(?:是多少|为多少|多少|呢)|有多重)'
+    r'(?:来着)?[？?。]?\s*(?P<read_only>(?:请)?(?:不要|不用|无需)重新计算[。.!！]?)?', re.I)
+_DEICTIC = ('它', '那', '这个', '那个', '该分子', '这个分子', '那个分子')
+_ORDINALS = tuple(f'第{n}个' for n in (*'一二三四五六七八九十', '十一', '十二', '十三', '十四', '十五', '十六'))
+_NAMED_COMPARISON_MEMBER = re.compile(
+    r'(?:^\s*(?:请)?(?:比较|对比)|(?<=）)\s*(?:和|与|、))\s*'
+    r'(?P<label>[\w-]{1,80})\s*（\s*(?:SMILES\s*[:：=]\s*)?(?P<smiles>[!-~]+?)\s*）', re.I)
+
+
+def descriptor_context(history, session_id):
+    """Return the current molecule and its ordered batch from the last turn."""
+    previous = history[-1] if history else {}
+    context = previous.get('descriptor_carry', previous)
+    records = {}
+    for field in ('property_evidence', 'batch_property_evidence'):
+        record = context.get(field)
+        if (session_id and isinstance(record, dict) and record.get('session_id') == session_id
+                and record.get('trace_id') and record.get('evidence_id')):
+            records[field] = record
+    if records:
+        records['descriptor_metric'] = context.get('descriptor_metric')
+        if 'batch_property_evidence' in records and (
+                context.get('agent_used') is True or context.get('batch_property_evidence_reused') is True):
+            records['batch_property_evidence_reused'] = True
+    return records
+
+
+@dataclass(frozen=True)
+class DescriptorQuestion:
+    subject: str | None
+    metric: str
+    prior: bool
+    read_only: bool
+
+    @property
+    def unnamed(self):
+        return self.subject is None or self.subject in _DEICTIC
+
+    @classmethod
+    def parse(cls, query):
+        match = _DESCRIPTOR_QUESTION.fullmatch(query.strip())
+        if match:
+            metric = 'logp' if (match['metric'] or '').lower().startswith('log') else 'molecular_weight'
+            return cls(match['subject'], metric, bool(match['prior']), bool(match['read_only']))
+
+
+def recorded_descriptor(query, history, session_id, *, selected_smiles=None):
+    context = descriptor_context(history, session_id)
+    single = context.get('property_evidence')
+    batch = context.get('batch_property_evidence')
+    rows = batch['rows'] if batch else []
+    query = query.strip()
+    question = DescriptorQuestion.parse(query)
+    if question:
+        subject, key = selected_smiles or question.subject, question.metric
+        if subject is None and not question.prior:
+            return None
+    elif rows and context.get('descriptor_metric'):
+        subject = query.rstrip('。！？!?')
+        ordinal = re.fullmatch(r'(?:那)?(第[一二三四五六七八九十\d]+个)(?:呢)?', subject)
+        if ordinal:
+            subject = ordinal[1]
+        key = context['descriptor_metric']
+    else:
         return None
-    match = re.fullmatch(
-        r'\s*(?:请问\s*|请\s*)?(?P<prior>(?:使用|根据|基于|查看)?\s*(?:刚才|上轮|上一轮|之前)的?'
-        r'(?:(?:计算)?(?:结果|记录)[，,：:]\s*)?)?(?:(?P<subject>[\w-]{1,80})的\s*)?'
-        r'(?P<metric>分子量|MW|log\s*P)\s*(?:分别)?(?:是多少|为多少)[？?。]?'
-        r'\s*(?:(?:请)?(?:不要|不用|无需)重新计算[。.!！]?)?\s*', query, re.I)
-    deictic = ('它', '该分子', '这个分子')
-    if not match or (not match['prior'] and match['subject'] not in deictic):
+
+    unnamed = question and question.unnamed and selected_smiles is None
+    if selected_smiles:
+        current = single and selected_smiles == single.get('canonical_smiles')
+        selected = [row for row in rows if row['smiles'] == selected_smiles]
+    else:
+        current = single and (unnamed or subject and subject in (
+            single.get('canonical_smiles'), single.get('molecule_label')))
+        selected = [r for i, r in enumerate(rows, 1) if subject and subject in (
+            r['smiles'], r.get('molecule_label'), str(i), f'第{i}个',
+            _ORDINALS[i - 1] if i <= len(_ORDINALS) else None)]
+    if len(selected) > 1 or (rows and unnamed and not single):
+        choices = []
+        for i, row in enumerate(rows, 1):
+            label = row.get('molecule_label')
+            name = f"{label}（{row['smiles']}）" if label else row['smiles']
+            choices.append(f'{i}. {name}')
+        metric = 'LogP' if key == 'logp' else '分子量'
+        return {'status': 'not_calculated', 'content': f'有多个分子，你想查看哪个的{metric}？'
+                + '；'.join(choices) + '。可回复序号、名称或 SMILES。',
+                'history_update': {**context, 'descriptor_metric': key}}
+    if rows and not selected and not selected_smiles and re.fullmatch(r'第[一二三四五六七八九十\d]+个|\d+', subject or ''):
+        return {'status': 'not_calculated', 'content': f'这批共有 {len(rows)} 个分子，请按表格序号选择。',
+                'history_update': {**context, 'descriptor_metric': key}}
+    if selected:
+        row = selected[0]
+        if not single or single.get('canonical_smiles') != row['smiles']:
+            single = {k: batch[k] for k in ('session_id', 'trace_id', 'evidence_id')}
+            single.update(row, canonical_smiles=row['smiles'])
+    elif not current:
+        single = None
+    if not single and (selected_smiles or not question or not (question.prior or unnamed)):
         return None
-    evidence = history[-1].get('property_evidence') if history else None
-    key = 'logp' if match['metric'].lower().startswith('log') else 'molecular_weight'
-    if (not session_id or not isinstance(evidence, dict) or evidence.get('session_id') != session_id
-            or not evidence.get('trace_id') or not evidence.get('evidence_id')
-            or not evidence.get('canonical_smiles') or type(evidence.get(key)) not in (int, float)
-            or not math.isfinite(evidence[key]) or match['subject'] not in (
-                None, *deictic, evidence.get('canonical_smiles'), evidence.get('molecule_label'))):
-        return {'content': '上一轮没有可与该分子对应的性质记录，请核对分子名称或 SMILES。',
-                'status': 'not_calculated'}
-    value = (f"logP 为 {evidence[key]:.3f}" if key == 'logp'
-             else f"分子量为 {evidence[key]:.2f} Da")
-    return {'content': f"上一轮结构 `{evidence['canonical_smiles']}` 的计算{value}。",
-            'status': 'completed', 'reused_evidence': evidence}
+    if (not single or not single.get('canonical_smiles') or type(single.get(key)) not in (int, float)
+            or not math.isfinite(single[key])):
+        if not context and deictic_property_match(query):
+            return None
+        return {'content': '没有可与该分子对应的性质记录，请核对分子名称或 SMILES。', 'status': 'not_calculated'}
+    value = (f"logP 为 {single[key]:.3f}" if key == 'logp' else f"分子量为 {single[key]:.2f} Da")
+    return {'content': f"结构 `{single['canonical_smiles']}` 的计算{value}。", 'status': 'completed',
+            'history_update': {**context, 'property_evidence': single, 'descriptor_metric': key}}
 
 
 def corrected_property_query(query, history):
@@ -274,9 +359,32 @@ def accepted_batch_property_evidence(result, query, session_id):
         if any(type(value) not in (int, float) or not math.isfinite(value) for value in values.values()):
             return None
         rows[canonical] = values
+    labels = {m['smiles']: m['label'] for m in _NAMED_COMPARISON_MEMBER.finditer(query)}
+    for identity in identities:
+        if identity.smiles in labels:
+            rows[identity.canonical_smiles]['molecule_label'] = labels[identity.smiles]
     return {'session_id': session_id, 'trace_id': result['trace_id'],
             'evidence_id': sequence[0]['quality']['evidence_id'],
             'rows': [{'smiles': smiles, **rows[smiles]} for smiles in expected]}
+
+
+def batch_property_followup(query, history, session_id) -> tuple[dict, dict] | None:
+    """Return the visible answer and the evidence to save in this turn's history."""
+    reply = batch_lipinski_followup(query, history, session_id)
+    history_update = {}
+    if reply is None:
+        reply = batch_logp_followup(query, history, session_id)
+        if reply and 'reused_evidence' in reply:
+            history_update = descriptor_context(history, session_id)
+    if reply is None:
+        return None
+
+    if 'pending' in reply:
+        history_update['batch_lipinski_pending'] = deepcopy(reply['pending'])
+    if 'reused_evidence' in reply:
+        history_update['batch_property_evidence'] = deepcopy(reply['reused_evidence'])
+        history_update['batch_property_evidence_reused'] = True
+    return {'content': reply['content'], 'status': reply['status']}, history_update
 
 
 def batch_lipinski_followup(query, history, session_id):
@@ -339,37 +447,44 @@ def batch_lipinski_followup(query, history, session_id):
 
 
 def batch_logp_followup(query, history, session_id):
-    """Compare two descriptors from the immediately prior accepted batch."""
+    """Compare stored logP values in the original display order."""
     match = re.fullmatch(
-        r'\s*(?P<prior>(?:刚才|之前|上一轮)(?:比较的)?(?:这)?(?:两个|两种)分子[，,]?\s*)?'
-        r'哪(?:一)?个(?:分子)?的?\s*log\s*p\s*(?:更|较)(?P<direction>高|低)'
-        r'(?:[？?，,]\s*差值(?:是)?多少)?[？?。.!！]?'
+        r'\s*(?P<prior>(?:(?:刚才|之前|上一轮)(?:比较的)?)?'
+        r'(?:(?:这|那)?(?P<pair>两个|两种)|这批|那批|整批)(?:分子)?[，,]?\s*)?'
+        r'哪(?:一)?个(?:分子)?的?\s*log\s*p\s*(?:更|较|最)(?P<direction>高|低)'
+        r'(?:[？?，,]\s*差(?:值)?(?:是)?多少)?[？?。.!！]?'
         r'(?:\s*仅根据(?:刚才|之前|上一轮)的计算回答[。.!！]?)?\s*', query, re.I)
-    if not match:
+    compare_all = re.fullmatch(r'\s*(?:请)?比较(?:一下)?(?:这批|那批|整批)(?:分子)?的?\s*log\s*p[？?。.!！]?\s*',
+                               query, re.I)
+    if not match and not compare_all:
         return None
-    previous = history[-1] if history else {}
-    evidence = previous.get('batch_property_evidence')
-    if not evidence and not match['prior']:
+    context = descriptor_context(history, session_id)
+    evidence = context.get('batch_property_evidence')
+    if not evidence and match and not match['prior']:
         return None  # Other workflows may own an implicit candidate comparison.
-    if ((previous.get('agent_used') is not True and previous.get('batch_property_evidence_reused') is not True)
-            or not isinstance(evidence, dict) or evidence.get('session_id') != session_id
-            or not evidence.get('trace_id') or not evidence.get('evidence_id')
-            or not isinstance(evidence.get('rows'), list) or len(evidence['rows']) != 2):
-        return {'content': '无法核对上一轮的两条分子性质记录，请重新比较两个 SMILES。',
+    rows = evidence.get('rows', []) if evidence else []
+    if (not context.get('batch_property_evidence_reused') or not isinstance(rows, list) or len(rows) < 2
+            or (match and match['pair'] and len(rows) != 2)):
+        return {'content': '无法核对要比较的分子性质记录，请提供要比较的 SMILES。',
                 'status': 'not_calculated'}
-    first, second = evidence['rows']
-    values = [row.get('logp') for row in (first, second)]
+    values = [row.get('logp') for row in rows]
     if any(type(value) not in (int, float) or not math.isfinite(value) for value in values):
         return {'content': '上一轮缺少可比较的 LogP 数据，请重新计算。', 'status': 'not_calculated'}
-    difference = abs(values[0] - values[1])
-    if difference < 0.001:
-        conclusion = '两者显示值相近，无法根据当前精度确定高低。'
+    listings = '；'.join(f"`{row['smiles']}`：{row['logp']:.3f}" for row in rows)
+    difference = max(values) - min(values)
+    if compare_all:
+        conclusion = f'最高与最低的 LogP 差值为 {difference:.3f}。'
     else:
         direction = match['direction']
-        select = max if direction == '高' else min
-        selected = select(evidence['rows'], key=lambda row: row['logp'])
-        conclusion = f"`{selected['smiles']}` 的 LogP 更{direction}，差值为 {difference:.3f}。"
-    return {'content': f"`{first['smiles']}`：{values[0]:.3f}；`{second['smiles']}`：{values[1]:.3f}。\n\n{conclusion}",
+        extreme = max(values) if direction == '高' else min(values)
+        contenders = [row['smiles'] for row in rows if abs(row['logp'] - extreme) < 0.001]
+        if len(contenders) > 1:
+            conclusion = '、'.join(contenders) + ' 的显示值相近，无法根据当前精度确定高低。'
+        elif len(rows) == 2:
+            conclusion = f"`{contenders[0]}` 的 LogP 更{direction}，差值为 {difference:.3f}。"
+        else:
+            conclusion = f"`{contenders[0]}` 的 LogP 最{direction}，最高与最低的差值为 {difference:.3f}。"
+    return {'content': f"{listings}。\n\n{conclusion}",
             'status': 'completed', 'reused_evidence': evidence}
 
 

@@ -66,7 +66,7 @@ const RtApi = (() => {
   /**
    * 获取相似分子列表
    */
-  async function fetchSimilarMolecules(smiles, targetName, threshold, limit = 50, signal, organismFilter = window.lastOrganismFilter) {
+  async function fetchSimilarMolecules(smiles, targetName, threshold, limit = 50, signal, organismFilter) {
     const params = new URLSearchParams({
       smiles,
       target_name: targetName,

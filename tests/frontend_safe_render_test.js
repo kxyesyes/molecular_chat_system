@@ -144,7 +144,7 @@ assert(
   "Target search external links must use DOM APIs and the trusted URL policy",
 );
 assert(
-  targetSearchHtml.includes('/static/js/target_search/main.js?v=20261116-ui-feedback-v1'),
+  targetSearchHtml.includes('/static/js/target_search/main.js?v=20261121-structure-selection'),
   "Target search must invalidate the cached script after safety changes",
 );
 assert(
@@ -235,6 +235,7 @@ assert(
 
 const homeFormatters = read("src/web/static/js/home/formatters.js");
 const homeMain = read("src/web/static/js/home/main.js");
+const homeWorkspace = read("src/web/static/js/home/workspace.js");
 const homeProtocol = read("src/web/static/js/home/protocol.js");
 const homeChatRenderer = read("src/web/static/js/home/chat_renderer.js");
 const homeMoleculeCandidates = read(
@@ -319,12 +320,13 @@ assert(
   "Homepage markdown links must not inject raw href attributes",
 );
 assert(
-  !homeMain.includes("<strong>${file.name}</strong>"),
-  "Homepage file manager must not inject raw file.name into innerHTML",
+  ["render", "row", "node"].every(name => !extractFunction(homeWorkspace, name).includes(".innerHTML")),
+  "Workspace document rows must not parse filenames as HTML",
 );
 assert(
-  homeMain.includes("fileName.textContent = file.name"),
-  "Homepage file manager must render file.name through textContent",
+  extractFunction(homeWorkspace, "node").includes("el.textContent = text") &&
+    extractFunction(homeWorkspace, "row").includes('node("strong", label)'),
+  "Workspace row labels must render as text nodes",
 );
 assert(
   !homeMain.includes("notification.innerHTML = `<span>${icons[type]}</span><span>${message}</span>`"),
@@ -691,8 +693,8 @@ assert(
 );
 [
   "Safe.escapeHtml(file.name",
-  "Safe.escapeInlineJsString(inputId",
-  "Safe.escapeInlineJsString(displayId",
+  "Safe.escapeInlineJsString(input.id)",
+  "Safe.escapeInlineJsString(display.id)",
   "Safe.escapeHtml(item.job_id",
   "Safe.escapeAttr(item.job_id",
   "Safe.escapeInlineJsString(item.job_id",

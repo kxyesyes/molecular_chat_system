@@ -40,22 +40,42 @@ def test_design_page_initializes_a_persistent_browser_owner(design_app):
 
 def test_saved_design_uses_real_session_cookie_and_isolates_clients(design_app, tmp_path):
     pytest.importorskip("rdkit")
-    owners = []
-    for _ in range(2):
-        with TestClient(design_app, base_url="http://localhost") as client:
+    with (
+        TestClient(design_app, base_url="http://localhost") as first,
+        TestClient(design_app, base_url="http://localhost") as second,
+    ):
+        files = []
+        for client, smiles in [(first, "CCO"), (second, "CO")]:
             # Direct API entry must also initialize a session.
-            properties = client.post("/api/design/properties", json={"smiles": "CCO"}).json()["properties"]
+            properties = client.post("/api/design/properties", json={"smiles": smiles}).json()["properties"]
             response = client.post("/api/design/save_molecule", json={
-                "smiles": "CCO", "properties": properties, "session_id": "forged",
+                "smiles": smiles, "properties": properties, "session_id": "forged",
             })
             assert response.status_code == 200
             token = client.cookies.get(COOKIE_NAME)
             owner = design_app.state.agent_session_store.resolve(token)
             assert owner and owner != "forged"
-            owners.append(owner)
             path = tmp_path / "saved" / hashlib.sha256(owner.encode()).hexdigest()
-            assert (path / "saved_molecules.csv").is_file()
-    assert owners[0] != owners[1]
+            files.append(path / "saved_molecules.csv")
+        assert files[0] != files[1]
+        before = [file.read_bytes() for file in files]
+        history = []
+        for step, fragment in enumerate(["[*]N", "[*]F", "[*]N"], 1):
+            product = first.post("/api/design/substitute", json={
+                "parent_smiles": "C[*]", "fragment_smiles": fragment,
+            }).json()["new_smiles"]
+            props = first.post("/api/design/properties", json={"smiles": product}).json()["properties"]
+            history.append({"step": step, "smi": product, "props": props})
+        assert [row["smi"] for row in history] == ["CN", "CF", "CN"]
+        assert first.post("/api/design/export_history", json={"history": history}).status_code == 200
+        assert [file.read_bytes() for file in files] == before
+        assert first.post("/api/design/save_molecule", json={
+            "smiles": history[-1]["smi"], "properties": history[-1]["props"],
+        }).status_code == 200
+        saved = files[0].read_bytes().splitlines()
+        assert saved[:-1] == before[0].splitlines()
+        assert saved[-1].split(b",")[1] == b"CN"
+        assert files[1].read_bytes() == before[1]
 
 
 def test_design_export_works_through_application_session_boundary(design_app):

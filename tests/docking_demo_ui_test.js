@@ -11,16 +11,14 @@ const uiSource = fs.readFileSync("src/web/static/js/docking/ui_manager.js", "utf
 
 assert.match(template, /载入示例[：:]\s*曼氏血吸虫 PDE4A apo（6FG5）\+ 罗氟司特/);
 assert.match(source, /已载入曼氏血吸虫 PDE4A apo（6FG5）和罗氟司特/);
-assert.match(template, /docking\/ui_manager\.js\?v=20261116-ui-feedback-v1/);
-assert.match(template, /docking\/main\.js\?v=20261112-demo-regions-v4/);
+assert.match(template, /docking\/ui_manager\.js\?v=20261121-batch-input/);
+assert.match(template, /docking\/main\.js\?v=20261121-batch-input/);
 assert.match(source, /async function loadDockingDemo\(\)/);
 assert.match(source, /\/api\/docking\/demo\/pde4a-apo/);
 assert.match(source, /PDE4A_apo_6FG5\.pdb/);
 assert.doesNotMatch(source, /loadDockingDemo[\s\S]{0,240}startDocking\(/);
 
 assert.match(uiSource, /function renderSelectedFiles\(input, display, files\)/);
-assert.match(uiSource, /function loadProteinFile\(file\)[\s\S]{0,500}return new Promise/);
-assert.match(source, /await loadProteinFile\(file\)/);
 assert.doesNotMatch(source, /proteinInput\.dispatchEvent\(new Event\("change"/);
 
 async function checkDemoInputs(ligandAvailable) {
@@ -45,7 +43,8 @@ async function checkDemoInputs(ligandAvailable) {
       assert.equal(url, "/api/docking/demo/roflumilast.pdbqt");
       return ligandAvailable ? new Response(ligandBytes) : new Response("{}", {status: 404});
     },
-    loadProteinFile: async () => {},
+    receptorSelection: 0,
+    loadProteinFile: async () => true,
     Utils: {showToast: (message, type) => messages.push(type)},
   };
   vm.runInNewContext(source, ctx);

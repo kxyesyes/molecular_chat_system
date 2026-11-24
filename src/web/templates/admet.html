@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="/static/css/admet.css?v=20261005-38874c3">
   <script defer src="/static/js/shared/status.js?v=20261008-status-v1"></script>
   <script defer src="/static/js/shared/smiles_file.js?v=20261111"></script>
-  <script defer src="/static/js/admet.js?v=20261116-ui-feedback-v1"></script>
+  <script defer src="/static/js/admet.js?v=20261121-current-input"></script>
 </head>
 <body class="admet-page">
   <a class="skip-link" href="#workspace">跳到评估工作区</a>
@@ -98,7 +98,7 @@
           </div>
           <div class="results-actions">
             <span id="status-badge" class="status-badge state-not-calculated">尚未运行</span>
-            <button type="button" id="rerun-admet" class="rerun-button">重新预测</button>
+            <button type="submit" form="admet-form" id="rerun-admet" class="rerun-button">重新预测</button>
           </div>
         </div>
         <p id="run-status" class="run-status" role="status" aria-live="polite" aria-atomic="true">等待输入分子结构。提交后将在此显示实际工具结果。</p>

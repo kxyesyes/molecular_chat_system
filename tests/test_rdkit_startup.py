@@ -118,6 +118,7 @@ def test_direct_uvicorn_respects_supervisor_thread_bootstrap_boundary(tmp_path):
 
 
 @pytest.mark.parametrize('via_environment', [False, True])
+@pytest.mark.filterwarnings('error::pytest.PytestUnhandledThreadExceptionWarning')
 def test_main_cli_preserves_multiworker_configuration_without_external_startup(tmp_path, via_environment):
     root = Path(__file__).resolve().parents[1]
     script = '''
@@ -143,5 +144,5 @@ def test_main_cli_preserves_multiworker_configuration_without_external_startup(t
             assert run.call_args.kwargs['reload'] is False
     '''.replace('ROOT', repr(str(root))).replace('VIA_ENV', repr(via_environment))
     result = subprocess.run([sys.executable, '-'], input=textwrap.dedent(script),
-                            cwd=tmp_path, capture_output=True, text=True, timeout=30)
+                            cwd=tmp_path, capture_output=True, encoding='utf-8', timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr

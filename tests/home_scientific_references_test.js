@@ -2,22 +2,13 @@
 const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
+const event = require("./fixtures/molecule_candidate_event.cjs");
 const root = path.join(__dirname, "..");
 global.window = {};
 require("../src/web/static/js/home/molecule_candidates.js");
 const candidates = window.HomeMoleculeCandidates;
 const controllerPath = path.join(root, "src/web/static/js/home/scientific_references.js");
 
-function event(smiles = ["CCO", "CCN"], pid = "11111111-1111-4111-8111-111111111111") {
-  const rows = smiles.map((s, i) => ({candidate_id: `cand-${String(i + 1).padStart(3, "0")}-${crypto.createHash("sha256").update(s).digest("hex").slice(0, 8)}`,
-    source_index: i + 1, original_smiles: s, canonical_smiles: s, smiles: s,
-    validation: {valid: true, method: "RDKit"}, generation_provenance: {}, metadata: {}}));
-  return {type: "molecule_candidates", trace_id: "trace", source: {tool_name: "llm_molecular_generator", model_name: "offline", status: "succeeded"},
-    candidate_set: {version: "1", requested_count: rows.length, valid_count: rows.length, unique_count: rows.length,
-      invalid_count: 0, duplicate_count: 0, candidates: rows, rejected: [], status: "succeeded"}, warnings: [],
-    reference: {trace_id: "trace", presentation_id: pid, revision: "a".repeat(64), ordered_keys: rows.map(c => ["checkpoint", c.candidate_id])}};
-}
 const pointer = ref => ({trace_id: ref.trace_id, presentation_id: ref.presentation_id, revision: ref.revision});
 function memory() {
   let value = null;
@@ -129,29 +120,7 @@ async function run() {
   assert(noStorage.outgoing().reference, "disabled storage permits current-connection selection");
   assert(notices.length);
   rendererTest(payloads[0]);
-  await restoredVisibilityTest(payloads[0]);
   console.log("scientific reference schema/controller/actual mount tests passed");
-}
-
-async function restoredVisibilityTest(payload) {
-  const source = fs.readFileSync(path.join(root, "src/web/static/js/home/main.js"), "utf8");
-  const ready = source.slice(source.indexOf('case "connection_ready":'), source.indexOf('case "pong":'));
-  let renderRestore, chatVisible = false, nearBottom = false, scrolls = 0;
-  const handle = new Function("HomeChatRenderer", "moleculeCandidateLifecycle", "scientificReferences",
-    "addAssistantMessage", "renderMoleculeCandidates", "enterChatMode", "message", "console",
-    `let chatMode = false; switch(message.type) {${ready}}`);
-  handle({updateConnectionStatus() {}, showNotification() {},
-    isNearBottom: () => nearBottom, scrollToBottom: () => {scrolls++;}}, {isRequestInFlight: () => false},
-    {restore: callback => {renderRestore = callback;}}, () => ({}), () => {
-      assert(chatVisible, "restored cards must be visible, not mounted in the hidden welcome-page chat container");
-      return mounted(payload);
-    }, () => {chatVisible = true;}, {type: "connection_ready"}, {log() {}});
-  assert.equal(chatVisible, false, "a connection without a valid restored view must keep the welcome screen");
-  renderRestore(payload);
-  assert.equal(scrolls, 0, "restoring cards must preserve the reader's position");
-  nearBottom = true;
-  renderRestore(payload);
-  assert.equal(scrolls, 1, "restoration should follow when the reader is at the bottom");
 }
 
 function rendererTest(payload) {

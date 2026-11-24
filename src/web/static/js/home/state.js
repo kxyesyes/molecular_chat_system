@@ -6,7 +6,6 @@ window.HomeState = {
   chatMode: false,
   ragEnabled: false,
   toolsEnabled: true,
-  currentMessages: [],
   reconnectAttempts: 0,
   elements: {
     input: null,

@@ -27,9 +27,10 @@ _SHOW_EN = re.compile(rf'(?:please\s+)?(?:show|list|display|provide)\s+'
 _PRIOR_VALUE = re.compile(
     r'(?:我)?(?:上一轮|上次|刚才)(?:的)?\s*(?:预测的?)?pIC50\s*(?:是)?(?:多少|什么)|'
     r'what\s+(?:was|is)\s+(?:my|the)\s+(?:previous|last)\s+(?:predicted\s+)?pIC50', re.I)
+_ORDINAL = r'(?:[0-9]+|[一二三四五六七八九十百]+)'
 _ORDINAL_CONSISTENCY = re.compile(
     rf'(?:请\s*)?(?:(?:解释|说明|查看)\s*)?{_PRIOR_ZH}第\s*'
-    r'(?P<position>[1-9]\d?|[一二三四五六七八九十]+)\s*个\s*(?:分子|候选(?:分子)?)的'
+    rf'(?P<position>{_ORDINAL})\s*个\s*(?:分子|候选(?:分子)?)的'
     r'分类(?:和|与)回归(?:预测|结果)?(?:是否一致|一致吗|为什么不一致)')
 _EXPLAIN = re.compile(
     r'(?:请\s*)?(?:并\s*)?解释(?:分类(?:与|和)回归不一致(?:意味着什么|的含义|的原因)?|'
@@ -65,7 +66,7 @@ def split_concept_prior_value(query):
     return concept_query, prior[0]
 
 
-def inspection_request(query):
+def inspection_request(query, *, batch=None):
     """None: other intent; dict: supported selection; False: denied inspection.
 
     A selector is a complete user-supplied structure, not a molecular name to
@@ -73,6 +74,10 @@ def inspection_request(query):
     """
     if not isinstance(query, str):
         return None
+    if batch:
+        follow = re.fullmatch(rf'\s*(?:那)?(?:第({_ORDINAL})个(?:分子)?|它)(?:呢)?[？?。]?\s*', query)
+        if follow and (position := follow[1] or batch.get('activity_consistency_position')):
+            query = f'第{position}个分子的分类与回归是否一致'
     clauses = [part.strip() for part in re.split(r'[，,；;。!?！？\n]|\.(?=\s|$)', query)
                if part.strip()]
     selectors, recognized, unknown, all_candidates = [], False, False, False
@@ -91,7 +96,7 @@ def inspection_request(query):
             number = ordinal['position']
             chinese = ('一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
                        '十一', '十二', '十三', '十四', '十五', '十六')
-            positions.append(int(number) if number.isascii() else
+            positions.append(int(number) if number.isascii() and len(number) <= 2 else
                              chinese.index(number) + 1 if number in chinese else 0)
             recognized = activity_inspection = True
         elif _EXPLAIN.fullmatch(clause) or _PRIOR_VALUE.fullmatch(clause):

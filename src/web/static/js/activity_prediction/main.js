@@ -1,6 +1,10 @@
 "use strict";
 
 window.ActivityMain = (function () {
+  let activeTab = "single";
+  let currentPrediction = null;
+  let trainingStatus = "Idle";
+
   function fillExample() {
     const input = document.getElementById("smilesInput");
     if (!input) return;
@@ -9,6 +13,12 @@ window.ActivityMain = (function () {
   }
 
   function switchTab(mode, tabEl) {
+    if (mode === activeTab) return;
+    activeTab = mode;
+    if (currentPrediction) currentPrediction.button.disabled = false;
+    currentPrediction = null;
+    document.getElementById("loading").classList.remove("show");
+    displayStatus(mode === "train" ? trainingStatus : "Idle");
     document.querySelectorAll(".tab").forEach(function (tab) {
       tab.classList.remove("active");
     });
@@ -23,9 +33,14 @@ window.ActivityMain = (function () {
     if (results) results.classList.remove("show");
   }
 
-  function setStatus(text) {
+  function displayStatus(text) {
     const el = document.getElementById("statusStat");
     if (el) el.textContent = text;
+  }
+
+  function setTrainingStatus(text) {
+    trainingStatus = text;
+    if (!currentPrediction) displayStatus(text);
   }
 
   function normalizeSplitStrategy(value) {
@@ -70,16 +85,17 @@ window.ActivityMain = (function () {
 
   async function handlePredict(url, formData, btnId) {
     const btn = document.getElementById(btnId);
+    const isSingleRequest = btnId === "submitBtn";
+    if (activeTab !== (isSingleRequest ? "single" : "batch") || btn.disabled) return;
+    const prediction = {button: btn};
+    currentPrediction = prediction;
     const loading = document.getElementById("loading");
     const results = document.getElementById("results");
-    const isSingleRequest =
-      url.includes("/api/activity/predict") && !url.includes("batch");
-
-    if (btn) btn.disabled = true;
+    btn.disabled = true;
     if (loading) loading.classList.add("show");
     if (results) results.classList.remove("show");
     ActivityResults.resetViews();
-    setStatus("Predicting");
+    displayStatus("Predicting");
 
     try {
       // Keep stale sessions safe: the API returns a structured failure when no
@@ -87,24 +103,26 @@ window.ActivityMain = (function () {
       if (formData.get("target") === "") formData.delete("target");
       const res = await fetch(url, { method: "POST", body: formData });
       const data = await res.json();
+      if (currentPrediction !== prediction) return;
 
       if (res.ok === false || !Array.isArray(data.results)) {
         throw new Error(data.detail || data.error || "预测失败");
       }
 
-      ActivityResults.renderPredictionResults(data, {
-        isSingleRequest: isSingleRequest,
-      });
+      ActivityResults.renderPredictionResults(data, {isSingleRequest});
       const status = data.results.length
         ? data.status || (data.success === true ? "passed" : "failed")
         : "failed";
-      setStatus(ActivityResults.statusLabel(status));
+      displayStatus(ActivityResults.statusLabel(status));
     } catch (e) {
+      if (currentPrediction !== prediction) return;
+      displayStatus("Error");
       alert("请求失败: " + e.message);
-      setStatus("Error");
     } finally {
-      if (btn) btn.disabled = false;
-      if (loading) loading.classList.remove("show");
+      if (currentPrediction === prediction) {
+        btn.disabled = false;
+        if (loading) loading.classList.remove("show");
+      }
     }
   }
 
@@ -158,9 +176,11 @@ window.ActivityMain = (function () {
           if (cfg.dropout) document.getElementById("dropout").value = cfg.dropout;
           if (cfg.target_column) {
             document.getElementById("targetColumn").value = cfg.target_column;
+            delete document.getElementById("targetColumn").dataset.suggested;
           }
           if (cfg.smiles_column) {
             document.getElementById("smilesColumn").value = cfg.smiles_column;
+            delete document.getElementById("smilesColumn").dataset.suggested;
           }
           if (cfg.classification_threshold !== undefined) {
             document.getElementById("classificationThreshold").value = cfg.classification_threshold;
@@ -181,31 +201,33 @@ window.ActivityMain = (function () {
     input.click();
   }
 
+  const trainingCallbacks = {
+    onFinish: function (state) {
+      if (state === "canceled") setTrainingStatus("训练已取消");
+      const trainBtn = document.getElementById("trainBtn");
+      if (trainBtn) {
+        trainBtn.disabled = false;
+        trainBtn.textContent = "🚀 重新训练";
+      }
+    },
+    onCompleted: async function () {
+      setTrainingStatus("Model Ready");
+      await ActivityModels.loadModels();
+    },
+    onFailed: function () {
+      setTrainingStatus("Failed");
+    },
+  };
+
   async function startTraining() {
-    const trainFile =
-      document.getElementById("trainFile").files &&
-      document.getElementById("trainFile").files[0];
-    const targetColumn = document.getElementById("targetColumn").value.trim();
-    const totalEpochs = Math.max(
-      1,
-      parseInt(document.getElementById("epochs").value || "50", 10),
-    );
-    const taskType = document.getElementById("trainTaskType").value;
-    const splitStrategy = normalizeSplitStrategy(
-      document.getElementById("splitStrategy").value,
-    );
-
-    if (!trainFile || !targetColumn) {
-      alert("请先上传训练数据并填写目标列名。");
-      return;
-    }
-
+    const formData = ActivityPreflight.takeLaunch();
     const trainBtn = document.getElementById("trainBtn");
-    if (trainBtn) {
-      trainBtn.disabled = true;
-      trainBtn.textContent = "⏳ 提交中...";
-    }
-    setStatus("Starting Train...");
+    if (!formData || trainBtn.disabled) return;
+    const totalEpochs = Number(formData.get("epochs"));
+    const taskType = formData.get("task_type");
+    trainBtn.disabled = true;
+    trainBtn.textContent = "⏳ 提交中...";
+    setTrainingStatus("Starting Train...");
 
     ActivityCharts.resetMetricsChartState(taskType);
 
@@ -222,34 +244,6 @@ window.ActivityMain = (function () {
     }
     ActivityTraining.updateDrawerStats(0, totalEpochs, null, null, "running");
     ActivityTraining.openDrawer();
-
-    const formData = new FormData();
-    formData.append("file", trainFile);
-    formData.append("target_column", targetColumn);
-    formData.append("smiles_column", document.getElementById("smilesColumn").value.trim());
-    formData.append("task_type", taskType);
-    const classificationThreshold = document.getElementById("classificationThreshold").value.trim();
-    const classificationDirection = document.getElementById("classificationDirection").value;
-    if (taskType === "classification" && classificationThreshold !== "") {
-      formData.append("classification_threshold", classificationThreshold);
-    }
-    if (taskType === "classification" && classificationDirection !== "") {
-      formData.append("classification_direction", classificationDirection);
-    }
-    formData.append("split_strategy", splitStrategy);
-    formData.append("epochs", totalEpochs);
-    formData.append("learning_rate", document.getElementById("learningRate").value);
-    formData.append("batch_size", document.getElementById("batchSize").value);
-    formData.append("dropout", document.getElementById("dropout").value);
-    formData.append("num_layers", document.getElementById("trainLayers").value);
-    formData.append("hidden_size", document.getElementById("trainHidden").value);
-    formData.append(
-      "weight_decay",
-      document.getElementById("trainWeightDecay").value,
-    );
-    formData.append("patience", document.getElementById("trainPatience").value);
-    formData.append("loss_metric", document.getElementById("trainLoss").value);
-    formData.append("lr_scheduler", document.getElementById("trainScheduler").value);
 
     try {
       const response = await fetch("/api/activity/train", {
@@ -270,31 +264,16 @@ window.ActivityMain = (function () {
 
       if (logBox) logBox.textContent += `[System] 任务已提交, Job ID: ${data.job_id}\n`;
       if (trainBtn) trainBtn.textContent = "⏳ 训练中...";
-      setStatus("Training");
+      setTrainingStatus("Training");
 
-      ActivityTraining.startPolling(data.job_id, totalEpochs, {
-        onFinish: function (state) {
-          if (state === "canceled") setStatus("训练已取消");
-          if (trainBtn) {
-            trainBtn.disabled = false;
-            trainBtn.textContent = "🚀 重新训练";
-          }
-        },
-        onCompleted: async function () {
-          setStatus("Model Ready");
-          await ActivityModels.loadModels();
-        },
-        onFailed: function () {
-          setStatus("Failed");
-        },
-      });
+      ActivityTraining.startPolling(data.job_id, totalEpochs, trainingCallbacks);
     } catch (e) {
       alert("训练错误: " + e.message);
       if (trainBtn) {
         trainBtn.disabled = false;
         trainBtn.textContent = "🚀 启动训练";
       }
-      setStatus("Error");
+      setTrainingStatus("Error");
       ActivityTraining.closeDrawer();
     }
   }
@@ -327,47 +306,27 @@ window.ActivityMain = (function () {
     ActivityModels.loadModels();
     ActivityCharts.initMetricsChart();
 
-    const predictForm = document.getElementById("predictForm");
-    predictForm &&
-      predictForm.addEventListener("submit", function (e) {
-        e.preventDefault();
-        handlePredict("/api/activity/predict", new FormData(e.target), "submitBtn");
+    for (const [formId, buttonId, endpoint] of [
+      ["predictForm", "submitBtn", "/api/activity/predict"],
+      ["batchForm", "batchSubmitBtn", "/api/activity/batch_predict"],
+    ]) {
+      document.getElementById(buttonId).addEventListener("click", event => {
+        if (event.detail > 1) event.preventDefault();
       });
-
-    const batchForm = document.getElementById("batchForm");
-    batchForm &&
-      batchForm.addEventListener("submit", function (e) {
-        e.preventDefault();
-        setBatchValidationMessage("");
-        const batchFile = document.getElementById("batchFile");
-        if (!batchFile || !batchFile.files || !batchFile.files[0]) {
-          setBatchValidationMessage("请先上传批量分子文件。");
-          return;
+      document.getElementById(formId).addEventListener("submit", event => {
+        event.preventDefault();
+        if (formId === "batchForm") {
+          setBatchValidationMessage("");
+          if (!batchFile.files[0]) {
+            setBatchValidationMessage("请先上传批量分子文件。");
+            return;
+          }
         }
-        handlePredict(
-          "/api/activity/batch_predict",
-          new FormData(e.target),
-          "batchSubmitBtn",
-        );
+        handlePredict(endpoint, new FormData(event.target), buttonId);
       });
+    }
 
-    ActivityTraining.initRecovery({
-      onFinish: function (state) {
-        if (state === "canceled") setStatus("训练已取消");
-        const trainBtn = document.getElementById("trainBtn");
-        if (trainBtn) {
-          trainBtn.disabled = false;
-          trainBtn.textContent = "🚀 重新训练";
-        }
-      },
-      onCompleted: async function () {
-        setStatus("Model Ready");
-        await ActivityModels.loadModels();
-      },
-      onFailed: function () {
-        setStatus("Failed");
-      },
-    });
+    ActivityTraining.initRecovery(trainingCallbacks);
 
     bridgeGlobals();
   }
@@ -376,7 +335,7 @@ window.ActivityMain = (function () {
     init: init,
     fillExample: fillExample,
     switchTab: switchTab,
-    setStatus: setStatus,
+    setStatus: setTrainingStatus,
     bindFileDisplay: bindFileDisplay,
     handlePredict: handlePredict,
     exportConfig: exportConfig,

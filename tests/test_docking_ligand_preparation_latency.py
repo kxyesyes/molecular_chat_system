@@ -17,7 +17,9 @@ def ligand_case(tmp_path):
     molecule = Chem.AddHs(Chem.MolFromSmiles("CCO"))
     assert AllChem.EmbedMolecule(molecule, randomSeed=123) == 0
     source = tmp_path / "input.sdf"
-    service = MolecularDockingService({"prepare_ligand_cmd": "mk_prepare_ligand.exe"})
+    preparer = tmp_path / "mk_prepare_ligand.exe"
+    preparer.touch()
+    service = MolecularDockingService({"prepare_ligand_cmd": str(preparer)})
     return service, Chem, molecule, source, tmp_path / "ligand.pdbqt"
 
 
@@ -28,10 +30,23 @@ def write_sdf(Chem, source, *molecules):
 
 
 @pytest.mark.parametrize("extension", [".sdf", ".mol"])
-def test_implicit_h_ligand_is_normalized_before_first_meeko_launch(ligand_case, monkeypatch, extension):
+@pytest.mark.parametrize("partial", [False, True], ids=["no-h-atoms", "some-h-atoms"])
+def test_implicit_h_ligand_is_normalized_before_first_meeko_launch(ligand_case, monkeypatch, extension, partial):
     service, Chem, molecule, source, output = ligand_case
     source = source.with_suffix(extension)
-    write_sdf(Chem, source, Chem.RemoveHs(molecule))
+    if partial:
+        ligand = Chem.RWMol(molecule)
+        hydrogen = next(atom for atom in ligand.GetAtomWithIdx(0).GetNeighbors() if atom.GetAtomicNum() == 1)
+        ligand.RemoveAtom(hydrogen.GetIdx())
+        # Older RDKit AddHs marks this carbon as ineligible for implicit H.
+        # Model an omitted hydrogen in the upload, not a carbon radical.
+        ligand.GetAtomWithIdx(0).SetNoImplicit(False)
+        Chem.SanitizeMol(ligand)
+        assert ligand.GetAtomWithIdx(0).GetNumImplicitHs() == 1
+    else:
+        ligand = Chem.RemoveHs(molecule)
+    write_sdf(Chem, source, ligand)
+    original = source.read_bytes()
     launches = []
     control = threading.Event()
 
@@ -41,6 +56,8 @@ def test_implicit_h_ligand_is_normalized_before_first_meeko_launch(ligand_case, 
         launches.append((Path(input_path).name, cancel_event, has_implicit_h))
         if has_implicit_h:
             return subprocess.CompletedProcess([], 1, stderr="implicit Hs", stdout="")
+        assert loaded.GetNumAtoms() == molecule.GetNumAtoms()
+        assert Chem.MolToSmiles(Chem.RemoveHs(loaded)) == "CCO"
         Path(output_path).write_text("synthetic prepared artifact", encoding="utf-8")
         return subprocess.CompletedProcess([], 0, stderr="", stdout="")
 
@@ -48,6 +65,7 @@ def test_implicit_h_ligand_is_normalized_before_first_meeko_launch(ligand_case, 
     trace = {}
     assert service.prepare_ligand_from_file(str(source), str(output), cancel_event=control, trace=trace)
     assert launches == [("ligand_explicit_h.sdf", control, False)]
+    assert source.read_bytes() == original
     assert trace["ligand_method"] == "rdkit_explicit_h_then_meeko"
     assert trace["ligand_geometry"]["converged"] is True
 

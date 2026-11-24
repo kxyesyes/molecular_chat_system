@@ -1531,9 +1531,20 @@ class WebDecisionRuntime:
             projection = WebTurnProjection(envelope.query, envelope.session_id,
                 turn.scientific_update or [], reverse_boundary=handler._ranked_reverse_evidence())
             turn.scientific_projection = projection
-            followup = None if turn.tool_free_consultation else await settle_owned_call(lambda: projection.followup(
-                enable_tools=envelope.enable_tools, enable_rag=envelope.enable_rag),
-                                               worker_owner=turn.worker_owner)
+
+            def resolve_selection(query):
+                if self.references is None:
+                    raise DecisionAdmissionError('scientific_reference_unavailable')
+                try:
+                    return self.references.resolve(query, envelope.reference, envelope.selection,
+                        session_id=envelope.session_id, enable_tools=envelope.enable_tools)
+                except ValueError:
+                    raise DecisionAdmissionError('scientific_reference_unavailable') from None
+
+            followup = None if turn.tool_free_consultation else await settle_owned_call(
+                lambda: projection.followup(enable_tools=envelope.enable_tools, enable_rag=envelope.enable_rag,
+                    resolve_selection=resolve_selection if envelope.selection is not None else None),
+                worker_owner=turn.worker_owner)
             if turn.cancel_event.is_set():
                 raise asyncio.CancelledError()
             if followup is not None:
@@ -2019,6 +2030,7 @@ class WebDecisionRuntime:
                                     and turn.scientific_projection.concept_history is None else None),
                                 'max_output_tokens': handler._model_max_tokens(model),
                                 'tool_free_consultation': turn.tool_free_consultation,
+                                'descriptor_repeat_of': projection.descriptor_repeat_of,
                                 'allow_molecular_clarification': _resumable_scientific_clarification(turn.scientific_plan),
                                 'input_max_chars': handler._input_limit(),
                                 'scientific_input_max_chars': scientific_character_limit(

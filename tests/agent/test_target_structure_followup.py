@@ -107,6 +107,46 @@ def test_target_function_followup_uses_session_evidence_or_reports_missing():
     assert structure_followup(query + '再预测 CCO 活性。', [{'target_function_evidence': evidence}], 'session-1') is None
 
 
+@pytest.mark.parametrize('function_first', [True, False])
+def test_target_summary_followups_keep_the_same_lookup_in_both_orders(function_first):
+    from src.agent.target_structure_followup import accepted_target_function_evidence
+    from src.web.web_business import WebTurnProjection
+
+    item = observation()
+    item['data'][0].update(uniprot_id='P27815', source='UniProt', source_record_id='P27815',
+                           source_url='https://www.uniprot.org/uniprotkb/P27815/entry',
+                           function='Test function.')
+    result = {'trace_id': 'lookup', 'tool_result_sequence': [item]}
+    record = {'target_structure_evidence': accepted_target_evidence(result, 's'),
+              'target_function_evidence': accepted_target_function_evidence(result, 's')}
+    function = ('这个靶点的生物学功能是什么？', 'Test function.')
+    resolution = ('刚才列出的结构中，哪个分辨率最高？', '2QYK')
+    sequence = [function, resolution] if function_first else [resolution, function]
+
+    for query, expected in sequence + sequence:
+        projection = WebTurnProjection(query, 's', [record])
+        answer = projection.followup(enable_tools=True)
+        assert answer['status'] == 'completed' and expected in answer['content']
+        record = projection.entry
+
+
+def test_missing_structure_on_new_target_keeps_only_its_own_function():
+    from src.web.web_business import WebTurnProjection
+
+    older = {'target_structure_evidence': accepted_target_evidence(
+        {'trace_id': 'old', 'tool_result_sequence': [observation()]}, 's')}
+    new = {'target_function_evidence': {'session_id': 's', 'uniprot_id': 'P00533',
+                                        'function': 'New annotation.'}}
+    query = '刚才列出的结构中，哪个分辨率最高？'
+    projection = WebTurnProjection(query, 's', [older, new])
+    assert projection.followup(enable_tools=True)['status'] == 'partial'
+    assert 'target_structure_evidence' not in projection.entry
+    assert projection.entry['target_function_evidence'] == new['target_function_evidence']
+    isolated = WebTurnProjection(query, 'other', [new])
+    assert isolated.followup(enable_tools=True)['status'] == 'partial'
+    assert 'target_function_evidence' not in isolated.entry
+
+
 def test_target_function_summary_omits_inline_identifiers_and_marks_excerpt():
     evidence = {'session_id': 'session-1', 'uniprot_id': 'P00533', 'gene_symbol': 'EGFR',
                 'function': 'First function (PubMed:123, PubMed:456). Additional information.',

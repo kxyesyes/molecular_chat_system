@@ -107,6 +107,7 @@ docking:
             'pytest_target: "tests/agent/test_decision_*.py"',
             'pytest_target: "tests/agent/test_pi_*.py"',
             'pytest_target: "tests/agent/test_web_*.py"',
+            'pytest_target: "tests/agent/test_web_repeat_corrections.py"',
             'pytest_target: "tests/agent/test_*docking*.py"',
             'pytest_exclude: "tests/agent/test_*docking*.py"',
             'pytest_target: "tests/agent/test_docking_publication*.py"',
@@ -126,7 +127,7 @@ docking:
         self.assertIn('python-version: "3.10"', source)
         self.assertEqual(source.count("--timeout=60"), 2)
         self.assertEqual(source.count('pytest_args: "--timeout=60"'), 2)
-        self.assertEqual(source.count("command_timeout:"), 16)
+        self.assertEqual(source.count("command_timeout:"), source.count("pytest_target:"))
         self.assertIn("command_timeout: 180", source)
         self.assertIn("git grep -IlE", source)
         self.assertNotIn("git grep -nE", source)

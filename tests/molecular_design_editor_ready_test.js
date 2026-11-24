@@ -66,19 +66,15 @@ test("double save dispatches once, shows progress, and releases the button after
   assert.match(h.toasts.at(-1).text, /服务不可用/);
 });
 
-test("file uploads import the SMILES field from a design export or titled SMI record", () => {
+test("file upload forwards the original selection and permits reselecting the same file", async () => {
   const { context } = setup(null);
   const imported = [];
-  context.FileReader = class {
-    readAsText(file) { this.result = file.content; this.onload(); }
-  };
-  context.MoleculeEditor.restoreCandidate = async smiles => { imported.push(smiles); };
-  for (const file of [
-    { name: "history.csv", content: "step,SMILES,mw\n1,CCO,46\n" },
-    { name: "ligand.smi", content: "CCN ethylamine\n" },
-    { name: "group.smi", content: "C[*:1] |$;_R1$| scaffold\n" },
-  ]) context.window.handleUpload({ target: { files: [file] } });
-  assert.deepEqual(imported, ["CCO", "CCN", "C[*:1] |$;_R1$|"]);
+  context.MoleculeEditor.loadStructure = async file => { imported.push(file); };
+  const file = {name: "ligand.smi"};
+  const target = {files: [file], value: file.name};
+  await context.window.handleUpload({target});
+  assert.equal(target.value, "");
+  assert.equal(imported[0], file);
 });
 
 test("polling never starts a conversion during an owned editor write", async () => {

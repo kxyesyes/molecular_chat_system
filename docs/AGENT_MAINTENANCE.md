@@ -18,6 +18,12 @@ Pi 入口核对日期：2026-10-23。当前分支的网页通用 Agent 唯一运
 
 ## 2. 意图到证据的定位顺序
 
+接手首页时，可以从以下用户操作追踪输入和结果的去向。
+
+- 同一条回复显示两批候选，点击“候选 32”后要求计算 logP，见[从卡片追到工具输入](#从卡片追到工具输入)。
+- 比较分子后追问“哪一个的 logP 更低？”时，从 [WebTurnProjection.followup](../src/web/web_business.py) 进入 [batch_property_followup](../src/web/property_comparison.py)，这里读取上轮已核验的分子、顺序和数值。运行 [test_short_lower_logp_followup_uses_the_displayed_pair](../tests/agent/test_web_scientific_execution.py) 可核对页面回答和工具调用次数。
+- 上传两个同名文档后，对其中一份提问时，从 [workspace_routes.py 的 ask](../src/web/routes/workspace_routes.py) 跟踪 `doc_id`。运行 [test_same_named_uploads_keep_their_source_in_project_and_history](../tests/test_home_workspace.py) 可核对送给模型的文档内容、项目详情及历史记录中的来源。
+
 ```text
 ChatHandler → WebDecisionRuntime → PiAgentRuntime → 官方 Pi（runtime/pi）
   ↔ Python ScientificSession：准入、工具授权、科学执行与证据校验
@@ -116,12 +122,34 @@ T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下�
 
 本节只说明核对基线，避免把未合并改动描述成当前行为；不复制各批历史测试数量。每批合并后应删去相应“待发布”表述并更新源码定位。
 
+### 从卡片追到工具输入
+
+假设同一条回复显示两批各 16 张卡片。用户看到的“候选 32”是第二批第 16 张。追问“计算所选分子的 logP”时，页面发送该批的展示指针和卡片的复合标识。服务端据此从已确认的记录取出规范 SMILES。
+
+| 从用户看到的现象出发 | 先查这里 | 核对什么 |
+|---|---|---|
+| 少了一批，或卡片出现在另一条回复 | [main.js](../src/web/static/js/home/main.js) 的 `handleDecisionMessage`、`completeLastMessage`，以及 [molecule_candidates.js](../src/web/static/js/home/molecule_candidates.js) 的 `enqueue` | Pi 模式按当前轮的 trace 接收候选，在结果交付完成时挂载。队列去重并限制同次请求总数，超出容量的整批会被拒绝。 |
+| 第二批重新从 1 编号 | [main.js](../src/web/static/js/home/main.js) 的 `renderMoleculeCandidates` | 标签使用当前消息已有卡片数加批内序号。引用的 `ordered_keys` 按本批索引读取；两种序号的起点不同。 |
+| 卡片可见，却选不中或选错 | [scientific_references.js](../src/web/static/js/home/scientific_references.js) 的 `present`、`select`、`outgoing`，以及 [确认路由](../src/web/routes/scientific_reference_routes.py) | 实际挂载顺序与清单一致后才发出 confirm。多批同时展示时由用户选定集合；选择记录同时包含 observation_id 和 candidate_id。普通 Pi 追问由 `sendDecisionMessage` 读取这份选择。 |
+| 追问发出后，工具收到的结构不对 | [web_request.py](../src/web/web_request.py) 的 `prepare_web_request` → [scientific_references.py](../src/web/scientific_references.py) 的 `resolve` | 对照请求的 trace_id、presentation_id、revision 和复合标识，在当前会话的已确认集合中定位结构。请求明确给出新结构时，它走常规输入校验。检查工具实际收到的 SMILES。 |
+
+顺序和确认是科学结果的保护条件。用户可能同时看到多个批次，也可能在确认返回前断线。刷新时标签页用指针重新获取已确认集合，服务端复核归属、来源版本和有效期。最初引入这些约束的原因及失败场景见[科研引用设计](superpowers/specs/2026-09-24-scientific-reference-continuity-design.md)。
+
+在仓库根目录使用 MedChat 环境、Node 和已安装的 [Pi 依赖](PI_RUNTIME.md)，运行下面的回归。它在临时 SQLite 库构造两个来源，将服务端投影的事件送入首页脚本的 DOM 测试环境，点击最后一张卡片，把页面发出的确认和追问交回服务端，并核对性质工具只收到第二批最后一个结构。追问后还会重新读取原展示记录。
+
+```powershell
+python -m pytest -q tests/agent/test_scientific_reference_execution.py::test_home_card_32_followup_reaches_property_tool
+```
+
+想熟悉这条路径，可以在临时工作树中只把 `renderMoleculeCandidates` 的卡片标签改成批内序号，再运行上面的测试。第二批末张卡片会显示“候选 16”，回归会在检查“候选 32”时失败。恢复消息内偏移后运行同一命令，还应看到工具入参和历史恢复的断言通过。修改确认或恢复规则时，加跑 `python -m pytest -q tests/agent/test_scientific_reference_web.py`，覆盖错误顺序、其他会话和数据库重新打开后的恢复。
+
 ### 科研对象续接（已合并，非生产部署声明）
 
 - 权威对象：[scientific_references.py](../src/agent/contracts/scientific_references.py)；专用原子存储：[persistence/scientific_references.py](../src/agent/persistence/scientific_references.py)。确认的展示顺序、来源观察、修订和归属共同定位候选，固定24小时，不随恢复/重放续期。
 - Web投影及解析：[web/scientific_references.py](../src/web/scientific_references.py)；确认/恢复路由：[scientific_reference_routes.py](../src/web/routes/scientific_reference_routes.py)。来源版本变化、失效、跨会话、协议损坏失败关闭，不从客户端SMILES或聊天历史重建事实。
 - 首页：[scientific_references.js](../src/web/static/js/home/scientific_references.js) 只在标签页保存不透明指针；实际挂载与严格顺序ACK之后才可引用。刷新恢复有效数据时需先进入可见聊天模式，多集合需明确选择，清除选择不删除科研历史。
-- 实际输入：[resolved_molecule.py](../src/agent/contracts/resolved_molecule.py) → Supervisor/AgentContext/Planner → Session。新SMILES优先，改靶点只继承结构、不继承旧分数；工具分发和checkpoint复用前再次复核来源，不跨长工具持有SQLite锁。
+- 网页追问由 [prepare_web_request](../src/web/web_request.py) 把已解析的分子放入 `AgentContext.resolved_molecule`。[Web 工具参数绑定](../src/agent/scientific_session/web_bindings.py) 重新核对会话内的来源后取出 `canonical_smiles`。从页面确认到工具执行之间，来源可能已经失效。[WebSocket 回归](../tests/agent/test_web_decision_runtime_references.py) 中的 `test_actual_route_reference_sources_cannot_authorize_wrong_calculation` 覆盖确认后撤销来源、换会话和错误修订，断言服务端拒绝追问且没有工具执行记录。
+- 直接调用 [SupervisorAgent.execute](../src/agent/supervisor.py) 的确定性工作流也接受同一[分子引用契约](../src/agent/contracts/resolved_molecule.py)。修改网页追问时从上一条的 Web 路径入手。新 SMILES 优先；改靶点时只继承结构，旧靶点的分数仍归原记录。
 - 验收入口：`tests/agent/test_scientific_reference_*.py`、`tests/home_scientific_references_test.js`；显式离线浏览器夹具 `python -B -m tests.scientific_reference_browser_lab --state-dir <本任务临时目录> --port 6017`。夹具不是生产启动方式，不读取用户模型配置；生成是合成候选，性质调用真实RDKit。
 
 取消等待方会先排空已开始的科学worker，再释放请求租约；这不是强制停止外部计算进程的保证。浏览器服务进程重启验证针对空闲时中断与持久化恢复，不等于运行中任意点硬崩溃后恰好执行一次。完整证据和保留限制见[第三增量交接](handoff/scientific-reference-acceptance.md)。
@@ -155,9 +183,9 @@ git diff --check
 [run_agent_acceptance.py](../scripts/run_agent_acceptance.py) 的模式边界：
 
 - `contract`：路由、计划、工具契约等离线检查；不证明真实模型与科研工具闭环可用。
-- `replay --replay-input <report.json>`：读取结构化报告，离线重新检查；缺报告应失败，不能重跑真实工具伪装回放。
+- `--mode replay --replay-input report.json` 离线复查原始报告，结果写入同目录的 `report-replay.json`。可用 `--output` 指定单独的结果文件。只传 `--output report.json` 的旧命令仍从该文件读取。缺少源报告时回放失败。
 - `real`：真实工具案例与依赖检查；`all` 包含真实模式。本轮维护不启用这两者；缺模型、样例或依赖必须如实记录 partial/failed/skipped。
-- 脚本退出码 0 允许报告状态为 `partial`；必须读结构化 status/truth checks，而不是把 exit 0 等同于全部科研通过。
+- 科学用例集判定为 `failed` 时，`real` 和 `all` 模式返回退出码 1。退出码 0 包含 `partial`，具体通过范围见报告中的状态和逐项校验结果。
 
 独立性能用例 `MEDCHAT_RUN_TASK_STORE_OFFLOAD_PERF=1` 保留原 50ms 调度断言，仅在适当的受控 runner 使用；默认功能测试验证线程 offload、同步进展和真实 SQLite。此拆分不是原 CI 慢点已经定位或性能已修复的证据。
 

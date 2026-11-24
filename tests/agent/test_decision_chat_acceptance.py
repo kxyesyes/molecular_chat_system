@@ -533,5 +533,7 @@ def test_cloud_does_not_automatically_allow_configured_host(tmp_path, monkeypatc
     report = json.loads(target.read_text(encoding='utf-8'))
     assert report['status'] == 'failed'
     assert report['cases'] == []  # Real client policy rejects before any model call.
+    assert report['reason'] == 'decision_endpoint_rejected'
+    assert 'example.invalid' not in json.dumps(report)
     assert 'MEDCHAT_LLM_ALLOWED_HOSTS' not in os.environ
     assert 'private-cloud-model' not in json.dumps(report)

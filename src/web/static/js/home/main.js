@@ -11,10 +11,8 @@
   // 全局变量
   let ws = null;
   let isConnected = false;
-  let chatMode = false;
   let ragEnabled = false; // 默认禁用RAG
   let toolsEnabled = true;
-  let currentMessages = [];
   let reconnectAttempts = 0;
   let maxReconnectAttempts = 5;
   let agentModelStatusRequestVersion = 0;
@@ -346,7 +344,7 @@
     scientificReferences?.startRequest();
     moleculeCandidateLifecycle.startRequest();
     evidenceReportLifecycle?.startRequest();
-    if (!chatMode) enterChatMode();
+    enterChatMode();
     addUserMessage(repeat && repeat.runs.length ? `第 ${repeat.runs.length + 1} 次综合评价` : message);
     decisionTurn.userMessage = elements.chatContainer.lastChild;
     if (!repeat || !repeat.runs.length) elements.input.value = "";
@@ -897,7 +895,7 @@
           HomeChatRenderer.updateConnectionStatus("connected");
           if (!moleculeCandidateLifecycle.isRequestInFlight()) {
             void scientificReferences?.restore(payload => {
-              if (!chatMode) enterChatMode();
+              enterChatMode();
               const follow = HomeChatRenderer.isNearBottom();
               const box = addAssistantMessage("已恢复此前确认的候选集合；这不是新的计算结果。");
               const rendered = renderMoleculeCandidates(box, payload);
@@ -1541,231 +1539,6 @@
   }
 
 
-  function closeToolPanels() {
-    if (elements.toolPanelsOverlay) {
-      elements.toolPanelsOverlay.hidden = true;
-    }
-
-    if (elements.fileManagerPanel) {
-      elements.fileManagerPanel.hidden = true;
-      elements.fileManagerPanel.classList.remove("is-open");
-    }
-
-    if (elements.helpPanel) {
-      elements.helpPanel.hidden = true;
-      elements.helpPanel.classList.remove("is-open");
-    }
-
-    if (elements.fileManagerBtn) {
-      elements.fileManagerBtn.setAttribute("aria-expanded", "false");
-    }
-
-    if (elements.helpBtn) {
-      elements.helpBtn.setAttribute("aria-expanded", "false");
-    }
-  }
-
-  function resetToHomeState() {
-    window.HomeWorkspace?.clear();
-    const rightPanel = document.querySelector(".index_con .right");
-    const mass = document.querySelector(".mass");
-    const iconList = document.querySelector(".icon_list");
-
-    currentMessages = [];
-    HomeState.currentMessages = [];
-    chatMode = false;
-    HomeState.chatMode = false;
-
-    if (elements.input) {
-      elements.input.value = "";
-    }
-
-    if (elements.chatContainer) {
-      elements.chatContainer.innerHTML = "";
-      elements.chatContainer.style.display = "none";
-    }
-
-    if (mass) {
-      mass.style.display = "";
-    }
-
-    if (iconList) {
-      iconList.style.display = "";
-    }
-
-    if (rightPanel) {
-      rightPanel.classList.remove("chat-mode");
-    }
-
-    document.body.classList.remove("chat-active");
-
-    closeToolPanels();
-  }
-
-  function clearCurrentConversation() {
-    const hasMessages =
-      HomeState.currentMessages.length > 0 ||
-      (elements.chatContainer && elements.chatContainer.children.length > 0);
-
-    if (!hasMessages) {
-      return;
-    }
-
-    if (!window.confirm("确认清空当前会话？")) {
-      return;
-    }
-
-    currentMessages = [];
-    HomeState.currentMessages = [];
-
-    if (elements.chatContainer) {
-      elements.chatContainer.innerHTML = "";
-    }
-
-  }
-
-  function openFileManagerPanel() {
-    if (elements.helpPanel) {
-      elements.helpPanel.hidden = true;
-      elements.helpBtn.setAttribute("aria-expanded", "false");
-    }
-
-    if (elements.toolPanelsOverlay) {
-      elements.toolPanelsOverlay.hidden = false;
-    }
-
-    if (elements.fileManagerPanel) {
-      elements.fileManagerPanel.hidden = false;
-      elements.fileManagerPanel.classList.add("is-open");
-    }
-
-    if (elements.fileManagerBtn) {
-      elements.fileManagerBtn.setAttribute("aria-expanded", "true");
-    }
-
-    renderManagedFiles();
-  }
-
-  function toggleHelpPanel() {
-    const nextOpen = elements.helpPanel && elements.helpPanel.hidden;
-
-    closeToolPanels();
-
-    if (!nextOpen) {
-      return;
-    }
-
-    if (elements.toolPanelsOverlay) {
-      elements.toolPanelsOverlay.hidden = false;
-    }
-
-    if (elements.helpPanel) {
-      elements.helpPanel.hidden = false;
-      elements.helpPanel.classList.add("is-open");
-    }
-
-    if (elements.helpBtn) {
-      elements.helpBtn.setAttribute("aria-expanded", "true");
-    }
-  }
-
-  function handleManagedFilesSelected(event) {
-    const incomingFiles = Array.from(event.target.files || []).map(function (
-      file
-    ) {
-      return {
-        id: [file.name, file.size, file.lastModified].join("-"),
-        name: file.name,
-        size: file.size,
-        lastModified: file.lastModified,
-      };
-    });
-
-    if (!incomingFiles.length) {
-      return;
-    }
-
-    const existingIds = new Set(
-      HomeState.managedFiles.map(function (file) {
-        return file.id;
-      })
-    );
-
-    incomingFiles.forEach(function (file) {
-      if (!existingIds.has(file.id)) {
-        HomeState.managedFiles.push(file);
-      }
-    });
-
-    persistManagedFiles();
-    renderManagedFiles();
-    event.target.value = "";
-  }
-
-  function clearManagedFiles() {
-    HomeState.managedFiles = [];
-    persistManagedFiles();
-    renderManagedFiles();
-  }
-
-  function persistManagedFiles() {
-    localStorage.setItem(
-      HomeConfig.storageKeys.managedFiles,
-      JSON.stringify(HomeState.managedFiles)
-    );
-  }
-
-  function renderManagedFiles() {
-    if (!elements.managedFileList) {
-      return;
-    }
-
-    elements.managedFileList.replaceChildren();
-
-    if (!HomeState.managedFiles.length) {
-      const emptyItem = document.createElement("li");
-      emptyItem.className = "file-manager-list__empty";
-      emptyItem.textContent = "暂无文件，请先添加文档。";
-      elements.managedFileList.appendChild(emptyItem);
-      return;
-    }
-
-    HomeState.managedFiles.forEach(function (file) {
-      const item = document.createElement("li");
-      item.className = "file-manager-list__item";
-
-      const meta = document.createElement("div");
-      meta.className = "file-manager-list__meta";
-
-      const fileName = document.createElement("strong");
-      fileName.textContent = file.name;
-
-      const fileSize = document.createElement("span");
-      const sizeKb = Math.max(1, Math.round((Number(file.size) || 0) / 1024));
-      fileSize.textContent = `${sizeKb} KB`;
-
-      meta.append(fileName, fileSize);
-
-      const removeButton = document.createElement("button");
-      removeButton.className = "file-manager-list__remove";
-      removeButton.type = "button";
-      removeButton.dataset.fileId = file.id;
-      removeButton.setAttribute("aria-label", `移除 ${file.name}`);
-      removeButton.textContent = "移除";
-      removeButton.addEventListener("click", function () {
-        const fileId = String(file.id);
-        HomeState.managedFiles = HomeState.managedFiles.filter(function (item) {
-          return item.id !== fileId;
-        });
-        persistManagedFiles();
-        renderManagedFiles();
-      });
-
-      item.append(meta, removeButton);
-      elements.managedFileList.appendChild(item);
-    });
-  }
-
   async function handleModelChange(e) {
     const selectedModel = e.target.value;
     console.log(`🔄 切换模型: ${selectedModel}`);
@@ -1804,12 +1577,7 @@
           "success"
         );
 
-        // 如果在聊天模式，也添加系统消息
-        if (chatMode) {
-          HomeChatRenderer.addSystemMessage(
-            `已切换到 ${getModelDisplayName(selectedModel)}`
-          );
-        }
+        HomeChatRenderer.addSystemMessage(`已切换到 ${getModelDisplayName(selectedModel)}`);
       } else {
         console.error("❌ 模型切换失败:", result.message);
 
@@ -1821,13 +1589,7 @@
           "error"
         );
 
-        // 如果在聊天模式，也添加系统消息
-        if (chatMode) {
-          HomeChatRenderer.addSystemMessage(
-            `模型切换失败: ${result.message}`,
-            true
-          );
-        }
+        HomeChatRenderer.addSystemMessage(`模型切换失败: ${result.message}`, true);
       }
     } catch (error) {
       console.error("❌ 模型切换请求失败:", error);
@@ -1838,10 +1600,7 @@
       // 显示错误Toast
       HomeChatRenderer.showToast("模型切换失败，请检查网络连接", "error");
 
-      // 如果在聊天模式，也添加系统消息
-      if (chatMode) {
-        HomeChatRenderer.addSystemMessage("模型切换失败，请检查网络连接", true);
-      }
+      HomeChatRenderer.addSystemMessage("模型切换失败，请检查网络连接", true);
     }
   }
 
@@ -1946,7 +1705,7 @@
     }
     documentQuestionPending = true;
     updateDecisionControls();
-    if (!chatMode) enterChatMode();
+    enterChatMode();
     addUserMessage((doc.label || doc.name) + " · " + question);
     elements.input.value = "";
     showTypingIndicator();
@@ -2016,9 +1775,7 @@
 
     try {
       // 切换到聊天模式
-      if (!chatMode) {
-        enterChatMode();
-      }
+      enterChatMode();
 
       // 添加用户消息到界面
       addUserMessage(message);
@@ -2081,7 +1838,7 @@
     console.log("WebSocket URL:", `${diagnosticProtocol}//${window.location.host}/ws`);
     console.log("重连尝试次数:", reconnectAttempts);
     console.log("isConnected标志:", isConnected);
-    console.log("chatMode:", chatMode);
+    console.log("chatMode:", HomeState.chatMode);
 
     if (ws) {
       console.log("WebSocket对象存在");
@@ -2126,7 +1883,7 @@
 
   // 进入聊天模式
   function enterChatMode() {
-    chatMode = true;
+    if (HomeState.chatMode) return;
     HomeState.chatMode = true;
     console.log("🎯 进入聊天模式");
 
@@ -2219,9 +1976,6 @@
     messageWrapper.appendChild(messageContainer);
     elements.chatContainer.appendChild(messageWrapper);
 
-    // 保存到历史
-    currentMessages.push({ role: "user", content: content });
-    HomeState.currentMessages = currentMessages.slice();
     if (typeof dockingUI !== "undefined") dockingUI?.begin(ws, messageWrapper);
   }
 
@@ -2300,9 +2054,6 @@
     messageWrapper.appendChild(messageContainer);
     elements.chatContainer.appendChild(messageWrapper);
 
-    // 保存到历史
-    currentMessages.push({ role: "assistant", content: content });
-    HomeState.currentMessages = currentMessages.slice();
     return messageBox;
   }
 
@@ -2493,13 +2244,10 @@
         cursor.remove();
       }
 
-      // 保存完整内容到历史
       const finalContent = completion.hasFinalContent
         ? content
         : lastMessage.getAttribute("data-content") || lastMessage.textContent;
       lastMessage.setAttribute("data-content", finalContent);
-      currentMessages.push({ role: "assistant", content: finalContent });
-      HomeState.currentMessages = currentMessages.slice();
 
       displayCandidateCollections(lastMessage, candidatePayloads);
     } finally {
@@ -2878,19 +2626,10 @@
     header.appendChild(headerText);
     ragInfoContainer.appendChild(header);
 
-    // 分子卡片容器 - 使用与反向寻靶一致的网格布局（方案A+C）
-    const moleculeCount = molecules.length;
-
     // 横向滑动布局参数（统一固定比例，避免随数量突变）
     const minCardWidth = "260px";
     const imageHeight = "180px";
     const gap = "20px";
-    const itemsPerPage = moleculeCount; // 既然是横滑，无需分页，全部渲染
-
-    // 分页逻辑（横排不再需要底部分页组件，但在原逻辑中保留变量防错）
-    let currentPage = 0;
-    const totalPages = 1;
-    const needsPagination = false;
 
     const moleculesContainer = document.createElement("div");
     moleculesContainer.className = "rag-molecules-carousel custom-scrollbar";
@@ -2908,407 +2647,249 @@
       mask-image: linear-gradient(to right, black 90%, transparent 100%);
     `;
 
-    // 渲染分子函数
-    function renderRAGMolecules(page) {
-      moleculesContainer.innerHTML = "";
+    molecules.forEach((mol, index) => {
+      const smiles = mol.smiles || mol.SMILES || "";
+      const similarity = mol.similarity == null ? "未提供" :
+        Number.isFinite(mol.similarity) ? String(mol.similarity) : "无效";
+      const properties = mol.properties || {};
 
-      const startIdx = page * itemsPerPage;
-      const endIdx = Math.min(startIdx + itemsPerPage, moleculeCount);
-      const pageMolecules = molecules.slice(startIdx, endIdx);
+      // 创建与反向寻靶一致的卡片样式
+      const molCard = document.createElement("div");
+      molCard.className = "molecule-card";
+      molCard.style.cssText = `
+      flex: 0 0 ${minCardWidth};
+      width: ${minCardWidth};
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 0;
+      overflow: hidden;
+      transition: all 0.2s;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    `;
 
-      pageMolecules.forEach((mol, pageIndex) => {
-        const globalIndex = startIdx + pageIndex;
-        const smiles = mol.smiles || mol.SMILES || "";
-        const similarity = mol.similarity == null ? "未提供" :
-          Number.isFinite(mol.similarity) ? String(mol.similarity) : "无效";
-        const properties = mol.properties || {};
+      // 鼠标悬停效果
+      molCard.addEventListener("mouseenter", () => {
+        molCard.style.transform = "translateY(-3px)";
+        molCard.style.boxShadow = "0 8px 25px rgba(79, 70, 229, 0.15)";
+        molCard.style.borderColor = "#4f46e5";
+      });
 
-        // 创建与反向寻靶一致的卡片样式
-        const molCard = document.createElement("div");
-        molCard.className = "molecule-card";
-        molCard.style.cssText = `
-        flex: 0 0 ${minCardWidth};
-        width: ${minCardWidth};
-        background: #fff;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 0;
-        overflow: hidden;
-        transition: all 0.2s;
-        display: flex;
-        flex-direction: column;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-      `;
+      molCard.addEventListener("mouseleave", () => {
+        molCard.style.transform = "translateY(0)";
+        molCard.style.boxShadow = "0 1px 2px rgba(0,0,0,0.05)";
+        molCard.style.borderColor = "#e2e8f0";
+      });
 
-        // 鼠标悬停效果
-        molCard.addEventListener("mouseenter", () => {
-          molCard.style.transform = "translateY(-3px)";
-          molCard.style.boxShadow = "0 8px 25px rgba(79, 70, 229, 0.15)";
-          molCard.style.borderColor = "#4f46e5";
-        });
-
-        molCard.addEventListener("mouseleave", () => {
-          molCard.style.transform = "translateY(0)";
-          molCard.style.boxShadow = "0 1px 2px rgba(0,0,0,0.05)";
-          molCard.style.borderColor = "#e2e8f0";
-        });
-
-        // 卡片头部 - 序号和相似度
-        const cardHeader = document.createElement("div");
-        cardHeader.style.cssText = `
-          padding: 12px 16px;
-          border-bottom: 1px solid #f1f5f9;
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          background: #f8fafc;
-        `;
-        cardHeader.innerHTML = `
-          <div style="font-weight: 700; color: #4f46e5; font-size: 16px;">#${
-            globalIndex + 1
-          }</div>
-          <div style="color: #475569; font-size: 12px;">检索得分：${similarity}</div>
-        `;
-
-        // 分子图片区域 - 使用后端API生成图片（动态高度）
-        const imageSection = document.createElement("div");
-        imageSection.style.cssText = `
-          height: ${imageHeight};
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          background: #fff;
-          padding: 10px;
-          border-bottom: 1px solid #f1f5f9;
-        `;
-
-        const molImage = document.createElement("img");
-        molImage.src = `/api/utils/smiles_to_image?smiles=${encodeURIComponent(
-          smiles
-        )}&width=360&height=300`;
-        molImage.alt = "分子结构";
-        molImage.style.cssText = `max-width: 100%; max-height: 100%; object-fit: contain;`;
-        molImage.loading = "lazy";
-        molImage.onerror = function () {
-          this.style.display = "none";
-          imageSection.innerHTML = `
-            <div style="color: #94a3b8; font-size: 12px; text-align: center;">
-              <div style="font-size: 24px; margin-bottom: 8px;">⚠️</div>
-              <div>无法加载分子结构</div>
-            </div>
-          `;
-        };
-        imageSection.appendChild(molImage);
-
-        // 信息区域
-        const infoSection = document.createElement("div");
-        infoSection.style.cssText = `padding: 16px; flex: 1; display: flex; flex-direction: column; gap: 10px;`;
-
-        // 显示分子属性 - 优化为紧凑的网格布局
-        const propertyLabels = {
-          qed: "QED",
-          logp: "LogP",
-          molwt: "分子量",
-          hbd: "HBD",
-          hba: "HBA",
-          tpsa: "TPSA",
-          sas: "SAS",
-          numrotbonds: "可旋转键",
-        };
-
-        const allProperties = ["qed", "logp", "molwt", "hbd", "hba", "tpsa"];
-        
-        const propertiesGrid = document.createElement("div");
-        propertiesGrid.style.cssText = `
-          display: grid;
-          grid-template-columns: repeat(2, 1fr);
-          gap: 6px 10px;
-        `;
-
-        allProperties.forEach((prop) => {
-          const possibleKeys = [
-            prop,
-            prop.toLowerCase(),
-            prop.toUpperCase(),
-            prop.replace("numrotbonds", "NumRotBonds"),
-          ];
-          let foundValue = null;
-
-          for (const key of possibleKeys) {
-            if (properties[key] !== undefined && properties[key] !== null) {
-              foundValue = properties[key];
-              break;
-            }
-          }
-
-          if (foundValue !== null) {
-            const text = typeof foundValue === "string" ? foundValue.trim() : String(foundValue);
-            const numeric = (typeof foundValue === "number" || typeof foundValue === "string") &&
-              /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text) && Number.isFinite(Number(text));
-            const propValue = numeric ? Number(text) : null;
-            
-            // 根据属性类型设置颜色
-            let valueColor = "#334155";
-            let bgColor = "#f8fafc";
-            if (numeric && prop === "qed") {
-              valueColor = propValue >= 0.7 ? "#059669" : propValue >= 0.5 ? "#d97706" : "#dc2626";
-              bgColor = propValue >= 0.7 ? "#ecfdf5" : propValue >= 0.5 ? "#fffbeb" : "#fef2f2";
-            } else if (numeric && prop === "logp") {
-              valueColor = propValue >= -0.4 && propValue <= 5.6 ? "#059669" : "#dc2626";
-              bgColor = propValue >= -0.4 && propValue <= 5.6 ? "#ecfdf5" : "#fef2f2";
-            } else if (numeric && prop === "molwt") {
-              valueColor = propValue <= 500 ? "#059669" : propValue <= 600 ? "#d97706" : "#dc2626";
-              bgColor = propValue <= 500 ? "#ecfdf5" : propValue <= 600 ? "#fffbeb" : "#fef2f2";
-            }
-
-            const propItem = document.createElement("div");
-            propItem.style.cssText = `
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              background: ${bgColor};
-              padding: 6px 10px;
-              border-radius: 6px;
-              border: 1px solid rgba(0,0,0,0.03);
-            `;
-
-            propItem.innerHTML = `
-              <span style="color: #64748b; font-size: 11px; font-weight: 500;">${escapeHtml(propertyLabels[prop] || prop)}</span>
-              <span style="color: ${valueColor}; font-weight: 700; font-size: 12px; font-family: 'Inter', ui-sans-serif, system-ui;">${
-                numeric ? text : "无效"
-              }</span>
-            `;
-            propertiesGrid.appendChild(propItem);
-          }
-        });
-        
-        if (propertiesGrid.children.length > 0) {
-            infoSection.appendChild(propertiesGrid);
-        }
-
-        // SMILES 折叠区域
-        const smilesDetails = document.createElement("details");
-        smilesDetails.style.cssText = `margin-top: 4px;`;
-        const smilesSummary = document.createElement("summary");
-        smilesSummary.style.cssText = "cursor: pointer; color: #64748b; font-size: 12px; user-select: none;";
-        smilesSummary.textContent = "显示 SMILES";
-        const smilesValue = document.createElement("div");
-        smilesValue.style.cssText = "margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;";
-        smilesValue.textContent = smiles;
-        smilesDetails.appendChild(smilesSummary);
-        smilesDetails.appendChild(smilesValue);
-        infoSection.appendChild(smilesDetails);
-
-        // 操作按钮
-        const actionsSection = document.createElement("div");
-        actionsSection.style.cssText = `
-        display: flex;
-        gap: 8px;
+      // 卡片头部 - 序号和相似度
+      const cardHeader = document.createElement("div");
+      cardHeader.style.cssText = `
         padding: 12px 16px;
-        border-top: 1px solid #f1f5f9;
+        border-bottom: 1px solid #f1f5f9;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
         background: #f8fafc;
       `;
-
-        const copyBtn = document.createElement("button");
-        copyBtn.style.cssText = `
-        flex: 1;
-        background: #4f46e5;
-        color: white;
-        border: none;
-        padding: 8px 12px;
-        border-radius: 6px;
-        font-size: 12px;
-        cursor: pointer;
-        transition: all 0.2s;
-        font-weight: 500;
+      cardHeader.innerHTML = `
+        <div style="font-weight: 700; color: #4f46e5; font-size: 16px;">#${index + 1}</div>
+        <div style="color: #475569; font-size: 12px;">检索得分：${similarity}</div>
       `;
-        copyBtn.textContent = "复制 SMILES";
-        copyBtn.onclick = () => copyToClipboard(smiles, smilesDetails);
 
-        const analyzeBtn = document.createElement("button");
-        analyzeBtn.style.cssText = `
-        flex: 1;
-        background: #10b981;
-        color: white;
-        border: none;
-        padding: 8px 12px;
-        border-radius: 6px;
-        font-size: 12px;
-        cursor: pointer;
-        transition: all 0.2s;
-        font-weight: 500;
-      `;
-        analyzeBtn.textContent = "深入分析";
-        analyzeBtn.onclick = () => analyzeMolecule(smiles);
-
-        // 悬停效果
-        [copyBtn, analyzeBtn].forEach((btn) => {
-          btn.addEventListener("mouseenter", () => {
-            btn.style.opacity = "0.9";
-          });
-          btn.addEventListener("mouseleave", () => {
-            btn.style.opacity = "1";
-          });
-        });
-
-        actionsSection.appendChild(copyBtn);
-        actionsSection.appendChild(analyzeBtn);
-
-        // 组装卡片
-        molCard.appendChild(cardHeader);
-        molCard.appendChild(imageSection);
-        molCard.appendChild(infoSection);
-        molCard.appendChild(actionsSection);
-        moleculesContainer.appendChild(molCard);
-      });
-    }
-
-    // 初始渲染第一页
-    renderRAGMolecules(currentPage);
-    ragInfoContainer.appendChild(moleculesContainer);
-
-    // 添加分页控件（如果需要）
-    if (needsPagination) {
-      const paginationContainer = document.createElement("div");
-      paginationContainer.style.cssText = `
-        margin-top: 20px;
+      // 分子图片区域 - 使用后端API生成图片（动态高度）
+      const imageSection = document.createElement("div");
+      imageSection.style.cssText = `
+        height: ${imageHeight};
         display: flex;
         justify-content: center;
         align-items: center;
-        gap: 12px;
-        padding: 16px;
-        background: rgba(255, 255, 255, 0.6);
-        border-radius: 8px;
-        border: 1px solid rgba(2, 132, 199, 0.2);
-      `;
-
-      const pageInfo = document.createElement("div");
-      pageInfo.className = "page-info";
-      pageInfo.style.cssText = `
-        font-size: 13px;
-        color: #075985;
-        font-weight: 600;
-      `;
-
-      const prevBtn = document.createElement("button");
-      prevBtn.innerHTML = "← 上一页";
-      prevBtn.style.cssText = `
-        padding: 8px 16px;
         background: #fff;
-        border: 1px solid #0284c7;
-        border-radius: 6px;
-        color: #0284c7;
-        font-size: 13px;
-        cursor: pointer;
-        transition: all 0.2s;
-        font-weight: 500;
-      `;
-      prevBtn.disabled = currentPage === 0;
-      if (prevBtn.disabled) {
-        prevBtn.style.opacity = "0.5";
-        prevBtn.style.cursor = "not-allowed";
-      }
-
-      const nextBtn = document.createElement("button");
-      nextBtn.innerHTML = "下一页 →";
-      nextBtn.style.cssText = `
-        padding: 8px 16px;
-        background: #0284c7;
-        border: 1px solid #0284c7;
-        border-radius: 6px;
-        color: white;
-        font-size: 13px;
-        cursor: pointer;
-        transition: all 0.2s;
-        font-weight: 500;
+        padding: 10px;
+        border-bottom: 1px solid #f1f5f9;
       `;
 
-      // 更新页面信息
-      function updateRAGPagination() {
-        const startIdx = currentPage * itemsPerPage + 1;
-        const endIdx = Math.min(
-          (currentPage + 1) * itemsPerPage,
-          moleculeCount
-        );
-        pageInfo.textContent = `显示 ${startIdx}-${endIdx} / 共 ${moleculeCount} 个分子`;
+      const molImage = document.createElement("img");
+      molImage.src = `/api/utils/smiles_to_image?smiles=${encodeURIComponent(
+        smiles
+      )}&width=360&height=300`;
+      molImage.alt = "分子结构";
+      molImage.style.cssText = `max-width: 100%; max-height: 100%; object-fit: contain;`;
+      molImage.loading = "lazy";
+      molImage.onerror = function () {
+        this.style.display = "none";
+        imageSection.innerHTML = `
+          <div style="color: #94a3b8; font-size: 12px; text-align: center;">
+            <div style="font-size: 24px; margin-bottom: 8px;">⚠️</div>
+            <div>无法加载分子结构</div>
+          </div>
+        `;
+      };
+      imageSection.appendChild(molImage);
 
-        prevBtn.disabled = currentPage === 0;
-        nextBtn.disabled = currentPage === totalPages - 1;
+      // 信息区域
+      const infoSection = document.createElement("div");
+      infoSection.style.cssText = `padding: 16px; flex: 1; display: flex; flex-direction: column; gap: 10px;`;
 
-        if (prevBtn.disabled) {
-          prevBtn.style.opacity = "0.5";
-          prevBtn.style.cursor = "not-allowed";
-        } else {
-          prevBtn.style.opacity = "1";
-          prevBtn.style.cursor = "pointer";
+      // 显示分子属性 - 优化为紧凑的网格布局
+      const propertyLabels = {
+        qed: "QED",
+        logp: "LogP",
+        molwt: "分子量",
+        hbd: "HBD",
+        hba: "HBA",
+        tpsa: "TPSA",
+        sas: "SAS",
+        numrotbonds: "可旋转键",
+      };
+
+      const allProperties = ["qed", "logp", "molwt", "hbd", "hba", "tpsa"];
+
+      const propertiesGrid = document.createElement("div");
+      propertiesGrid.style.cssText = `
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 6px 10px;
+      `;
+
+      allProperties.forEach((prop) => {
+        const possibleKeys = [
+          prop,
+          prop.toLowerCase(),
+          prop.toUpperCase(),
+          prop.replace("numrotbonds", "NumRotBonds"),
+        ];
+        let foundValue = null;
+
+        for (const key of possibleKeys) {
+          if (properties[key] !== undefined && properties[key] !== null) {
+            foundValue = properties[key];
+            break;
+          }
         }
 
-        if (nextBtn.disabled) {
-          nextBtn.style.opacity = "0.5";
-          nextBtn.style.cursor = "not-allowed";
-          nextBtn.style.background = "#94a3b8";
-          nextBtn.style.borderColor = "#94a3b8";
-        } else {
-          nextBtn.style.opacity = "1";
-          nextBtn.style.cursor = "pointer";
-          nextBtn.style.background = "#0284c7";
-          nextBtn.style.borderColor = "#0284c7";
+        if (foundValue !== null) {
+          const text = typeof foundValue === "string" ? foundValue.trim() : String(foundValue);
+          const numeric = (typeof foundValue === "number" || typeof foundValue === "string") &&
+            /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text) && Number.isFinite(Number(text));
+          const propValue = numeric ? Number(text) : null;
+
+          // 根据属性类型设置颜色
+          let valueColor = "#334155";
+          let bgColor = "#f8fafc";
+          if (numeric && prop === "qed") {
+            valueColor = propValue >= 0.7 ? "#059669" : propValue >= 0.5 ? "#d97706" : "#dc2626";
+            bgColor = propValue >= 0.7 ? "#ecfdf5" : propValue >= 0.5 ? "#fffbeb" : "#fef2f2";
+          } else if (numeric && prop === "logp") {
+            valueColor = propValue >= -0.4 && propValue <= 5.6 ? "#059669" : "#dc2626";
+            bgColor = propValue >= -0.4 && propValue <= 5.6 ? "#ecfdf5" : "#fef2f2";
+          } else if (numeric && prop === "molwt") {
+            valueColor = propValue <= 500 ? "#059669" : propValue <= 600 ? "#d97706" : "#dc2626";
+            bgColor = propValue <= 500 ? "#ecfdf5" : propValue <= 600 ? "#fffbeb" : "#fef2f2";
+          }
+
+          const propItem = document.createElement("div");
+          propItem.style.cssText = `
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: ${bgColor};
+            padding: 6px 10px;
+            border-radius: 6px;
+            border: 1px solid rgba(0,0,0,0.03);
+          `;
+
+          propItem.innerHTML = `
+            <span style="color: #64748b; font-size: 11px; font-weight: 500;">${escapeHtml(propertyLabels[prop] || prop)}</span>
+            <span style="color: ${valueColor}; font-weight: 700; font-size: 12px; font-family: 'Inter', ui-sans-serif, system-ui;">${
+              numeric ? text : "无效"
+            }</span>
+          `;
+          propertiesGrid.appendChild(propItem);
         }
+      });
+
+      if (propertiesGrid.children.length > 0) {
+          infoSection.appendChild(propertiesGrid);
       }
 
-      prevBtn.onclick = () => {
-        if (currentPage > 0) {
-          currentPage--;
-          renderRAGMolecules(currentPage);
-          updateRAGPagination();
-          ragInfoContainer.scrollIntoView({
-            behavior: "smooth",
-            block: "start",
-          });
-        }
-      };
+      // SMILES 折叠区域
+      const smilesDetails = document.createElement("details");
+      smilesDetails.style.cssText = `margin-top: 4px;`;
+      const smilesSummary = document.createElement("summary");
+      smilesSummary.style.cssText = "cursor: pointer; color: #64748b; font-size: 12px; user-select: none;";
+      smilesSummary.textContent = "显示 SMILES";
+      const smilesValue = document.createElement("div");
+      smilesValue.style.cssText = "margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;";
+      smilesValue.textContent = smiles;
+      smilesDetails.appendChild(smilesSummary);
+      smilesDetails.appendChild(smilesValue);
+      infoSection.appendChild(smilesDetails);
 
-      nextBtn.onclick = () => {
-        if (currentPage < totalPages - 1) {
-          currentPage++;
-          renderRAGMolecules(currentPage);
-          updateRAGPagination();
-          ragInfoContainer.scrollIntoView({
-            behavior: "smooth",
-            block: "start",
-          });
-        }
-      };
+      // 操作按钮
+      const actionsSection = document.createElement("div");
+      actionsSection.style.cssText = `
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+      border-top: 1px solid #f1f5f9;
+      background: #f8fafc;
+    `;
 
-      prevBtn.addEventListener("mouseenter", () => {
-        if (!prevBtn.disabled) {
-          prevBtn.style.background = "#e0f2fe";
-        }
+      const copyBtn = document.createElement("button");
+      copyBtn.style.cssText = `
+      flex: 1;
+      background: #4f46e5;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-weight: 500;
+    `;
+      copyBtn.textContent = "复制 SMILES";
+      copyBtn.onclick = () => copyToClipboard(smiles, smilesDetails);
+
+      const analyzeBtn = document.createElement("button");
+      analyzeBtn.style.cssText = `
+      flex: 1;
+      background: #10b981;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-weight: 500;
+    `;
+      analyzeBtn.textContent = "深入分析";
+      analyzeBtn.onclick = () => analyzeMolecule(smiles);
+
+      // 悬停效果
+      [copyBtn, analyzeBtn].forEach((btn) => {
+        btn.addEventListener("mouseenter", () => {
+          btn.style.opacity = "0.9";
+        });
+        btn.addEventListener("mouseleave", () => {
+          btn.style.opacity = "1";
+        });
       });
-      prevBtn.addEventListener("mouseleave", () => {
-        if (!prevBtn.disabled) {
-          prevBtn.style.background = "#fff";
-        }
-      });
 
-      nextBtn.addEventListener("mouseenter", () => {
-        if (!nextBtn.disabled) {
-          nextBtn.style.background = "#0369a1";
-        }
-      });
-      nextBtn.addEventListener("mouseleave", () => {
-        if (!nextBtn.disabled) {
-          nextBtn.style.background = "#0284c7";
-        }
-      });
+      actionsSection.appendChild(copyBtn);
+      actionsSection.appendChild(analyzeBtn);
 
-      updateRAGPagination();
-
-      paginationContainer.appendChild(prevBtn);
-      paginationContainer.appendChild(pageInfo);
-      paginationContainer.appendChild(nextBtn);
-      ragInfoContainer.appendChild(paginationContainer);
-    }
+      // 组装卡片
+      molCard.appendChild(cardHeader);
+      molCard.appendChild(imageSection);
+      molCard.appendChild(infoSection);
+      molCard.appendChild(actionsSection);
+      moleculesContainer.appendChild(molCard);
+    });
+    ragInfoContainer.appendChild(moleculesContainer);
 
     if (resultBox) {
       resultBox.appendChild(ragInfoContainer);
@@ -3825,12 +3406,6 @@
     const minCardWidth = "260px";
     const imageHeight = "180px";
     const gap = "20px";
-    const itemsPerPage = moleculeCount; // 无需分页
-
-    // 分页逻辑（保留变量防错）
-    let currentPage = 0;
-    const totalPages = 1;
-    const needsPagination = false;
 
     // 创建滑动容器
     const grid = document.createElement("div");
@@ -3849,372 +3424,212 @@
       mask-image: linear-gradient(to right, black 90%, transparent 100%);
     `;
 
-    // 渲染分子函数
-    function renderMolecules(page) {
-      grid.replaceChildren();
+    moleculesArray.forEach((candidate, index) => {
+      const smiles = candidate.canonical_smiles;
+      const molCard = document.createElement("div");
+      molCard.setAttribute("data-candidate-id", candidate.candidate_id);
+      const referenceKey = payload.reference?.ordered_keys?.[index];
+      if (referenceKey && referenceKey[1] === candidate.candidate_id) molCard.setAttribute('data-observation-id', referenceKey[0]);
+      molCard.className = "molecule-card";
+      molCard.style.cssText = `
+      flex: 0 0 ${minCardWidth};
+      width: ${minCardWidth};
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 0;
+      overflow: hidden;
+      transition: all 0.2s;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    `;
 
-      const startIdx = page * itemsPerPage;
-      const endIdx = Math.min(startIdx + itemsPerPage, moleculeCount);
-      const pageMolecules = moleculesArray.slice(startIdx, endIdx);
+      // 鼠标悬停效果
+      molCard.addEventListener("mouseenter", () => {
+        molCard.style.transform = "translateY(-3px)";
+        molCard.style.boxShadow = "0 8px 25px rgba(79, 70, 229, 0.15)";
+        molCard.style.borderColor = "#4f46e5";
+      });
 
-      pageMolecules.forEach((candidate, index) => {
-        const smiles = candidate.canonical_smiles;
-        const molCard = document.createElement("div");
-        molCard.setAttribute("data-candidate-id", candidate.candidate_id);
-        const referenceKey = payload.reference?.ordered_keys?.[startIdx + index];
-        if (referenceKey && referenceKey[1] === candidate.candidate_id) molCard.setAttribute('data-observation-id', referenceKey[0]);
-        molCard.className = "molecule-card";
-        molCard.style.cssText = `
-        flex: 0 0 ${minCardWidth};
-        width: ${minCardWidth};
-        background: #fff;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 0;
-        overflow: hidden;
-        transition: all 0.2s;
-        display: flex;
-        flex-direction: column;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
-      `;
+      molCard.addEventListener("mouseleave", () => {
+        molCard.style.transform = "translateY(0)";
+        molCard.style.boxShadow = "0 1px 2px rgba(0,0,0,0.05)";
+        molCard.style.borderColor = "#e2e8f0";
+      });
 
-        // 鼠标悬停效果
-        molCard.addEventListener("mouseenter", () => {
-          molCard.style.transform = "translateY(-3px)";
-          molCard.style.boxShadow = "0 8px 25px rgba(79, 70, 229, 0.15)";
-          molCard.style.borderColor = "#4f46e5";
-        });
-
-        molCard.addEventListener("mouseleave", () => {
-          molCard.style.transform = "translateY(0)";
-          molCard.style.boxShadow = "0 1px 2px rgba(0,0,0,0.05)";
-          molCard.style.borderColor = "#e2e8f0";
-        });
-
-        // 卡片头部 - 序号和标签
-        const cardHeader = document.createElement("div");
-        cardHeader.style.cssText = `
-          padding: 12px 16px;
-          border-bottom: 1px solid #f1f5f9;
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          background: #f8fafc;
-        `;
-        const candidateId = document.createElement("div");
-        candidateId.style.cssText =
-          "font-weight: 700; color: #4f46e5; font-size: 13px; overflow-wrap: anywhere;";
-        candidateId.textContent = `候选 ${candidateOffset + startIdx + index + 1}`;
-        cardHeader.appendChild(candidateId);
-        molCard.appendChild(cardHeader);
-
-        // 分子图片区域 - 使用后端API生成图片（动态高度）
-        const imageSection = document.createElement("div");
-        imageSection.style.cssText = `
-          height: ${imageHeight};
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          background: #fff;
-          padding: 10px;
-          border-bottom: 1px solid #f1f5f9;
-        `;
-
-        const molImage = document.createElement("img");
-        molImage.src = `/api/utils/smiles_to_image?smiles=${encodeURIComponent(
-          smiles
-        )}&width=360&height=300`;
-        molImage.alt = "分子结构";
-        molImage.style.cssText = `max-width: 100%; max-height: 100%; object-fit: contain;`;
-        molImage.loading = "lazy";
-        molImage.onerror = function () {
-          this.style.display = "none";
-          const imageError = document.createElement("div");
-          imageError.style.cssText =
-            "color: #94a3b8; font-size: 12px; text-align: center;";
-          const imageErrorIcon = document.createElement("div");
-          imageErrorIcon.style.cssText =
-            "font-size: 24px; margin-bottom: 8px;";
-          imageErrorIcon.textContent = "⚠️";
-          const imageErrorText = document.createElement("div");
-          imageErrorText.textContent = "无法加载分子结构";
-          imageError.appendChild(imageErrorIcon);
-          imageError.appendChild(imageErrorText);
-          imageSection.appendChild(imageError);
-        };
-        imageSection.appendChild(molImage);
-        molCard.appendChild(imageSection);
-
-        // 信息区域
-        const infoSection = document.createElement("div");
-        infoSection.style.cssText = `padding: 16px; flex: 1; display: flex; flex-direction: column; gap: 10px;`;
-
-        // CandidateSet metadata is not an independently aligned property result.
-        const propertiesContainer = document.createElement("div");
-        propertiesContainer.className = "molecule-properties";
-        propertiesContainer.style.cssText = `
-        width: 100%;
-        font-size: 12px;
-      `;
-        const unavailable = document.createElement("div");
-        unavailable.style.cssText =
-          "text-align: center; color: #64748b; padding: 12px; font-size: 11px;";
-        unavailable.textContent = "该卡片未关联性质结果";
-        propertiesContainer.appendChild(unavailable);
-        try {
-          const report = typeof evidenceReportViews !== "undefined" ? evidenceReportViews.get(messageElement) : null;
-          const collection = report && window.HomeEvidenceReport.findCollection(report, payload.reference);
-          if (collection) {
-            const row = window.HomeEvidenceReport.findPropertyRow(report, collection.reference, collection.generator_observation_id, candidate);
-            const source = report.sources.find(s => s.observation_id === row?.source_observation_id);
-            if (!window.HomeEvidenceReport.renderProperties(propertiesContainer, row, source) && row) {
-              unavailable.textContent = window.HomeEvidenceReport.propertyUnavailableLabel(row);
-            }
-          }
-        } catch (_) {
-          unavailable.textContent = '性质暂无法显示，请重试。';
-          unavailable.setAttribute('role', 'alert');
-        }
-        infoSection.appendChild(propertiesContainer);
-
-        // SMILES 折叠区域
-        const smilesDetails = document.createElement("details");
-        smilesDetails.open = singleCandidate;
-        smilesDetails.style.cssText = `margin-top: 4px;`;
-        const smilesSummary = document.createElement("summary");
-        smilesSummary.style.cssText =
-          "cursor: pointer; color: #64748b; font-size: 12px; user-select: none;";
-        smilesSummary.textContent = "显示 SMILES";
-        const smilesText = document.createElement("div");
-        smilesText.style.cssText =
-          "margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;";
-        smilesText.textContent = candidate.canonical_smiles;
-        smilesDetails.appendChild(smilesSummary);
-        smilesDetails.appendChild(smilesText);
-        infoSection.appendChild(smilesDetails);
-
-        molCard.appendChild(infoSection);
-
-        // 操作按钮区域
-        const actionsSection = document.createElement("div");
-        actionsSection.style.cssText = `
-        display: flex;
-        gap: 8px;
+      // 卡片头部 - 序号和标签
+      const cardHeader = document.createElement("div");
+      cardHeader.style.cssText = `
         padding: 12px 16px;
-        border-top: 1px solid #f1f5f9;
+        border-bottom: 1px solid #f1f5f9;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
         background: #f8fafc;
       `;
+      const candidateId = document.createElement("div");
+      candidateId.style.cssText =
+        "font-weight: 700; color: #4f46e5; font-size: 13px; overflow-wrap: anywhere;";
+      candidateId.textContent = `候选 ${candidateOffset + index + 1}`;
+      cardHeader.appendChild(candidateId);
+      molCard.appendChild(cardHeader);
 
-        const copyBtn = document.createElement("button");
-        copyBtn.style.cssText = `
-        flex: 1;
-        background: #4f46e5;
-        color: white;
-        border: none;
-        padding: 8px 12px;
-        border-radius: 6px;
-        font-size: 12px;
-        cursor: pointer;
-        transition: all 0.2s;
-        font-weight: 500;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 4px;
-      `;
-        copyBtn.textContent = "复制 SMILES";
-        copyBtn.onclick = () => copyToClipboard(candidate.canonical_smiles, smilesDetails);
-        copyBtn.addEventListener("mouseenter", () => {
-          copyBtn.style.background = "#4338ca";
-        });
-        copyBtn.addEventListener("mouseleave", () => {
-          copyBtn.style.background = "#4f46e5";
-        });
-        actionsSection.appendChild(copyBtn);
-        if (payload.reference && scientificReferences) {
-          const selectBtn = document.createElement("button");
-          selectBtn.type = "button";
-          selectBtn.className = "molecule-selection-button";
-          selectBtn.style.cssText = `
-            flex: 1;
-            background: #fff;
-            color: #475569;
-            border: 1px solid #cbd5e1;
-            border-radius: 6px;
-            padding: 8px 12px;
-            font-size: 12px;
-            cursor: pointer;
-            font-weight: 500;
-          `;
-          const compoundKey = payload.reference.ordered_keys.find(k => k[1] === candidate.candidate_id);
-          if (compoundKey) {
-            selectBtn.setAttribute("data-observation-id", compoundKey[0]);
-            selectBtn.setAttribute("data-candidate-id", compoundKey[1]);
-          }
-          selectBtn.setAttribute("aria-pressed", "false");
-          selectBtn.textContent = "选择此分子";
-          selectBtn.addEventListener("click", () => {
-            scientificReferences.select(payload.reference.presentation_id, compoundKey);
-          });
-          actionsSection.appendChild(selectBtn);
-        }
-
-        molCard.appendChild(actionsSection);
-        grid.appendChild(molCard);
-      });
-    }
-
-    // 初始渲染第一页
-    renderMolecules(currentPage);
-    moleculeContainer.appendChild(grid);
-
-    // 添加分页控件（如果需要）
-    if (needsPagination) {
-      const paginationContainer = document.createElement("div");
-      paginationContainer.style.cssText = `
-        margin-top: 20px;
+      // 分子图片区域 - 使用后端API生成图片（动态高度）
+      const imageSection = document.createElement("div");
+      imageSection.style.cssText = `
+        height: ${imageHeight};
         display: flex;
         justify-content: center;
         align-items: center;
-        gap: 12px;
-        padding: 16px;
-        background: #f8fafc;
-        border-radius: 8px;
-        border: 1px solid #e2e8f0;
-      `;
-
-      const pageInfo = document.createElement("div");
-      pageInfo.className = "page-info";
-      pageInfo.style.cssText = `
-        font-size: 13px;
-        color: #64748b;
-        font-weight: 500;
-      `;
-
-      const prevBtn = document.createElement("button");
-      prevBtn.textContent = "← 上一页";
-      prevBtn.style.cssText = `
-        padding: 8px 16px;
         background: #fff;
-        border: 1px solid #e2e8f0;
-        border-radius: 6px;
-        color: #475569;
-        font-size: 13px;
-        cursor: pointer;
-        transition: all 0.2s;
-        font-weight: 500;
-      `;
-      prevBtn.disabled = currentPage === 0;
-      if (prevBtn.disabled) {
-        prevBtn.style.opacity = "0.5";
-        prevBtn.style.cursor = "not-allowed";
-      }
-
-      const nextBtn = document.createElement("button");
-      nextBtn.textContent = "下一页 →";
-      nextBtn.style.cssText = `
-        padding: 8px 16px;
-        background: #4f46e5;
-        border: 1px solid #4f46e5;
-        border-radius: 6px;
-        color: white;
-        font-size: 13px;
-        cursor: pointer;
-        transition: all 0.2s;
-        font-weight: 500;
+        padding: 10px;
+        border-bottom: 1px solid #f1f5f9;
       `;
 
-      // 更新页面信息
-      function updatePagination() {
-        const startIdx = currentPage * itemsPerPage + 1;
-        const endIdx = Math.min(
-          (currentPage + 1) * itemsPerPage,
-          moleculeCount
-        );
-        pageInfo.textContent = `显示 ${startIdx}-${endIdx} / 共 ${moleculeCount} 个分子`;
+      const molImage = document.createElement("img");
+      molImage.src = `/api/utils/smiles_to_image?smiles=${encodeURIComponent(
+        smiles
+      )}&width=360&height=300`;
+      molImage.alt = "分子结构";
+      molImage.style.cssText = `max-width: 100%; max-height: 100%; object-fit: contain;`;
+      molImage.loading = "lazy";
+      molImage.onerror = function () {
+        this.style.display = "none";
+        const imageError = document.createElement("div");
+        imageError.style.cssText =
+          "color: #94a3b8; font-size: 12px; text-align: center;";
+        const imageErrorIcon = document.createElement("div");
+        imageErrorIcon.style.cssText =
+          "font-size: 24px; margin-bottom: 8px;";
+        imageErrorIcon.textContent = "⚠️";
+        const imageErrorText = document.createElement("div");
+        imageErrorText.textContent = "无法加载分子结构";
+        imageError.appendChild(imageErrorIcon);
+        imageError.appendChild(imageErrorText);
+        imageSection.appendChild(imageError);
+      };
+      imageSection.appendChild(molImage);
+      molCard.appendChild(imageSection);
 
-        prevBtn.disabled = currentPage === 0;
-        nextBtn.disabled = currentPage === totalPages - 1;
+      // 信息区域
+      const infoSection = document.createElement("div");
+      infoSection.style.cssText = `padding: 16px; flex: 1; display: flex; flex-direction: column; gap: 10px;`;
 
-        if (prevBtn.disabled) {
-          prevBtn.style.opacity = "0.5";
-          prevBtn.style.cursor = "not-allowed";
-          prevBtn.style.background = "#fff";
-        } else {
-          prevBtn.style.opacity = "1";
-          prevBtn.style.cursor = "pointer";
+      // CandidateSet metadata is not an independently aligned property result.
+      const propertiesContainer = document.createElement("div");
+      propertiesContainer.className = "molecule-properties";
+      propertiesContainer.style.cssText = `
+      width: 100%;
+      font-size: 12px;
+    `;
+      const unavailable = document.createElement("div");
+      unavailable.style.cssText =
+        "text-align: center; color: #64748b; padding: 12px; font-size: 11px;";
+      unavailable.textContent = "该卡片未关联性质结果";
+      propertiesContainer.appendChild(unavailable);
+      try {
+        const report = typeof evidenceReportViews !== "undefined" ? evidenceReportViews.get(messageElement) : null;
+        const collection = report && window.HomeEvidenceReport.findCollection(report, payload.reference);
+        if (collection) {
+          const row = window.HomeEvidenceReport.findPropertyRow(report, collection.reference, collection.generator_observation_id, candidate);
+          const source = report.sources.find(s => s.observation_id === row?.source_observation_id);
+          if (!window.HomeEvidenceReport.renderProperties(propertiesContainer, row, source) && row) {
+            unavailable.textContent = window.HomeEvidenceReport.propertyUnavailableLabel(row);
+          }
         }
+      } catch (_) {
+        unavailable.textContent = '性质暂无法显示，请重试。';
+        unavailable.setAttribute('role', 'alert');
+      }
+      infoSection.appendChild(propertiesContainer);
 
-        if (nextBtn.disabled) {
-          nextBtn.style.opacity = "0.5";
-          nextBtn.style.cursor = "not-allowed";
-          nextBtn.style.background = "#94a3b8";
-          nextBtn.style.borderColor = "#94a3b8";
-        } else {
-          nextBtn.style.opacity = "1";
-          nextBtn.style.cursor = "pointer";
-          nextBtn.style.background = "#4f46e5";
-          nextBtn.style.borderColor = "#4f46e5";
+      // SMILES 折叠区域
+      const smilesDetails = document.createElement("details");
+      smilesDetails.open = singleCandidate;
+      smilesDetails.style.cssText = `margin-top: 4px;`;
+      const smilesSummary = document.createElement("summary");
+      smilesSummary.style.cssText =
+        "cursor: pointer; color: #64748b; font-size: 12px; user-select: none;";
+      smilesSummary.textContent = "显示 SMILES";
+      const smilesText = document.createElement("div");
+      smilesText.style.cssText =
+        "margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;";
+      smilesText.textContent = candidate.canonical_smiles;
+      smilesDetails.appendChild(smilesSummary);
+      smilesDetails.appendChild(smilesText);
+      infoSection.appendChild(smilesDetails);
+
+      molCard.appendChild(infoSection);
+
+      // 操作按钮区域
+      const actionsSection = document.createElement("div");
+      actionsSection.style.cssText = `
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+      border-top: 1px solid #f1f5f9;
+      background: #f8fafc;
+    `;
+
+      const copyBtn = document.createElement("button");
+      copyBtn.style.cssText = `
+      flex: 1;
+      background: #4f46e5;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+    `;
+      copyBtn.textContent = "复制 SMILES";
+      copyBtn.onclick = () => copyToClipboard(candidate.canonical_smiles, smilesDetails);
+      copyBtn.addEventListener("mouseenter", () => {
+        copyBtn.style.background = "#4338ca";
+      });
+      copyBtn.addEventListener("mouseleave", () => {
+        copyBtn.style.background = "#4f46e5";
+      });
+      actionsSection.appendChild(copyBtn);
+      if (payload.reference && scientificReferences) {
+        const selectBtn = document.createElement("button");
+        selectBtn.type = "button";
+        selectBtn.className = "molecule-selection-button";
+        selectBtn.style.cssText = `
+          flex: 1;
+          background: #fff;
+          color: #475569;
+          border: 1px solid #cbd5e1;
+          border-radius: 6px;
+          padding: 8px 12px;
+          font-size: 12px;
+          cursor: pointer;
+          font-weight: 500;
+        `;
+        const compoundKey = payload.reference.ordered_keys.find(k => k[1] === candidate.candidate_id);
+        if (compoundKey) {
+          selectBtn.setAttribute("data-observation-id", compoundKey[0]);
+          selectBtn.setAttribute("data-candidate-id", compoundKey[1]);
         }
+        selectBtn.setAttribute("aria-pressed", "false");
+        selectBtn.textContent = "选择此分子";
+        selectBtn.addEventListener("click", () => {
+          scientificReferences.select(payload.reference.presentation_id, compoundKey);
+        });
+        actionsSection.appendChild(selectBtn);
       }
 
-      prevBtn.onclick = () => {
-        if (currentPage > 0) {
-          currentPage--;
-          renderMolecules(currentPage);
-          updatePagination();
-          // 滚动到分子容器顶部
-          moleculeContainer.scrollIntoView({
-            behavior: "smooth",
-            block: "start",
-          });
-        }
-      };
-
-      nextBtn.onclick = () => {
-        if (currentPage < totalPages - 1) {
-          currentPage++;
-          renderMolecules(currentPage);
-          updatePagination();
-          // 滚动到分子容器顶部
-          moleculeContainer.scrollIntoView({
-            behavior: "smooth",
-            block: "start",
-          });
-        }
-      };
-
-      prevBtn.addEventListener("mouseenter", () => {
-        if (!prevBtn.disabled) {
-          prevBtn.style.background = "#f1f5f9";
-          prevBtn.style.borderColor = "#cbd5e1";
-        }
-      });
-      prevBtn.addEventListener("mouseleave", () => {
-        if (!prevBtn.disabled) {
-          prevBtn.style.background = "#fff";
-          prevBtn.style.borderColor = "#e2e8f0";
-        }
-      });
-
-      nextBtn.addEventListener("mouseenter", () => {
-        if (!nextBtn.disabled) {
-          nextBtn.style.background = "#4338ca";
-        }
-      });
-      nextBtn.addEventListener("mouseleave", () => {
-        if (!nextBtn.disabled) {
-          nextBtn.style.background = "#4f46e5";
-        }
-      });
-
-      updatePagination();
-
-      paginationContainer.appendChild(prevBtn);
-      paginationContainer.appendChild(pageInfo);
-      paginationContainer.appendChild(nextBtn);
-      moleculeContainer.appendChild(paginationContainer);
-    }
+      molCard.appendChild(actionsSection);
+      grid.appendChild(molCard);
+    });
+    moleculeContainer.appendChild(grid);
 
     // 将分子容器添加到消息元素之后
     const messageWrapper = messageElement.closest(".assistant-wrapper");

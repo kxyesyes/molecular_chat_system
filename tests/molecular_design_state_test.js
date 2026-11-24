@@ -17,6 +17,8 @@ function setup() {
         addEventListener() {},
         contentWindow: { ketcher: {
           smiles: "",
+          editor: {options: () => ({})},
+          structService: {layout: async ({struct}) => ({struct})},
           async setMolecule(value) { this.smiles = value; },
           async getSmiles() { return this.smiles; },
         } },
@@ -238,8 +240,8 @@ test("clearing properties resets the result status to the empty state", () => {
 });
 
 test("candidate changes are neutral and missing values have no fabricated delta", () => {
-  const { E, elements } = setup();
-  E.addCandidateComparison({ logp: null, mw: 100 }, { logp: null, mw: 120 }, "CCO", "test");
+  const { context, elements } = setup();
+  context.HistoryManager.recordSubstitution("CCO", { logp: null, mw: 120 }, { logp: null, mw: 100 }, "test");
   const html = elements.get("candidateCompare").innerHTML;
   assert.doesNotMatch(html, /candidate-metric (good|warn)|>\+?0\.00</);
   assert.match(html, /120\.00/);
@@ -264,15 +266,20 @@ test("scaffold descriptors stay visible while screening waits for the product", 
   assert.equal(elements.get("dMW").textContent, "");
 });
 
-test("repeated candidate keeps one entry in generation order", () => {
-  const { E, S, elements } = setup();
-  S.iter = 1;
-  E.addCandidateComparison({ logp: 2 }, { logp: 1 }, "CCO", "first");
-  S.iter = 2;
-  E.addCandidateComparison({ logp: 2 }, { logp: 1 }, "CCO", "repeat");
-  assert.equal(S.candidates.length, 1);
-  assert.equal(S.candidates[0].step, 1);
-  assert.match(elements.get("candidateCompare").innerHTML, /#1/);
+test("repeated product keeps both iteration snapshots and refreshes its first card", () => {
+  const { context, elements } = setup();
+  const history = context.HistoryManager;
+  const properties = {logp: 1};
+  history.recordSubstitution("CCO", properties, {logp: 2}, "first");
+  properties.logp = 3;
+  history.recordSubstitution("CCO", properties, {logp: 2}, "repeat");
+  assert.equal(JSON.stringify(history.exportRows()), JSON.stringify([
+    {step: 1, smi: "CCO", props: {logp: 1}}, {step: 2, smi: "CCO", props: {logp: 3}},
+  ]));
+  const board = elements.get("candidateCompare").innerHTML;
+  assert.match(board, /#1 repeat/);
+  assert.doesNotMatch(board, /#2|first/);
+  assert.match(board, /\+1\.00/);
 });
 
 test("substitution requires a fresh single-site detection", async () => {
@@ -300,8 +307,7 @@ test("property failure after substitution is not recorded as a successful candid
   S.detectedSiteCount = 1;
   S.detectedSitesSmiles = "CC[*]";
   await E.execSubstitute();
-  assert.equal(S.candidates.length, 0);
-  assert.equal(S.history.length, 0);
+  assert.equal(context.HistoryManager.exportRows().length, 0);
 });
 
 test("old property success cannot overwrite a newer molecule", async () => {
@@ -318,31 +324,48 @@ test("old property success cannot overwrite a newer molecule", async () => {
 });
 
 test("clear invalidates properties, goals, history and in-flight responses", async () => {
-  const { P, E, requests, S } = setup();
+  const { context, P, E, requests, S } = setup();
   S.smiles = "CCO";
   S.curProps = { mw: 46 };
   S.curGoals = { items: [1] };
-  S.history.push({ smi: "CCO" });
+  context.HistoryManager.recordSubstitution("CCO", S.curProps, {}, "test");
   const pending = P.calcProps("CCO");
   await E.clearCanvas();
   requests[0]({ success: true, properties: { mw: 46 } });
   assert.equal((await pending).stale, true);
   assert.equal(S.curProps, null);
   assert.equal(S.curGoals, null);
-  assert.equal(S.history.length, 0);
+  assert.equal(context.HistoryManager.exportRows().length, 0);
 });
 
-test("restore clears prior properties immediately and binds refreshed values to SMILES", async () => {
+test("restore keeps prior properties during parsing and binds refreshed values to SMILES", async () => {
   const { E, requests, S } = setup();
   S.smiles = "CC";
   S.curProps = { mw: 30 };
   const restore = E.restoreCandidate("CCO");
-  assert.equal(S.curProps, null);
+  assert.equal(S.curProps.mw, 30);
   for (let i = 0; i < 30 && !requests.length; i++) await Promise.resolve();
+  assert.equal(S.curProps, null);
   requests[0]({ success: true, properties: { mw: 46 } });
   await restore;
   assert.equal(S.propsSmiles, "CCO");
   assert.equal(S.curProps.mw, 46);
+});
+
+test("choosing a file retires an earlier property response before the new read finishes", async () => {
+  const { E, requests, S } = setup();
+  const first = E.restoreCandidate("CO");
+  for (let i = 0; i < 30 && !requests.length; i++) await Promise.resolve();
+  assert.equal(requests.length, 1);
+  let rejectRead;
+  const second = E.loadStructure({text: () => new Promise((_, reject) => { rejectRead = reject; })});
+  requests[0]({success: true, properties: {mw: 32}});
+  await first;
+  assert.equal(S.curProps, null);
+  await E.clearCanvas();
+  rejectRead(new Error("superseded file"));
+  await second;
+  assert.equal(S.smiles, "");
 });
 
 test("unavailable status overrides a legacy numeric placeholder", async () => {
@@ -369,8 +392,7 @@ test("clearing while substitution runs never restores the obsolete product", asy
   resolve({ success: true, new_smiles: "CCO" });
   await pending;
   assert.equal(S.smiles, "");
-  assert.equal(S.candidates.length, 0);
-  assert.equal(S.history.length, 0);
+  assert.equal(context.HistoryManager.exportRows().length, 0);
 });
 
 test("a stale restore cannot write back after clear", async () => {
@@ -421,8 +443,8 @@ test("substitution rejects a site count detected for another molecule", async ()
 });
 
 test("candidate text preserves stereochemical backslashes and escapes HTML", () => {
-  const { E, elements } = setup();
-  E.addCandidateComparison({}, { mw: 56 }, "C/C=C\\C", '<label & "x">');
+  const { context, elements } = setup();
+  context.HistoryManager.recordSubstitution("C/C=C\\C", { mw: 56 }, {}, '<label & "x">');
   const html = elements.get("candidateCompare").innerHTML;
   assert.ok(html.includes('<div class="candidate-smiles">C/C=C\\C</div>'));
   assert.ok(html.includes('&lt;label &amp; &quot;x&quot;&gt;'));

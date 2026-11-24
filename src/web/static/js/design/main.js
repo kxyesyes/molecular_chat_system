@@ -189,13 +189,14 @@
   }
 
   async function exportAll() {
-    if (!S.history || S.history.length === 0) {
+    var history = Hist.exportRows();
+    if (!history.length) {
       UI.toast("历史记录为空", "error");
       return;
     }
 
     try {
-      var r = await Api.exportHistory(S.history);
+      var r = await Api.exportHistory(history);
       if (r.ok) {
         var blob = await r.blob();
         var url = window.URL.createObjectURL(blob);
@@ -217,21 +218,11 @@
     }
   }
 
-  function handleUpload(event) {
-    var file = event && event.target && event.target.files && event.target.files[0];
+  async function handleUpload(event) {
+    var file = event.target.files[0];
     if (!file) return;
-    var mutationToken = S.mutationSeq;
-    var reader = new FileReader();
-    reader.onload = function () {
-      if (mutationToken !== S.mutationSeq) return;
-      var smiles = window.MedChatSmilesFile.extractUploadedSmiles(file.name, reader.result);
-      if (!smiles) { UI.toast("文件中没有找到 SMILES", "error"); return; }
-      Editor.restoreCandidate(smiles, "已导入分子，属性已更新。").then(function (success) {
-        if (success) UI.toast("已导入分子", "success");
-      }).catch(function () { UI.toast("文件中的 SMILES 无法载入", "error"); });
-    };
-    reader.readAsText(file);
     event.target.value = "";
+    if (await Editor.loadStructure(file, "已导入分子，属性已更新。")) UI.toast("已导入分子", "success");
   }
 
   window.onSearch = Frag.onSearch;
@@ -251,7 +242,7 @@
   window.applyOptimizationCommand = applyOptimizationCommand;
 
   window.clearHist = Hist.clearHist;
-  window.restoreHist = Hist.restoreHist;
+  window.restoreHist = Editor.restoreCandidate;
 
   window.handleUpload = handleUpload;
   window.saveMol = saveMol;

@@ -12,6 +12,8 @@
 |---|---|
 | 了解项目、本机启动、保存主聊天模型配置 | [项目 README](../README.md) |
 | 开始开发或交给 Agent 修改 | [AGENTS.md](../AGENTS.md) |
+| 核对首页选中的“候选 32”是否传给了性质工具 | [从卡片追到工具输入](AGENT_MAINTENANCE.md#从卡片追到工具输入) |
+| 按用户操作定位其他领域的实现和回归测试 | [从用户操作找到修改位置](PROJECT_STANDARDS.md#从用户操作找到修改位置) |
 | 查目录、编码规范、测试命令和安全要求 | [项目规范](PROJECT_STANDARDS.md) |
 | 首次部署 Ubuntu 单机服务 | [部署教程](DEPLOYMENT_TUTORIAL.md) |
 | 查部署模板、生产门禁和 Temporal worker 边界 | [部署环境说明](../deployment/README.md) |

@@ -17,6 +17,7 @@ from test_decision_loop import setup_loop, tool, clarify, finish, finish_last, S
 def test_scientific_failure_guidance_does_not_consume_ordinary_chat_budget(profile):
     text = decision_system_message('chat', set(), [], {}, binding_profile=profile)['content']
     assert 'Let authorized tools validate supplied molecular input' not in text
+    assert 'Use action "tool" first' not in text
     assert 'If required input is missing, choose clarify' not in text
     assert 'Use scientific finish with observed evidence IDs for scientific requests; ' in text
     assert 'Use chat finish only for chat requests.' in text
@@ -31,7 +32,11 @@ def test_initial_prompt_explains_failure_and_evidence_before_schema_repair(profi
     assert 'If required input is missing, choose clarify' in text
     assert 'Do not reject supplied SMILES based on your own assessment' in text
     assert 'If a tool rejects the input and leaves no usable or review-only evidence, choose clarify' in text
-    assert 'Let authorized tools validate supplied molecular input' in text
+    if profile is None:
+        assert 'Use action "tool" first when the current user supplies molecular input' in text
+        assert 'including possibly invalid ones' in text
+    else:
+        assert 'Let authorized tools validate supplied molecular input' in text
     assert 'Use chat finish only for chat requests' in text
     assert 'text must be nonempty' in text
 
