@@ -130,11 +130,16 @@ def test_selected_activity_readback_only_matches_the_requested_operation():
         assert not selected_activity_values_requested(query)
 
 
-def test_model_explanation_gets_the_selected_display_row_separately_from_tool_order():
+@pytest.mark.parametrize('query', [
+    '请用自己的话解释刚才选中的那个分子。',
+    '所选分子的分类概率应该怎么理解？',
+    '当前选中候选的回归预测为什么需要复核？',
+    'How should I interpret the selected molecule’s activity probability?',
+])
+def test_model_explanation_gets_the_selected_display_row_separately_from_tool_order(query):
     record = activity_evidence('owner')
     previous = {'activity_evidence': record, 'activity_display_order': ['CCN', 'CCO'],
                 'activity_position': 2}
-    query = '请用自己的话解释刚才选中的那个分子。'
     context = WebTurnProjection(query, 'owner', [previous]).model_activity_context()
     assert context['display_order'] == ['CCN', 'CCO']
     assert context['selected_smiles'] == 'CCO'

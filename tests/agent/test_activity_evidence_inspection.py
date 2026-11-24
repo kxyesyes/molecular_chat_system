@@ -367,6 +367,19 @@ def test_one_sentence_checks_current_row_before_accepting_the_question(position,
     assert view['activity_position'] == position
 
 
+@pytest.mark.parametrize('probability', [0.13, 0.0])
+def test_brief_partial_row_keeps_the_successful_stage(probability):
+    evidence = accepted_snapshot()
+    row = evidence['observations'][0]['data'][0]
+    row.update(status='partial', success=False, execution_status='partial', activity_probability=probability,
+               predicted_pIC50=None, errors={'regression': 'unavailable'}, classification_regression_consistent=None)
+    history = [{'activity_evidence': evidence, 'activity_display_order': ['CCN', 'CCO'], 'activity_position': 2}]
+    view = followup_answer('这两项结果为什么不一致，请一句话解释原因。', history, SESSION)
+    assert view['status'] == 'partial'
+    assert f'活性概率 {probability:.4g}' in view['final_answer'] and '回归预测 pIC50 缺失' in view['final_answer']
+    assert '无法判断' in view['final_answer'] and '6.7' not in view['final_answer']
+
+
 def test_one_sentence_preserves_failed_row_without_borrowing_a_sibling_prediction():
     evidence = accepted_snapshot()
     evidence['observations'][0]['data'][0].update(

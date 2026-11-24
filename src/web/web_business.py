@@ -29,6 +29,8 @@ _AFFINITY_INFERENCE = re.compile(
 _PRIOR_RESULT_REFERENCE = re.compile(
     r'刚才|之前|先前|上一轮|上次|上述|前述|上面(?:的)?(?=(?:这|两|候选|分子|结果|计算|预测))|这(?:个|些|两|说明|意味|能)|'
     r'那(?:个|些|两)|两者|二者|它|第\s*[一二三四五六七八九十0-9]+\s*个|'
+    r'(?:所选的?|当前选中的?|选中的)(?:那|这)?(?:一?个)?(?:分子|候选|行)|'
+    r'\b(?:selected|chosen)\s+(?:molecule|candidate|row)\b|'
     r'\b(?:previous|prior|earlier|above|these|those|this|that|they|them|it|both|first|second)\b', re.I)
 UNVERIFIED_NAME_WARNING = '名称与所给结构的对应关系未核验；结果基于提供的 SMILES。'
 _IC50_KI_CONDITIONS = (
