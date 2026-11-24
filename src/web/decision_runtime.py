@@ -1347,7 +1347,8 @@ class WebDecisionRuntime:
                     if failed:
                         result.final_answer = (
                             '以下分子的 ADMET 预测失败：' + '、'.join(failed)
-                            + '。本次未交付批量预测结果，请重试。'
+                            + ('。其余分子的预测已保留。' if result.outcome == RunOutcome.PARTIAL
+                               else '。本次未交付批量预测结果，请重试。')
                         )
             result.metadata.update(self._compiled_plan_metadata(plan))
             result.metadata.update(

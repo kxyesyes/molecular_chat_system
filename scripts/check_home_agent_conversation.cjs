@@ -48,6 +48,7 @@ async function conversation(browser, executions, verifyModel = false) {
     return {
       text: (await answer.innerText()).replace(/\s+/g, " ").trim(),
       outputs: calls.map(row => JSON.parse(row.output_json)),
+      answer,
     };
   };
 }
@@ -61,6 +62,44 @@ async function verificationBrowser(t) {
   t.after(() => browser.close());
   return { browser, executions };
 }
+
+test("性质与 ADMET 的组合比较逐行对应两个工具的原始数据", async t => {
+  const { browser, executions } = await verificationBrowser(t);
+  const ask = await conversation(browser, executions, true);
+  const { outputs: [properties, admet], answer } = await ask(
+    "请比较 CCO 和 CCN 的分子量、logP 和 ADMET，并列出各自的 hERG 预测值。",
+    ["property_calculator", "admet_predictor"]);
+  const structures = ["CCO", "CCN"];
+  for (const output of [properties, admet]) {
+    assert.deepEqual(output.data.map(row => row.smiles), structures);
+  }
+  const tables = await answer.locator("table").evaluateAll(nodes => nodes.map(table =>
+    Array.from(table.rows, row => Array.from(row.cells, cell => cell.innerText.trim()))));
+  const propertyTable = tables.find(([header]) => header.includes("分子量 (Da)") && header.includes("logP"));
+  assert.ok(propertyTable, "回答中缺少分子性质比较表");
+  const [header, ...rows] = propertyTable;
+  assert.deepEqual(rows.map(row => row[header.indexOf("SMILES")]), structures);
+  for (const [i, row] of rows.entries()) {
+    for (const [label, key] of [["分子量 (Da)", "molecular_weight"], ["logP", "logp"]]) {
+      const cell = row[header.indexOf(label)];
+      assert.ok(cell && Number.isFinite(properties.data[i].properties[key]));
+      assert.equal(Number(cell), properties.data[i].properties[key]);
+    }
+  }
+  const endpointTable = tables.find(([labels]) => labels[0] === "端点" && labels.includes("CCN"));
+  assert.ok(endpointTable, "回答中缺少按分子比较的 ADMET 端点表");
+  assert.deepEqual(endpointTable[0].slice(1), structures);
+  const hERG = endpointTable.find(row => row[0] === "hERG");
+  assert.ok(hERG, "端点表缺少用户指定的 hERG");
+  for (const [i, row] of admet.data.entries()) {
+    const endpoint = row.admet.endpoints.hERG;
+    assert.equal(endpoint.source, "admet_ai_model");
+    assert.equal(endpoint.task_type, "classification");
+    assert.ok(Number.isFinite(endpoint.value));
+    const displayed = Number.parseFloat(hERG[i + 1]);
+    assert.equal(displayed, Number(endpoint.value.toPrecision(4)));
+  }
+});
 
 test("澄清、纠正及越界后按各会话自己的表格和问题作答", async t => {
   const { browser, executions } = await verificationBrowser(t);

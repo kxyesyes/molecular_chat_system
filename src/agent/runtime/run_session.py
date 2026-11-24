@@ -33,7 +33,7 @@ from src.agent.runtime.allocation import (
 )
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.validators import align_candidate_results
-from src.agent.validators.partial_observations import has_usable_observation
+from src.agent.validators.partial_observations import has_usable_observation, verified_mixed_admet
 from src.task_runtime.cancellation import current_task_cancellation
 
 if TYPE_CHECKING:
@@ -1791,6 +1791,11 @@ class WorkflowRunSession:
                 ],
             },
         )
+        if (self.orchestrator.workflow_version == 'web-admet-batch-v1' and len(self.steps) == len(self.results) == 1
+                and agent_result.outcome == RunOutcome.FAILED
+                and verified_mixed_admet(self.results[0], self.steps[0].input_data)):
+            agent_result.outcome = RunOutcome.PARTIAL
+            agent_result.partial = True
         dispatch = self.orchestrator.step_dispatch
         if dispatch is not None:
             dispatch.decorate_result(agent_result, self.context, self.reused_steps)

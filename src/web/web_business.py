@@ -2717,7 +2717,10 @@ class WebTurnProjection:
                         for row in rows)]
                     warnings = []
                     if missing:
-                        answer += '\n\n模型未返回或无法使用请求端点：' + '、'.join(missing) + '。'
+                        mixed_batch = any(item.tool_name == 'admet_predictor' and item.status.value == 'partial'
+                                          for item in result.tool_results)
+                        label = '整批分子未能全部获得请求端点：' if mixed_batch else '模型未返回或无法使用请求端点：'
+                        answer += '\n\n' + label + '、'.join(missing) + '。'
                         warnings.append('部分请求端点未返回。')
                     if self.solubility_requested_smiles is not None:
                         from src.agent.candidate_evidence_followup import solubility_prediction_comparison

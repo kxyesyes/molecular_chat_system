@@ -1,4 +1,4 @@
-"""Narrow trust boundary for observed, but not wholly accepted, activity batches.
+"""Validate retained observations from partially successful prediction batches.
 
 Usable here means retainable observations, not eligibility for a ranking or a
 scientific claim. Consumers must still apply their candidate-level requirements.
@@ -6,7 +6,32 @@ No quality flag can substitute for validation of the rows themselves.
 """
 from html import escape
 
-from src.system.scientific_contracts import ObservationStatus, ToolResult
+from src.system.scientific_contracts import ObservationStatus, ToolProvenance, ToolResult
+
+
+def verified_mixed_admet(item: ToolResult, expected_input: str) -> bool:
+    """A plan-bound batch with both failed rows and intact predictions may be displayed."""
+    if (item.tool_name != 'admet_predictor' or item.status != ObservationStatus.PARTIAL or item.success
+            or not isinstance(expected_input, str) or not isinstance(item.provenance, ToolProvenance)
+            or item.provenance.tool_name != item.tool_name
+            or item.provenance.demo_mode or item.provenance.fallback_used
+            or not item.provenance.input_digest or not item.quality.get('evidence_id')
+            or item.quality.get('validated') is False):
+        return False
+    from src.admet.predictor import ADMETPredictor
+    from src.agent.tooling.analysis_contract import ADMETOutput
+    try:
+        ADMETOutput.model_validate(vars(item))
+        states = {row.get('status') for row in item.data or []}
+        if (len(states) < 2 or 'succeeded' not in states
+                or not states <= {'succeeded', 'failed', 'invalid_input', 'unavailable'}):
+            return False
+        smiles = expected_input.splitlines()
+        ADMETPredictor._validate_batch_rows(item.data, smiles, [
+            f'molecule-{i:03d}' for i in range(1, len(smiles) + 1)])
+        return item.provenance.output_digest == ADMETPredictor._provenance(smiles, item.data)['output_digest']
+    except (ValueError, TypeError):
+        return False
 
 
 def is_partial_family_activity(result: ToolResult) -> bool:

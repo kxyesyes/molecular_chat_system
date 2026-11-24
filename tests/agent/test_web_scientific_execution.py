@@ -1979,6 +1979,54 @@ def test_batch_admet_missing_endpoint_is_partial_for_each_molecule(tmp_path):
         handler.agent_system.tool_registry.close()
 
 
+@pytest.mark.parametrize('failed_index', [0, 1])
+def test_partial_admet_comparison_retains_successful_molecule_and_property_rows(tmp_path, failed_index):
+    class EndpointBackend(FakeBackend):
+        def predict_batch(self, smiles, molecule_ids):
+            rows = super().predict_batch(smiles, molecule_ids)
+            for row in rows:
+                if row['status'] == 'succeeded':
+                    row['admet']['endpoints']['hERG'] = dict(value=.2346, source='admet_ai_model',
+                        category='Toxicity', task_type='classification', unit='-')
+                    row['admet']['units']['hERG'] = '-'
+            return rows
+
+    backend = EndpointBackend(fail_ids={f'molecule-{failed_index+1:03}'})
+    handler = make_web_handler([PropertyCalculator(), ADMETPredictor(backend=backend)],
+        SQLiteAgentStateStore(tmp_path / 'partial-comparison.sqlite'), model=PlannedWebModel())
+    try:
+        _, frames = run_web_turn(handler, '请比较 CCO 和 CCN 的分子量、logP 和 ADMET，并列出各自的 hERG 预测值。',
+                                 result_format='summary_details_v1')
+        result = result_of(frames)
+        assert result['status'] == 'partial' and not result['success']
+        text = result['display_answer']
+        assert '46.07' in text and '45.08' in text
+        assert '| 端点 | `CCO` | `CCN` |' in text
+        cells = next(line for line in text.splitlines() if line.startswith('| hERG |')).split('|')[2:-1]
+        assert '失败' in cells[failed_index] and '0.2346' in cells[1 - failed_index]
+        assert '0.2346' not in cells[failed_index]
+        assert backend.calls == [(['CCO', 'CCN'], ['molecule-001', 'molecule-002'])]
+    finally:
+        handler.agent_system.tool_registry.close()
+
+
+def test_partial_admet_rejects_stale_or_reordered_observations():
+    from src.agent.validators.partial_observations import has_usable_observation, verified_mixed_admet
+    from src.system.tool_adapter import execute_tool_compat
+
+    tool = ADMETPredictor(backend=FakeBackend(fail_ids={'molecule-002'}))
+    try:
+        item = execute_tool_compat(tool, 'CCO\nCCN')
+        item.quality['evidence_id'] = 'fixture-evidence'
+        assert verified_mixed_admet(item, 'CCO\nCCN')
+        assert not has_usable_observation(item)  # Display cannot authorize dependent calculations.
+        assert not verified_mixed_admet(item, 'CCN\nCCO')
+        assert not verified_mixed_admet(replace(item, provenance=replace(item.provenance, output_digest='stale')),
+                                        'CCO\nCCN')
+    finally:
+        tool.close()
+
+
 def test_batch_admet_failed_row_cannot_be_reported_as_complete(tmp_path):
     backend = FakeBackend(fail_ids={'molecule-002'})
     handler = make_web_handler([ADMETPredictor(backend=backend)],
@@ -1986,9 +2034,10 @@ def test_batch_admet_failed_row_cannot_be_reported_as_complete(tmp_path):
     try:
         _, frames = run_web_turn(handler, '比较 CCO 和 CCN 的 ADMET，并列出各自的 hERG 预测值。')
         result = result_of(frames)
-        assert result['status'] != 'completed'
+        assert result['status'] == 'partial'
         assert not result['success']
         assert backend.calls and backend.calls[0][0] == ['CCO', 'CCN']
+        assert handler.agent_system.state_store.get_run(result['trace_id'])['status'] == 'partial'
         complete = next(frame for frame in frames if frame['type'] == 'complete')
         assert 'CCN' in complete['content'] and '失败' in complete['content'], json.dumps(result, ensure_ascii=False)
     finally:
