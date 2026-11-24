@@ -168,6 +168,9 @@
       heading.setAttribute("role", "status");
       if (!showResult && !event.batch) node("p", `任务 ${event.task_id} · 修订 ${event.revision}`, box).className = "docking-identity";
       if (state.notice) node("p", state.notice, box).className = "docking-notice";
+      for (const row of event.batch?.skipped || []) {
+        node("p", `已跳过候选 ${row.ordinal}：${row.reason}`, box);
+      }
       if (state.drainedFailure) return;
       if (event.cleanup_status === "pending" || event.persistence_pending || !event.segment_complete)
         node("p", "后台工作或清理尚未结束；这不是已完成的科学结果。", box);

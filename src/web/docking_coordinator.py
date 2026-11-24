@@ -245,6 +245,8 @@ class _Root:
     text_refinements: list = field(default_factory=list)
     batch: dict | None = None
     batch_ligands: list = field(default_factory=list)
+    preflight_ligands: dict = field(default_factory=dict)
+    skipped_ligands: tuple = ()
     batch_proof: tuple[str, str] | None = None
     batch_submitting: asyncio.Event | None = None
 
@@ -260,6 +262,8 @@ def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
         if not root.closed and root.batch is not None:
             view["batch"] = dict(task_id=root.task_id, pdb_id=root.batch["pdb_id"],
                                  ligands=[dict(row) for row in root.batch["ligands"]])
+            if root.skipped_ligands:
+                view["batch"]["skipped"] = [dict(row) for row in root.skipped_ligands]
         execution = root.input_context._execution if root.input_context is not None else None
         if execution is not None:
             view['execution_authorized'] = not root.closed and execution.acquired
@@ -552,6 +556,7 @@ class DockingRequestCoordinator:
         root.selection = root.projected = root.ligand = None
         root.batch = root.batch_proof = None
         root.batch_ligands.clear()
+        root.preflight_ligands.clear()
         root.batch_submitting = None
         root.receptor_descriptor = root.ligand_descriptor = root.prepared_preview_json = None
         root.ready_preview_json = root.input_context = None
@@ -655,7 +660,8 @@ class DockingRequestCoordinator:
             root.close_state = 'unconfirmed'
 
     async def begin(self, *, root_id, owner_session_id, origin_turn_id, query,
-                    history, descriptors, enable_tools, mode, structure_context=None, batch=None):
+                    history, descriptors, enable_tools, mode, structure_context=None, batch=None, prepared=None,
+                    skipped=None):
         # Entire input capture/preflight, clocks and the local attempt burn precede
         # the first await; duplicate coroutines cannot race to create an issuer.
         try:
@@ -678,7 +684,7 @@ class DockingRequestCoordinator:
                 inputs = assessment["inputs"]
                 if (type(batch) is not dict or set(batch) != {"pdb_id", "ligands"}
                         or batch["pdb_id"] != inputs.get("pdb_id")
-                        or type(batch["ligands"]) is not list or len(batch["ligands"]) < 2
+                        or type(batch["ligands"]) is not list or not batch["ligands"]
                         or any(type(row) is not dict or set(row) != {"ordinal", "smiles"}
                                or type(row["ordinal"]) is not int or row["ordinal"] < 1
                                or type(row["smiles"]) is not str or not row["smiles"]
@@ -701,7 +707,8 @@ class DockingRequestCoordinator:
         root = _Root(root_id, owner_session_id, origin_turn_id, str(uuid4()), str(uuid4()),
                      snapshot, mode, wall + _WORK_MS, mono + _WORK_MS / 1000,
                      tuple(assessment["missing_fields"]), structure_context_json=structure_context_json,
-                     physical_deadline=physical_begin + _WORK_MS / 1000, batch=batch)
+                     physical_deadline=physical_begin + _WORK_MS / 1000, batch=batch,
+                     preflight_ligands=dict(prepared or {}), skipped_ligands=tuple(skipped or ()))
         self._roots[root_id] = root
         root.task = asyncio.create_task(self._run(root))
         self._gate.retain_task(root.task)
@@ -1241,7 +1248,9 @@ class DockingRequestCoordinator:
             if root.batch is not None:
                 prepared = []
                 for row in root.batch["ligands"]:
-                    item = await self._selected_child(root, "ligand", dict(smiles=row["smiles"]))
+                    item = root.preflight_ligands.get(row["ordinal"])
+                    if item is None:
+                        item = await self._selected_child(root, "ligand", dict(smiles=row["smiles"]))
                     if (item["canonical_smiles"] != row["smiles"]
                             or hashlib.sha256(item["sdf_bytes"]).hexdigest() != item["sha256"]):
                         raise _Unavailable("selected_input_unavailable")

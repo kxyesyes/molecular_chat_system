@@ -85,6 +85,8 @@ class DockingChatController:
                     len(sequence) if type(sequence) is list else -1, pointer is not None)
         if not self._live(sender) or sender.websocket.scope.get('agent_session_id') != owner:
             return False
+        if pointer is not None and pointer != getattr(sender, '_docking_structure', None):
+            sender._ligand_preflight = None
         sender._docking_structure = pointer
         return pointer is not None
 
@@ -139,8 +141,8 @@ class DockingChatController:
     def _launch(self, sender, attachment, operation):
         async def drive():
             try:
-                await operation
-                if self._live(sender, attachment):
+                replied = await operation
+                if replied is not True and self._live(sender, attachment):
                     await self._show(sender, attachment)
             except asyncio.CancelledError:
                 await self._close(attachment)
@@ -165,7 +167,7 @@ class DockingChatController:
         if not self.enabled or type(payload) is not dict:
             return False
         kind = payload.get('type', 'chat')
-        batch, clarification = None, None
+        batch, clarification, preflight = None, None, None
         control = kind in {'docking_watch', 'docking_refine'} if type(kind) is str else False
         if control:
             try:
@@ -190,7 +192,18 @@ class DockingChatController:
                         batch = dict(pdb_id=parsed[0], ligands=parsed[1])
                 except ValueError as exc:
                     clarification = str(exc)
-            if (not batch and clarification is None and (payload.get('reference') is not None
+            if (not batch and clarification is None and self._live(sender)
+                    and not payload.get('reference') and not payload.get('selection')
+                    and getattr(self.runtime.application, 'model', None) is not None):
+                from .docking_preflight import read_turn
+                from src.system.env import get_int_env
+                try:
+                    preflight = read_turn(query, sender.websocket.scope['agent_session_id'],
+                        getattr(sender, '_ligand_preflight', None),
+                        get_int_env('MEDCHAT_DOCKING_MAX_BATCH_LIGANDS', 100))
+                except ValueError as exc:
+                    clarification = str(exc)
+            if (not preflight and not batch and clarification is None and (payload.get('reference') is not None
                     or payload.get('selection') is not None
                     or not assess_docking_request_text(query, enabled=True, enable_tools=True)['assessed'])):
                 return False
@@ -286,6 +299,16 @@ class DockingChatController:
             return True
         history = [dict(item) for item in history]
         query = payload['message']
+        if preflight:
+            from .docking_preflight import choose_policy
+            refresh = getattr(self.runtime.application, '_refresh_llm_config_from_env', None)
+            if refresh:
+                await refresh()
+            policy = await choose_policy(self.runtime.application, query, preflight)
+            if policy == 'other':
+                return False
+            if not self._live(sender) or sender.websocket.scope['agent_session_id'] != owner:
+                return True
         structure = deepcopy(getattr(sender, '_docking_structure', None))
         attachment = _Attachment(owner, uuid4().hex, uuid4().hex)
         sender._chat_docking = attachment
@@ -300,11 +323,57 @@ class DockingChatController:
                                'trace_id': attachment.root_id}, ensure_ascii=False, allow_nan=False)
         await sender.send_text(None, capture=accepted, on_sent=mark_delivered)
         if delivered and self._live(sender, attachment):
-            self._launch(sender, attachment, self._begin(sender, attachment, query, history, structure,
-                **({'batch': batch} if batch else {})))
+            sender._ligand_preflight = preflight
+            operation = (self._preflight(sender, attachment, query, history, structure, preflight, policy)
+                         if preflight else self._begin(sender, attachment, query, history, structure,
+                             **({'batch': batch} if batch else {})))
+            self._launch(sender, attachment, operation)
         return True
 
-    async def _begin(self, sender, attachment, query, history, structure, *, batch=None):
+    async def _preflight(self, sender, attachment, query, history, structure, preflight, policy):
+        from .docking_preflight import check_ligands
+
+        def live():
+            return self._live(sender, attachment) and sender._ligand_preflight is preflight
+
+        if not live():
+            return True
+        text = None
+        if policy == 'clarify':
+            text = '请说明要预检哪些配体、解释哪项结果，或是否允许跳过未通过的配体。'
+        elif policy == 'unavailable':
+            text = '未能确认本次请求的意思，请重试。本次没有启动对接。'
+        elif policy in {'explain', 'compare_history'} and not preflight.rows:
+            text = '当前会话还没有这批配体的预检记录。可以先检查这批配体。'
+        else:
+            if not preflight.rows:
+                await check_ligands(preflight, live)
+            if not live():
+                return True
+            passed = [(i, result) for i, _, result in preflight.rows if result['ok']]
+            may_prepare = (policy == 'use_passed' or
+                           policy == 'require_all' and len(passed) == len(preflight.rows))
+            if passed and may_prepare and preflight.pdb:
+                batch = dict(pdb_id=preflight.pdb, ligands=[
+                    dict(ordinal=i, smiles=r['canonical_smiles']) for i, r in passed])
+                await self._begin(sender, attachment, query, history, structure, batch=batch,
+                                  prepared={i: r for i, r in passed}, skipped=preflight.skipped())
+                return False
+            text = preflight.report()
+            if policy == 'compare_history':
+                text += '\n当前记录只能说明本批的检查结果，缺少可核对的上次制备条件。'
+            elif passed and may_prepare and not preflight.pdb:
+                text += '\n请补充这批配体使用的受体 PDB 编号。'
+            elif policy == 'require_all' and len(passed) < len(preflight.rows):
+                text += '\n整批已暂停。'
+            text += '\n尚未提交对接任务。'
+        for frame in (dict(type='agent_result', display_answer=text), dict(type='complete', content=text)):
+            frame.update(status='failed' if policy == 'unavailable' else 'completed',
+                         trace_id=attachment.root_id, turn_id=attachment.origin)
+            await sender.send_text(None, capture=lambda: json.dumps(frame, ensure_ascii=False) if live() else None)
+        return True
+
+    async def _begin(self, sender, attachment, query, history, structure, *, batch=None, prepared=None, skipped=None):
         refresh = getattr(self.runtime.application, '_refresh_llm_config_from_env', None)
         if refresh is not None:
             await refresh()
@@ -324,7 +393,7 @@ class DockingChatController:
             root_id=attachment.root_id, owner_session_id=attachment.owner,
             origin_turn_id=attachment.origin, query=query, history=history,
             descriptors=[], enable_tools=True, mode=self.runtime.wire_mode, structure_context=structure,
-            **({'batch': batch} if batch else {}))))
+            **({'batch': batch} if batch else {}), **({'prepared': prepared, 'skipped': skipped} if prepared else {}))))
         try:
             # begin captures and installs its root before its first suspension.
             await asyncio.sleep(0)
@@ -459,6 +528,7 @@ class DockingChatController:
     async def disconnect(self, sender):
         attachment = getattr(sender, '_chat_docking', None)
         sender._docking_structure = None
+        sender._ligand_preflight = None
         sender._docking_history = ()
         if attachment is None or not attachment.active:
             return

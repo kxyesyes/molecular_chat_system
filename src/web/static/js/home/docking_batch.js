@@ -9,7 +9,9 @@
     typeof row.smiles === "string" && row.smiles.length > 0;
   function validBatch(batch, task) {
     return batch?.task_id === task && /^[0-9a-z]{4}$/i.test(batch.pdb_id) &&
-      Array.isArray(batch.ligands) && batch.ligands.length >= 2 && batch.ligands.every(ligandValid) &&
+      Array.isArray(batch.ligands) && batch.ligands.length >= 1 && batch.ligands.every(ligandValid) &&
+      (batch.skipped === undefined || Array.isArray(batch.skipped) && batch.skipped.every(row =>
+        Number.isSafeInteger(row?.ordinal) && row.ordinal > 0 && typeof row.reason === "string")) &&
       new Set(batch.ligands.map(row => row.ordinal)).size === batch.ligands.length;
   }
   function sameLigands(rows, expected) {
@@ -87,7 +89,7 @@
     function display(view, result) {
       const rows = result.rows;
       if (result.task_id !== view.task || !Object.hasOwn(labels, result.status) ||
-          !/^[a-z0-9]{4}$/i.test(result.pdb_id) || !Array.isArray(rows) || rows.length < 2 ||
+          !/^[a-z0-9]{4}$/i.test(result.pdb_id) || !Array.isArray(rows) || !rows.length ||
           !rows.every(row => ligandValid(row) && Object.hasOwn(labels, row.status)) ||
           new Set(rows.map(row => row.ordinal)).size !== rows.length ||
           view.expected && (view.expected.pdb_id !== result.pdb_id || !sameLigands(rows, view.expected.ligands)))

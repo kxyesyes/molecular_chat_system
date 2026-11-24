@@ -12,7 +12,7 @@ from .docking_input_context import capture_chat_input_context
 
 def batch_binding(root, context):
     rows = [{'ordinal': row['ordinal'], 'smiles': row['smiles']} for row in root.batch_ligands]
-    if len(rows) < 2 or rows != root.batch['ligands']:
+    if not rows or rows != root.batch['ligands']:
         raise ValueError('Batch inputs changed')
     preview = dict(task_id=root.task_id, pdb_id=root.batch['pdb_id'], ligands=rows,
         receptor_sha256=hashlib.sha256(context._receptor).hexdigest(),

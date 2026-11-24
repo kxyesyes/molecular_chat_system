@@ -16,6 +16,34 @@ from tests.agent.test_web_docking_selection import _complete_source_child, selec
 from tests.agent.test_web_docking_parameters import confirmation_args
 
 
+def test_preflight_single_survivor_keeps_ordinal_and_exact_sdf(tmp_path, target_case, monkeypatch):
+    rig, pointer = source_rig(tmp_path, target_case)
+    monkeypatch.setattr(source_preparation, "_source_candidate", _complete_source_child)
+    prepared = chat_preparation.build_ligand_sdf("OCC")
+    original = chat_preparation.run_preparation
+    async def receptor_only(operation, **kwargs):
+        assert operation != "ligand", "a passed preflight must reuse the same SDF"
+        return await original(operation, **kwargs)
+    monkeypatch.setattr(chat_preparation, "run_preparation", receptor_only)
+    async def run():
+        async with rig.client() as client:
+            coordinator = rig.coordinator(client)
+            rows = [dict(ordinal=2, smiles="CCO")]
+            skipped = [dict(ordinal=1, reason="未通过结构检查")]
+            initial = await rig.begin(coordinator, structure_context=pointer,
+                batch=dict(pdb_id="1ABC", ligands=rows), prepared={2: prepared}, skipped=skipped)
+            assert initial["batch"]["skipped"] == skipped
+            result = await select(coordinator, initial)
+            assert result["reason_code"] == "parameters_confirmation_required"
+            root = coordinator._owned("root-1", "owner-session")
+            assert root.batch_ligands[0]["sdf_bytes"] == prepared["sdf_bytes"]
+            await coordinator.confirm_parameters(**confirmation_args(result))
+            proof = await batch_preview(coordinator, root, root.accepted_revision)
+            assert proof["ligands"] == rows and not root.batch_submitting
+            await coordinator.close_root(root_id="root-1", owner_session_id="owner-session")
+    asyncio.run(run())
+
+
 def test_batch_selection_prepares_one_receptor_and_every_ligand_once(tmp_path, target_case, monkeypatch):
     rig, pointer = source_rig(tmp_path, target_case)
     monkeypatch.setattr(source_preparation, "_source_candidate", _complete_source_child)

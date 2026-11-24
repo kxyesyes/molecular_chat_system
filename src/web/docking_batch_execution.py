@@ -49,7 +49,7 @@ class HomeDockingBatchExecution:
             if self._closing or self.runtime._closing:
                 raise DockingConsentError("consent_policy_unavailable")
             ordinals = [r["ordinal"] for r in ligands]
-            if (not 2 <= len(ligands) <= get_int_env("MEDCHAT_DOCKING_MAX_BATCH_LIGANDS", 100)
+            if (not 1 <= len(ligands) <= get_int_env("MEDCHAT_DOCKING_MAX_BATCH_LIGANDS", 100)
                     or len(set(ordinals)) != len(ordinals)
                     or any(type(n) is not int or n < 1 for n in ordinals)
                     or receptor_name != "receptor.pdb"):
