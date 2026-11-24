@@ -74,7 +74,9 @@
   function updateScientificReferenceSelection(outgoing) {
     const selected = outgoing?.selection || null;
     document.querySelectorAll(".molecule-selection-button").forEach(button => {
-      const isSelected = Boolean(selected
+      const presentation = button.getAttribute("data-presentation-id");
+      button.disabled = !scientificReferences.isConfirmed(presentation);
+      const isSelected = Boolean(selected && presentation === outgoing.reference.presentation_id
         && button.getAttribute("data-observation-id") === selected.observation_id
         && button.getAttribute("data-candidate-id") === selected.candidate_id);
       button.textContent = isSelected ? "已选择" : "选择此分子";
@@ -83,6 +85,8 @@
       button.style.color = isSelected ? "#047857" : "#475569";
       button.style.border = isSelected ? "1px solid #10b981" : "1px solid #cbd5e1";
       button.style.fontWeight = isSelected ? "600" : "500";
+      button.style.cursor = button.disabled ? "default" : "pointer";
+      button.style.opacity = button.disabled ? "0.6" : "1";
     });
   }
 
@@ -3626,6 +3630,8 @@
         const selectBtn = document.createElement("button");
         selectBtn.type = "button";
         selectBtn.className = "molecule-selection-button";
+        selectBtn.disabled = true;
+        selectBtn.setAttribute("data-presentation-id", payload.reference.presentation_id);
         selectBtn.style.cssText = `
           flex: 1;
           background: #fff;
@@ -3634,7 +3640,8 @@
           border-radius: 6px;
           padding: 8px 12px;
           font-size: 12px;
-          cursor: pointer;
+          cursor: default;
+          opacity: 0.6;
           font-weight: 500;
         `;
         const compoundKey = payload.reference.ordered_keys.find(k => k[1] === candidate.candidate_id);

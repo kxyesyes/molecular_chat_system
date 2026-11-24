@@ -1350,6 +1350,29 @@ async function run() {
     assert.equal(buttons[1].textContent, "已选择");
     assert.equal(buttons[1].getAttribute("aria-pressed"), "true");
   });
+  await test("only cards from a confirmed current presentation are selectable", async () => {
+    let resolveAck;
+    const h = loadHome({request: () => new Promise(resolve => {resolveAck = resolve;})});
+    h.ready("pi"); start(h);
+    h.socket.emit(result("partial")); h.socket.emit(candidateEvent()); h.socket.emit(complete("partial"));
+    await tick();
+    const old = h.body.querySelectorAll(".molecule-selection-button")[0];
+    assert(old.disabled);
+    resolveAck({confirmed: true}); await tick();
+    assert(!old.disabled); old.click();
+    const nextTurn = "4".repeat(32), nextTrace = "5".repeat(32);
+    h.input.value = "重新生成两个候选"; h.send(); h.socket.emit(accepted(nextTurn, nextTrace));
+    const batch = candidateEvent(nextTrace);
+    batch.reference.presentation_id = "22222222-2222-4222-8222-222222222222";
+    h.socket.emit(result("partial", nextTurn, nextTrace)); h.socket.emit(batch);
+    h.socket.emit(complete("partial", nextTurn, nextTrace)); await tick();
+    const fresh = h.body.querySelectorAll(".molecule-selection-button").at(-2);
+    assert(old.disabled && fresh.disabled);
+    resolveAck({confirmed: true}); await tick(); fresh.click();
+    assert(old.disabled && !fresh.disabled);
+    assert.equal(old.getAttribute("aria-pressed"), "false");
+    assert.equal(fresh.getAttribute("aria-pressed"), "true");
+  });
   for (const fault of ["detached", "partial"]) await test(`${fault} candidate mount cannot ACK`, async () => {
     const h = loadHome(); h.ready("pi"); start(h); h.socket.emit(result("partial"));
     const event = candidateEvent(); h.socket.emit(event);

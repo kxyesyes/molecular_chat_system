@@ -58,6 +58,7 @@
               if (ticket !== epoch) return;
               if (result?.confirmed !== true) throw Error("unconfirmed");
               collection.confirmed = true;
+              changed();
             } catch (_) {if (ticket === epoch) onStatus(unavailable);}
           })());
         } catch (_) {onStatus(unavailable);}
@@ -99,7 +100,8 @@
         if (ticket === epoch && selectedAtStart === selectionRevision) {clear(); onStatus("科研引用无法恢复，请重新选择候选。");}
       }
     }
-    return {clear, startRequest, select, present, restore, outgoing};
+    return {clear, startRequest, select, present, restore, outgoing,
+      isConfirmed: id => collections.get(id)?.confirmed === true};
   }
   root.HomeScientificReferences = {createController};
 })(window);
