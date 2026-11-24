@@ -1981,6 +1981,8 @@ def test_batch_admet_missing_endpoint_is_partial_for_each_molecule(tmp_path):
 
 @pytest.mark.parametrize('failed_index', [0, 1])
 def test_partial_admet_comparison_retains_successful_molecule_and_property_rows(tmp_path, failed_index):
+    from src.agent.persistence.result_details import read_result_details
+
     class EndpointBackend(FakeBackend):
         def predict_batch(self, smiles, molecule_ids):
             rows = super().predict_batch(smiles, molecule_ids)
@@ -1996,7 +1998,7 @@ def test_partial_admet_comparison_retains_successful_molecule_and_property_rows(
         SQLiteAgentStateStore(tmp_path / 'partial-comparison.sqlite'), model=PlannedWebModel())
     try:
         _, frames = run_web_turn(handler, '请比较 CCO 和 CCN 的分子量、logP 和 ADMET，并列出各自的 hERG 预测值。',
-                                 result_format='summary_details_v1')
+                                 result_format='summary_details_v1', session='mixed-admet')
         result = result_of(frames)
         assert result['status'] == 'partial' and not result['success']
         text = result['display_answer']
@@ -2005,14 +2007,23 @@ def test_partial_admet_comparison_retains_successful_molecule_and_property_rows(
         cells = next(line for line in text.splitlines() if line.startswith('| hERG |')).split('|')[2:-1]
         assert '失败' in cells[failed_index] and '0.2346' in cells[1 - failed_index]
         assert '0.2346' not in cells[failed_index]
+        ref = result['details']
+        details = read_result_details(handler.decision_runtime.store, result['trace_id'],
+            session_id='mixed-admet', view_id=ref['view_id'], revision=ref['revision'])
+        step = details['payload']['tool_result_sequence'][1]
+        assert step.get('verified_partial_rows') is True
+        assert step['status'] == 'partial' and step['error']
+        assert step['data'][failed_index]['status'] == 'failed'
         assert backend.calls == [(['CCO', 'CCN'], ['molecule-001', 'molecule-002'])]
     finally:
         handler.agent_system.tool_registry.close()
 
 
 def test_partial_admet_rejects_stale_or_reordered_observations():
+    from src.agent.contracts import AgentResult, RunOutcome
     from src.agent.validators.partial_observations import has_usable_observation, verified_mixed_admet
     from src.system.tool_adapter import execute_tool_compat
+    from src.web.result_details_projection import project_result_details
 
     tool = ADMETPredictor(backend=FakeBackend(fail_ids={'molecule-002'}))
     try:
@@ -2021,8 +2032,14 @@ def test_partial_admet_rejects_stale_or_reordered_observations():
         assert verified_mixed_admet(item, 'CCO\nCCN')
         assert not has_usable_observation(item)  # Display cannot authorize dependent calculations.
         assert not verified_mixed_admet(item, 'CCN\nCCO')
-        assert not verified_mixed_admet(replace(item, provenance=replace(item.provenance, output_digest='stale')),
-                                        'CCO\nCCN')
+        stale = replace(item, provenance=replace(item.provenance, output_digest='stale'))
+        assert not verified_mixed_admet(stale, 'CCO\nCCN')
+        for observation, expected in [(stale, 'CCO\nCCN'), (item, 'CCN\nCCO')]:
+            result = AgentResult('mixed-admet', False, '', tool_results=[observation], outcome=RunOutcome.PARTIAL,
+                metadata={'scientific_plan_status': 'ready', 'scientific_plan': {'smiles': expected}})
+            detail = project_result_details(result, summary='', status='partial', error=None, warnings=[])
+            step, = detail['tool_result_sequence']
+            assert 'verified_partial_rows' not in step and step['status'] == 'partial'
     finally:
         tool.close()
 
