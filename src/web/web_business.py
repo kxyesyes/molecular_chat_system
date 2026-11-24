@@ -617,10 +617,16 @@ class WebTurnProjection:
             if descriptor is not None:
                 self.entry.update(descriptor.pop('history_update', {}))
                 return descriptor
-        if enable_tools and re.fullmatch(r'\s*(?:请)?(?:重新|再)(?:计算|算)(?:一次|一遍)[。.!！]?\s*', self.query):
+        repeat = re.fullmatch(
+            r'\s*(?:请)?(?:(?:把|将)?(?:它|(?:这|那)个分子|该分子|所选分子)的\s*'
+            r'(?P<metric>分子量|MW|log\s*P)\s*)?(?:重新|再)(?:计算|算)(?:一次|一遍)[。.!！]?\s*',
+            self.query, re.I)
+        if enable_tools and repeat:
             prior = property_comparison.descriptor_context(self.history, self.session_id)
             evidence = prior.get('property_evidence')
             metric = {'molecular_weight': '分子量', 'logp': 'LogP'}.get(prior.get('descriptor_metric'))
+            if repeat['metric']:
+                metric = 'LogP' if repeat['metric'].lower().startswith('log') else '分子量'
             if evidence and (metric or evidence.get('requested_metrics')):
                 self.repeated_batch = prior.get('batch_property_evidence')
                 fields = metric or ' 和 '.join('分子量' if key == 'mw' else 'LogP'
