@@ -860,6 +860,37 @@ def test_workflow_score_penalizes_order_and_fabrication():
     assert unsafe["anti_hallucination"] == 0
 
 
+def test_contract_grades_required_stages_and_forbidden_tools(monkeypatch):
+    from dataclasses import replace
+    from scripts import run_agent_acceptance as acceptance
+
+    def cases(path):
+        original = load_cases(path)
+        if path.name != 'workflow_cases.jsonl':
+            return original
+        case = next(item for item in original if item.case_id == 'WF-003')
+        steps = case.expected_steps
+        return [
+            case,
+            replace(case, case_id='missing-repeat', expected_steps=[*steps, steps[-1]]),
+            replace(case, case_id='wrong-order', expected_steps=list(reversed(steps))),
+            replace(case, case_id='forbidden', forbidden_tools=[steps[0]]),
+            replace(case, case_id='extra-allowed', expected_steps=[steps[0], steps[-1]]),
+            replace(case, case_id='unordered', expected_steps=[], expected_tools=list(reversed(steps))),
+        ]
+
+    monkeypatch.setattr(acceptance, 'load_cases', cases)
+    report = acceptance.run_contract()
+    results = {item['case_id']: item for item in report['results']}
+    assert results['WF-003']['status'] == 'passed'
+    assert results['missing-repeat']['details']['completion'] < 2
+    for key in ('missing-repeat', 'wrong-order', 'forbidden'):
+        assert results[key]['status'] == 'failed', key
+    for key in ('extra-allowed', 'unordered'):
+        assert results[key]['status'] == 'passed', key
+    assert report['status'] == 'failed'
+
+
 def test_chemistry_metrics_measure_validity_uniqueness_and_count():
     metrics = chemistry_metrics(["CCO", "CCO", "not-a-smiles"], requested_count=3)
 

@@ -291,7 +291,7 @@ def test_connection_ready_advertises_only_closed_preparation_facts(tmp_path, mon
 
 @asynccontextmanager
 async def source_receiver(tmp_path, target, monkeypatch, *, owner='owner-session',
-                          fail_complete=False, result_status='completed'):
+                          fail_complete=False, result_status='completed', has_structure=True):
     """Actual handlers/turns; only agent execution is a synthetic accepted result."""
     from src.agent.contracts import AgentResult, ToolResult, ToolProvenance, RunOutcome
     from src.agent.pi_runtime.runtime import PiAgentRuntime
@@ -324,8 +324,8 @@ async def source_receiver(tmp_path, target, monkeypatch, *, owner='owner-session
         quality=observation['quality'], evidence=observation['evidence'],
         provenance=ToolProvenance.from_dict(observation['provenance']))
     result = AgentResult('target-trace', raw['success'], 'Synthetic accepted structure result',
-        final_answer=raw['final_answer'], tool_results=[tool], outcome=RunOutcome(result_status))
-    assert result.to_legacy_dict()['tool_result_sequence'] == target.agent['tool_result_sequence']
+        final_answer=raw['final_answer'], tool_results=[tool] if has_structure else [], outcome=RunOutcome(result_status))
+    assert result.to_legacy_dict()['tool_result_sequence'] == (target.agent['tool_result_sequence'] if has_structure else [])
     async def bridge(sender, **kwargs):
         assert isinstance(kwargs['decision_loop'], PiAgentRuntime)
         for frame in _result_frame(handler, result, False):
@@ -404,6 +404,19 @@ def test_failed_or_undelivered_actual_result_never_captures_source(
                 await case.socket.until(lambda f: f['type'] == 'complete')
                 await case.socket.send({'type': 'ping'})
                 await case.socket.until(lambda f: f['type'] == 'pong')
+            assert not case.captures
+    asyncio.run(run())
+
+
+def test_delivered_ordinary_turn_accepts_immediate_followup_with_chat_docking_enabled(tmp_path, target_case, monkeypatch):
+    async def run():
+        async with source_receiver(tmp_path, target_case, monkeypatch, has_structure=False) as case:
+            await case.socket.send({'message': '解释分子量', 'enable_rag': False})
+            await case.socket.until(lambda f: f['type'] == 'complete')
+            await case.socket.send({'message': '再解释一下', 'enable_rag': False})
+            frame = await case.socket.until(lambda f: f['type'] in {'error', 'request_accepted'})
+            assert frame['type'] == 'request_accepted', frame
+            await case.socket.until(lambda f: f['type'] == 'complete')
             assert not case.captures
     asyncio.run(run())
 

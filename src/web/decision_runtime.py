@@ -82,7 +82,8 @@ def _should_compile_scientific_plan(envelope):
 
 def _batch_property_rows_match(plan, rows):
     from rdkit import Chem
-    if not isinstance(rows, list) or len(rows) != len(plan.canonical_smiles.split('\n')):
+    expected = plan.canonical_smiles.split('\n')
+    if not isinstance(rows, list) or len(rows) != len(expected):
         return False
     identities = []
     for row in rows:
@@ -92,7 +93,11 @@ def _batch_property_rows_match(plan, rows):
         if molecule is None:
             return False
         identities.append(Chem.MolToSmiles(molecule))
-    return identities == plan.canonical_smiles.split('\n')
+    # A single descriptor table carries its own SMILES per row. Multi-tool
+    # workflows still require positional alignment across their observations.
+    if plan.required_tools == ('property_calculator',) and len(set(expected)) == len(expected):
+        return set(identities) == set(expected)
+    return identities == expected
 
 
 def _oral_explanation_has_candidate_claim(text):
@@ -2152,7 +2157,8 @@ class WebDecisionRuntime:
                         [{'user': turn.payload.get('message', ''), 'agent_used': False}])
                 if (_enabled_docking_controller(handler, self) is not None
                         and type(result) is AgentResult and result.success is True
-                        and result.outcome == RunOutcome.COMPLETED):
+                        and result.outcome == RunOutcome.COMPLETED
+                        and any(item.tool_name == 'target_database_search' for item in result.tool_results)):
                     # The actual bridge return is authoritative, not a model
                     # frame. Its legacy dictionary omits the server trace.
                     turn.docking_result = {**result.to_legacy_dict(), 'trace_id': turn.trace_id}
@@ -2449,9 +2455,11 @@ class WebDecisionRuntime:
                 if controller is not None and kind in {'docking_refine', 'docking_watch'}:
                     if await controller.handle(sender, payload):
                         continue
+                # Only a pending structure handoff still owns this socket after
+                # the terminal frame. Ordinary follow-ups can use committed history.
                 if (turn is not None and not turn.task.done()
                         and (not turn.terminal_sent
-                             or controller is not None and not turn.allocation_timed_out)):
+                             or turn.docking_result is not None and not turn.allocation_timed_out)):
                     await sender.send({'type': 'error', 'code': 'turn_in_progress'})
                     continue
                 if turn is not None and turn.task.done():

@@ -388,21 +388,6 @@ class ActivityPredictor:
             logger.warning(f"Featurization failed for {smi}:\n{error_msg}")
             return None
 
-    def _predict_demo(self, smiles_list: List[str]) -> List[Dict[str, Any]]:
-        """Return an explicit failure when no validated RG-MPNN model is loaded."""
-        reason = self.model_unavailable_reason or (
-            "RG-MPNN model weights are unavailable; no prediction was calculated."
-        )
-        return [
-            {
-                "smiles": smi,
-                "success": False,
-                "error": reason,
-                "note": "Model unavailable",
-            }
-            for smi in smiles_list
-        ]
-
     def _predict_task_aware(
         self, smiles: Union[str, List[str]]
     ) -> List[Dict[str, Any]]:
