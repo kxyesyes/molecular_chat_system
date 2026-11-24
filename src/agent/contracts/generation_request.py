@@ -681,19 +681,6 @@ def _analysis_has_generation_intent(
         for occurrence in analysis.occurrences
     )
 
-def _matches_generation_grammar(
-    value: str,
-    *,
-    active_molecular_skill: bool = False,
-) -> bool:
-    occurrences = _collect_generation_occurrences(value)
-    return any(
-        active_molecular_skill
-        or _occurrence_has_molecular_scope(value, occurrence)
-        for occurrence in occurrences
-    )
-
-
 _GENERIC_CREATION_VERB = re.compile(
     rf"(?i)\b{_GENERATION_VERB}\b"
 )
@@ -834,14 +821,6 @@ def _occurrence_has_molecular_scope(
     )
 
 
-def _actionable_generation_clauses(query: str) -> list[str]:
-    unquoted = _strip_generation_literals(query)
-    return [
-        _mask_non_actionable_generation_occurrences(clause)
-        for clause in _split_generation_clauses(unquoted)
-    ]
-
-
 def _strip_generation_literals(query: str) -> str:
     normalized = unicodedata.normalize("NFKC", str(query))
     normalized = re.sub(r"(?i)\be\.g\.", "for example", normalized)
@@ -857,73 +836,6 @@ def _strip_generation_literals(query: str) -> str:
         without_code,
     )
     return unquoted
-
-
-def _split_generation_clauses(value: str) -> list[str]:
-    protected_spans = [
-        (occurrence.start, occurrence.end)
-        for occurrence in _collect_generation_occurrences(value)
-    ]
-    protected_index = 0
-
-    separated: list[str] = []
-    for index, character in enumerate(value):
-        while (
-            protected_index < len(protected_spans)
-            and index >= protected_spans[protected_index][1]
-        ):
-            protected_index += 1
-        protected = (
-            protected_index < len(protected_spans)
-            and protected_spans[protected_index][0]
-            <= index
-            < protected_spans[protected_index][1]
-        )
-        if protected:
-            separated.append(character)
-            continue
-        if character == "+":
-            suffix = value[index + 1 :].lstrip()
-            is_numeric_sign = bool(re.match(r"(?:\d|\.)", suffix))
-            separated.append(character if is_numeric_sign else "\n")
-            continue
-        if character in ";；!?。！？\r\n、":
-            separated.append("\n")
-            continue
-        if character in ",，":
-            before = value[index - 1] if index else ""
-            after = value[index + 1] if index + 1 < len(value) else ""
-            prefix = value[:index].rstrip().casefold()
-            introduces_example = bool(
-                re.search(
-                    r"(?:for example|as an? example|such as|例如|比如)$",
-                    prefix,
-                )
-            )
-            separated.append(
-                character
-                if (
-                    before.isdigit() and after.isdigit()
-                ) or introduces_example
-                else "\n"
-            )
-            continue
-        if character == ".":
-            separated.append("\n")
-            continue
-        separated.append(character)
-
-    return re.split(
-        r"(?i)\n+|\b(?:but|instead)\b|(?:但是|而是|但|只)",
-        "".join(separated),
-    )
-
-
-def _generation_occurrence_spans(value: str) -> list[tuple[int, int]]:
-    return [
-        (occurrence.start, occurrence.end)
-        for occurrence in _collect_generation_occurrences(value)
-    ]
 
 
 def _mask_non_actionable_generation_occurrences(
