@@ -19,7 +19,7 @@ from src.agent.evidence_followup import comparison_tools, ranking_requested, _re
 from src.agent.property_constraints import requested_property_bounds
 
 from . import request_parsing, step_templates, workflow_selection
-from src.target_search.exact_pdb import has_pdb_constraint
+from src.target_search.exact_pdb import has_pdb_constraint, parse_gene_structure_lookup
 
 
 @dataclass
@@ -104,6 +104,8 @@ class TaskPlanner:
                 # Preserve both the constraint and any qualification/conflict
                 # for deterministic tool validation, not only a target hint.
                 search_input = lookup_query
+            elif exact_gene := parse_gene_structure_lookup(lookup_query):
+                search_input = exact_gene
             return WorkflowPlan(
                 workflow_name="target_database_search",
                 steps=[

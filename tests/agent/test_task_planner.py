@@ -930,6 +930,16 @@ def test_target_search_plan_uses_extracted_target_hint():
     assert plan.metadata["input_type"] == "target_hint"
 
 
+def test_target_search_plan_keeps_exact_structure_and_species_with_known_gene():
+    plan = TaskPlanner().plan(AgentContext(
+        query="查找小鼠 Egfr 的晶体结构 1abc。",
+        trace_id="trace-gene-structure", active_skill="target_database_search",
+    ))
+    assert plan.steps[0].input_data == {
+        "gene_symbol": "EGFR", "pdb_id": "1ABC", "organism": "Mus musculus",
+    }
+
+
 def test_docking_plan_uses_structured_metadata_when_available():
     docking_input = {
         "receptor_path": "data/samples/MAGL_5zun.pdb",

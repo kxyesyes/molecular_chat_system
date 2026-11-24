@@ -6,6 +6,11 @@ _LABEL = re.compile(r"(?<![A-Za-z0-9_-])PDB(?:\s+ID)?(?:\s*[:：=]\s*|\s+(?=[0-9
 # Recognize compact labels only to reject qualified input, never as new syntax.
 _COMPACT_LABEL = re.compile(r"(?<![A-Za-z0-9_-])PDB(?:\s+ID)?(?=[0-9])", re.I)
 _VALUE = re.compile(r"([0-9][A-Za-z0-9]{3})(?=$|[\s、，,;；。)）\]}]|[.!！?？](?:\s|$))")
+_GENE_STRUCTURE = re.compile(
+    r"\s*(?:请\s*)?(?:查找|查询|检索|搜索)\s*(人源|人类|小鼠源?)?\s*"
+    r"([A-Za-z][A-Za-z0-9-]*)\s*的\s*(?:实验|晶体)结构\s*"
+    r"([1-9][A-Za-z0-9]{3})\s*[。.！!]?\s*"
+)
 _QUALIFIED = re.compile(r"不(?:要|是|查)|勿|别|而非|而是|排除|改(?:为|用)|换成|\b(?:not|except|exclude|instead|without)\b", re.I)
 # Exempt only a complete negative docking instruction, not arbitrary negation.
 # A following lookup needs its own clause and affirmative operation; shared
@@ -21,6 +26,17 @@ def normalize_pdb_id(value):
     if type(value) is not str or re.fullmatch(r"[0-9][A-Za-z0-9]{3}", value.strip()) is None:
         raise ValueError("invalid_pdb_constraint")
     return value.strip().upper()
+
+
+def parse_gene_structure_lookup(query):
+    """A bare code denotes a PDB only in a complete gene/structure request."""
+    match = _GENE_STRUCTURE.fullmatch(query) if isinstance(query, str) else None
+    if not match or match[3].isdigit():
+        return None
+    lookup = {"gene_symbol": match[2].upper(), "pdb_id": match[3].upper()}
+    if match[1]:
+        lookup["organism"] = "Mus musculus" if match[1].startswith("小鼠") else "Homo sapiens"
+    return lookup
 
 
 def has_pdb_constraint(query):
