@@ -20,6 +20,7 @@ Pi 入口核对日期：2026-10-23。当前分支的网页通用 Agent 唯一运
 
 接手首页时，可以从以下用户操作追踪输入和结果的去向。
 
+- 靶点检索后立即追问对接时，首页在收到 `complete` 后展示结果。仅当 `metadata.structure_handoff_pending` 为 `true` 时，保留输入草稿并等待同一连接、同一 `turn_id` 和 `trace_id` 的 `followup_ready`，再开放发送。该事件只表示可以继续提问。受体是否可用取决于本会话的结构核验，运行 Vina 仍需确认。[服务端交接](../src/web/decision_runtime.py) · [浏览器回归](../tests/home_decision_runtime_test.js)
 - 同一条回复显示两批候选，点击“候选 32”后要求计算 logP，见[从卡片追到工具输入](#从卡片追到工具输入)。
 - 比较分子后追问“哪一个的 logP 更低？”时，从 [WebTurnProjection.followup](../src/web/web_business.py) 进入 [batch_property_followup](../src/web/property_comparison.py)，这里读取上轮已核验的分子、顺序和数值。运行 [test_short_lower_logp_followup_uses_the_displayed_pair](../tests/agent/test_web_scientific_execution.py) 可核对页面回答和工具调用次数。
 - 上传两个同名文档后，对其中一份提问时，从 [workspace_routes.py 的 ask](../src/web/routes/workspace_routes.py) 跟踪 `doc_id`。运行 [test_same_named_uploads_keep_their_source_in_project_and_history](../tests/test_home_workspace.py) 可核对送给模型的文档内容、项目详情及历史记录中的来源。
