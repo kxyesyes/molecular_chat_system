@@ -77,7 +77,8 @@ test("停止知识咨询后可在原会话重试并继续计算分子性质", as
   assert.match(stopped.text, /已取消/);
   const retried = await ask(question);
   assert.notEqual(stopped.traceId, retried.traceId);
-  assert.match(retried.text, /亲脂|脂溶|疏水|油水/);
+  assert.match(retried.text, /logP|分配系数/i);
+  assert.match(retried.text, /亲[脂油]|脂溶|疏水|(?:油|有机相).{0,12}水/);
   const result = await ask("请计算 CCO 的分子量。", ["property_calculator"]);
   const [row] = result.outputs[0].data;
   assert.equal(row.smiles, "CCO");
