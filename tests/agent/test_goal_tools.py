@@ -183,3 +183,31 @@ def test_accession_with_many_structures_reuses_verified_experimental_metrics(mon
         assert fact["experimental_structure_preview"][0] == {"pdb": "1A24", "resolution_A": 2.76}
     finally:
         registry.close()
+
+
+@pytest.mark.parametrize("count,expected_ok", [(2, True), (3, False)])
+def test_complete_fresh_accession_cache_without_local_target_id(monkeypatch, count, expected_ok):
+    from src.agent.tools.target_database_tool import TargetDatabaseTool
+    from src.web.goal_tools import GoalTools
+
+    class Service:
+        def search_targets(self, query, **kwargs):
+            rows = [dict(structure_id=pdb, source="RCSB_PDB", structure_type="experimental",
+                         resolution=value, stale=False) for pdb, value in [("1ABC", 2.5), ("2ABC", 2.0)]]
+            return {"status": "resolved", "results": [{"target_id": None, "uniprot_id": query,
+                    "structure_evidence_status": "fresh", "structures_stale": False, "source": "UniProt",
+                    "structure_count": count, "recommended_structures": rows}]}
+
+    lookup = TargetDatabaseTool()
+    monkeypatch.setattr(lookup, "_get_service", lambda: Service())
+    registry = build_tool_registry([lookup])
+    try:
+        tools = GoalTools(registry)
+        result = tools.execute(tools.bind(lookup.name, {"uniprot_id": "P06276"}, user_texts=["P06276"]))
+        assert result["ok"] is expected_ok
+        if expected_ok:
+            fact, = result["facts"]
+            assert fact["comparable_structure_count"] == 2
+            assert [r["pdb"] for r in fact["experimental_structure_preview"]] == ["2ABC", "1ABC"]
+    finally:
+        registry.close()

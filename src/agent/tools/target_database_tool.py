@@ -280,8 +280,17 @@ class TargetDatabaseTool(BaseMolecularTool):
                             if isinstance(structure, dict)
                         ]
                         if resolution_limit is not None and target_id in (None, ""):
-                            recommended_structures = []
-                            result["warnings"].append("未取得靶点记录标识，无法核对结构列表和分辨率排序。")
+                            # Authoritative accession lookups carry the full cached list inline.
+                            if (target.get("structure_evidence_status") == "fresh"
+                                    and target.get("structures_stale") is False
+                                    and target.get("structure_count") == len(recommended_structures)
+                                    and isinstance(target.get("recommended_structures"), list)):
+                                target["searched_structure_count"] = len(recommended_structures)
+                                recommended_structures, target["comparable_structure_count"] = resolution_preview(
+                                    recommended_structures, resolution_limit)
+                            else:
+                                recommended_structures = []
+                                result["warnings"].append("未取得完整结构列表，无法核对分辨率排序。")
                         if target_id not in (None, ""):
                             try:
                                 structure_payload = service.get_target_structures(
