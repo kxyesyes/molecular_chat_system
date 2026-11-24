@@ -34,6 +34,19 @@ _NO_TOOLS = re.compile(
     r'(?:any\s+)?(?:scientific\s+)?tools', re.I)
 
 
+def selected_activity_values_requested(query):
+    """Match a complete request for the selected row's two prediction values."""
+    clauses = [part.strip() for part in re.split(r'[。！？!?；;，,\n]', query)]
+    request = '，'.join(part for part in clauses if part and not _NO_TOOLS.fullmatch(part))
+    return re.fullmatch(
+        r'(?:请问|请)?(?:复述|列出|给出|显示|查看)?\s*(?:刚才|当前)?(?:选中|所选)(?:的)?'
+        r'(?:那|这)?(?:一?个)?(?:候选分子|分子|候选|行)的\s*(?:SMILES\s*[、，和与及]\s*)?'
+        r'(?:活性概率\s*(?:、|，|和|与|及)\s*(?:预测\s*)?pIC50|'
+        r'(?:预测\s*)?pIC50\s*(?:、|，|和|与|及)\s*活性概率)'
+        r'\s*(?:(?:各|分别)?是多少)?(?:，(?:两项|两个)?(?:数值)?(?:都|均)?保留(?:四|4)位有效数字)?',
+        request, re.I) is not None
+
+
 def tool_free_consultation_requested(query):
     if not isinstance(query, str):
         return False

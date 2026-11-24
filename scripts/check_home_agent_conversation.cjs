@@ -180,8 +180,10 @@ test("首页模型解释后仍沿用当前分子、单位和同次靶点记录",
   const explanation = await activity("请用自己的话解释刚才选中的那个分子，写出它的 SMILES，并说说两项预测为什么需要复核。");
   assert.ok(explanation.text.includes(selected.smiles) && /复核|不一致/.test(explanation.text), explanation.text);
   const values = await activity("不要调用任何工具。请复述刚才选中的分子的 SMILES、活性概率和预测 pIC50，两项数值都保留四位有效数字。",
-    [], ["completed", "partial"]);
+    [], selected.classification_regression_consistent ? "completed" : "partial");
   assert.ok(values.text.includes(selected.smiles));
+  assert.ok(!values.text.includes(rows[0].smiles), values.text);
+  assert.equal(values.text.includes("需复核"), !selected.classification_regression_consistent);
   assert.ok(values.text.includes(selected.predicted_pIC50.toPrecision(4)), values.text);
   assert.ok(values.text.includes(selected.activity_probability.toPrecision(4)) ||
     values.text.includes((selected.activity_probability * 100).toPrecision(4) + "%"), values.text);

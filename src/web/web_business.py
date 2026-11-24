@@ -526,6 +526,25 @@ class WebTurnProjection:
                 context['selected_smiles'] = order[position - 1]
         return context
 
+    def selected_activity_values(self):
+        from src.agent.activity_evidence_inspection import inspection_answer
+        previous = self.history[-1] if self.history else {}
+        evidence = previous.get('activity_evidence')
+        if (not self.session_id or not evidence or evidence.get('session_id') != self.session_id
+                or not evidence.get('trace_id')):
+            return {'content': '本会话没有可核对的活性预测记录。', 'status': 'not_calculated'}
+        order = previous.get('activity_display_order', ())
+        position = previous.get('activity_position')
+        if position is None or not 1 <= position <= len(order):
+            self.entry['activity_evidence'] = evidence
+            self._retain_activity_selection()
+            return {'content': '请先指定本批分子的序号或 SMILES。', 'status': 'not_calculated'}
+        view = inspection_answer(evidence, {'selectors': [order[position - 1]], 'all': False, 'brief': True})
+        if 'activity_evidence' in view:
+            self.entry['activity_evidence'] = view['activity_evidence']
+            self._retain_activity_selection()
+        return {'content': view['final_answer'], 'status': view['status']}
+
     def followup(self, *, enable_tools, enable_rag=False, resolve_selection=None, activity_history=None):
         if self.mixed_activity_discussion:
             return None

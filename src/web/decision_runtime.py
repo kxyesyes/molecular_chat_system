@@ -34,7 +34,8 @@ from src.agent.contracts.ordinary_admission import (
 )
 from src.agent.decision_transport import IntentJournal
 from src.agent.contracts.consultation_request import (
-    asks_about_given_information, mentions_assay_concentration, tool_free_consultation_requested)
+    asks_about_given_information, mentions_assay_concentration, selected_activity_values_requested,
+    tool_free_consultation_requested)
 from src.agent.pi_runtime.runtime import PiAgentRuntime
 from src.agent.scientific_session.decision_history import HistoryUpdate, history_pairs, history_prefix, retain_history_pair
 from src.agent.scientific_session.decision_inputs import (
@@ -1566,11 +1567,16 @@ class WebDecisionRuntime:
             # only be consulted by a readback explicitly scoped to a named batch.
             activity_history = (sender.scientific_memory[:-1]
                                 if envelope.reference is None and envelope.selection is None else None)
-            followup = None if turn.tool_free_consultation else await settle_owned_call(
-                lambda: projection.followup(enable_tools=envelope.enable_tools, enable_rag=envelope.enable_rag,
-                    activity_history=activity_history,
-                    resolve_selection=resolve_selection if envelope.selection is not None else None),
-                worker_owner=turn.worker_owner)
+            followup = None
+            if (envelope.reference is None and envelope.selection is None
+                    and selected_activity_values_requested(envelope.query)):
+                followup = await settle_owned_call(projection.selected_activity_values, worker_owner=turn.worker_owner)
+            elif not turn.tool_free_consultation:
+                followup = await settle_owned_call(
+                    lambda: projection.followup(enable_tools=envelope.enable_tools, enable_rag=envelope.enable_rag,
+                        activity_history=activity_history,
+                        resolve_selection=resolve_selection if envelope.selection is not None else None),
+                    worker_owner=turn.worker_owner)
             if turn.cancel_event.is_set():
                 raise asyncio.CancelledError()
             if followup is not None:
