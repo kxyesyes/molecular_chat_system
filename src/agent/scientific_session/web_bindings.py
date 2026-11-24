@@ -33,6 +33,13 @@ _ERROR = 'invalid_dynamic_binding'
 _RECORD_LIMIT = 512 * 1024
 
 
+def has_web_workflow_output(result):
+    eligible = (usable(result) if result.tool_name in ('rag_search', 'reverse_target_predictor')
+                else has_usable_observation(result))
+    return bool(eligible and result.provenance and not (
+        result.provenance.demo_mode or result.provenance.fallback_used))
+
+
 def _wire(value, limit=65536):
     validate_json(value, max_bytes=limit, max_nodes=65536 if limit == _RECORD_LIMIT else 16384, reason=_ERROR)
     return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
@@ -277,10 +284,7 @@ class WebBindingResolver:
                 raise DecisionBoundaryError(_ERROR)
             completed[ref] = (identity, result)
             step = steps[ref]
-            eligible = (usable(result) if result.tool_name in ('rag_search', 'reverse_target_predictor')
-                        else has_usable_observation(result))
-            if eligible and result.provenance and not (
-                    result.provenance.demo_mode or result.provenance.fallback_used):
+            if has_web_workflow_output(result):
                 if step.output_key:
                     data = deepcopy(result.data)
                     outputs[step.output_key] = (preserve_target_quality(data, result.quality)

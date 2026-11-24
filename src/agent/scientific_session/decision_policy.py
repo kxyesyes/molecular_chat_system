@@ -350,6 +350,11 @@ def decision_system_message(request_kind, required_tools, catalog, requirement_p
         + input_instructions + 'Failed or unavailable tools are not successful science. '
         + agent_role_instruction
         + scientific_concept_guidance + target_context_guidance + candidate_context_guidance + activity_context_guidance
+        + ('For a free-form follow-up, first identify the user\'s goal and whether a supplied record answers it. '
+           'Use only the relevant recorded facts. Ignore unrelated records when the topic changes. '
+           'If several subjects fit and choosing would change the answer, ask one specific question. '
+           'If a necessary measurement is missing, identify it. Do not treat model prose as an observation. '
+           if target_context_guidance or candidate_context_guidance or activity_context_guidance else '')
         + ('This turn is a tool-free consultation. Explain concepts or interpret supplied/accepted records. '
            'Do not invent new candidate-specific computed values, retrieved sources, execution or readiness. '
            'User premises and hypotheses are not verified observations. If a new result is requested, '

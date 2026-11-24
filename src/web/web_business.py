@@ -455,7 +455,29 @@ class WebTurnProjection:
             context['selected_structure_id'] = evidence['selected_structure_id']
         return context
 
-    def model_candidate_context(self):
+    def implicit_records(self):
+        """Offer current verified records for a free-form discussion without resolving its subject."""
+        from src.agent.contracts.concept_request import is_concept_explanation
+        if self.acknowledgement or self.concept_history or is_concept_explanation(self.query):
+            return {}
+        candidate = self.model_candidate_context(implicit=True)
+        if candidate is None:
+            descriptors = property_comparison.descriptor_context(self.history, self.session_id)
+            batch = descriptors.get('batch_property_evidence')
+            single = descriptors.get('property_evidence')
+            rows = batch['rows'] if batch else [single] if single else []
+            if rows:
+                candidate = {'scope': 'last_descriptor_observations', 'candidates': [
+                    {'canonical_smiles': row.get('canonical_smiles') or row['smiles'],
+                     'properties': {key: row[key] for key in ('logp', 'molecular_weight', 'hba', 'hbd')
+                                    if row.get(key) is not None}} for row in rows]}
+                if single:
+                    candidate['selected_smiles'] = single['canonical_smiles']
+        records = {'prior_candidate_context': candidate, 'prior_activity_context': self.model_activity_context(implicit=True),
+                   'prior_target_context': self.model_target_context()}
+        return {key: value for key, value in records.items() if value is not None}
+
+    def model_candidate_context(self, *, implicit=False):
         """Project accepted calculation/prediction facts for ordinary explanations."""
         from src.agent.contracts.consultation_request import selected_row_summary
         if selected_row_summary(self.query):
@@ -467,7 +489,7 @@ class WebTurnProjection:
                     and type(single.get(metric)) in (int, float) and math.isfinite(single[metric])):
                 return {'scope': 'selected_descriptor', 'selected_smiles': smiles,
                         'candidates': [{'canonical_smiles': smiles, 'properties': {metric: single[metric]}}]}
-        if not _PRIOR_RESULT_REFERENCE.search(self.query):
+        if not implicit and not _PRIOR_RESULT_REFERENCE.search(self.query):
             return None
         evidence = self.history[-1].get('candidate_evidence') if self.history else None
         if (not isinstance(evidence, dict) or not self.session_id
@@ -489,9 +511,9 @@ class WebTurnProjection:
             rows.append(row)
         return {'scope': 'last_candidate_observations', 'candidates': rows}
 
-    def model_activity_context(self):
+    def model_activity_context(self, *, implicit=False):
         """Keep accepted activity scope and disagreements attached to their rows."""
-        if not _PRIOR_RESULT_REFERENCE.search(self.query):
+        if not implicit and not _PRIOR_RESULT_REFERENCE.search(self.query):
             return None
         evidence = self.history[-1].get('activity_evidence') if self.history else None
         if (not isinstance(evidence, dict) or not self.session_id
@@ -2280,7 +2302,8 @@ class WebTurnProjection:
                     ('prior_candidate_context', 'candidate_evidence')):
                 record = getattr(context, 'metadata', {}).get(context_key)
                 if record is not None:
-                    if context_key == 'prior_candidate_context' and record.get('scope') == 'selected_descriptor':
+                    if context_key == 'prior_candidate_context' and record.get('scope') in {
+                            'selected_descriptor', 'last_descriptor_observations'}:
                         self.entry['descriptor_carry'] = property_comparison.descriptor_context(self.history, self.session_id)
                     else:
                         self.entry[evidence_key] = deepcopy(self.history[-1][evidence_key])

@@ -38,6 +38,7 @@ def prepare_web_request(payload, *, session_id, trace_id, references=None,
                         scientific_input_max_chars=None,
                         allow_molecular_clarification=False, prior_target_context=None,
                         prior_candidate_context=None, prior_activity_context=None, tool_free_consultation=False,
+                        implicit_records=None,
                         descriptor_repeat_of=None):
     envelope = validate_request_envelope(payload, session_id=session_id, trace_id=trace_id,
                                         config_generation=config_generation)
@@ -119,20 +120,22 @@ def prepare_web_request(payload, *, session_id, trace_id, references=None,
             allowed -= {'rag_search'}
         requirements = compile_web_requirements(context, allowed_tools=allowed)
         required = required_web_tools(requirements)
-        if not required and any(record is not None for record in (
-                prior_target_context, prior_candidate_context, prior_activity_context)):
+        records = {key: value for key, value in (
+            ('prior_target_context', prior_target_context), ('prior_candidate_context', prior_candidate_context),
+            ('prior_activity_context', prior_activity_context)) if value is not None}
+        if (not required and not records and implicit_records is not None
+                and envelope.reference is None and envelope.selection is None):
+            available = implicit_records()
+            # Incidental context cannot crowd out the actual question. Keep the
+            # complete record set or omit it, never silently drop rows or fields.
+            if len(json.dumps(available, ensure_ascii=False, separators=(',', ':'))) <= history_max_chars:
+                records = available
+        if not required and records:
             # A server-owned snapshot supports interpretation only. Seal it in
             # the same immutable request and provider budget as the question.
             projected = plain_json(requirements)
-            if prior_target_context is not None:
-                context.metadata['prior_target_context'] = prior_target_context
-                projected['request']['metadata']['prior_target_context'] = prior_target_context
-            if prior_candidate_context is not None:
-                context.metadata['prior_candidate_context'] = prior_candidate_context
-                projected['request']['metadata']['prior_candidate_context'] = prior_candidate_context
-            if prior_activity_context is not None:
-                context.metadata['prior_activity_context'] = prior_activity_context
-                projected['request']['metadata']['prior_activity_context'] = prior_activity_context
+            context.metadata.update(records)
+            projected['request']['metadata'].update(records)
             # Capacity errors must not masquerade as ambiguous user intent.
             # Validate before context_value's smaller allocation boundary and
             # before the immutable-plan codec turns all errors into one code.

@@ -2014,6 +2014,7 @@ class WebDecisionRuntime:
                                             and turn.scientific_projection.concept_history is not None
                                             else sender.memory),
                                 **projection.readback_contexts,
+                                'implicit_records': projection.implicit_records,
                                 'max_output_tokens': handler._model_max_tokens(model),
                                 'tool_free_consultation': turn.tool_free_consultation,
                                 'descriptor_repeat_of': projection.descriptor_repeat_of,
