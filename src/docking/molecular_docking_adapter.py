@@ -146,7 +146,8 @@ def _docking_lineage(*, receptor_path: Path, ligand_input: str, input_type: str,
 class MolecularDocking(BaseMolecularTool):
     """Synchronous domain adapter around the real docking service."""
 
-    def __init__(self, *, command_scope=None, allowed_output_root=None, chat_toolchain=None):
+    def __init__(self, *, command_scope=None, allowed_output_root=None, chat_toolchain=None, batch_receptor=None):
+        self._batch_receptor = batch_receptor
         if chat_toolchain is not None:
             from src.docking.chat_toolchain import ChatDockingToolchain
             from src.task_runtime.docking_consent import DockingConsentError
@@ -234,6 +235,8 @@ class MolecularDocking(BaseMolecularTool):
                 toolchain.require_current()
                 runtime_config = toolchain.runtime_config()
                 ownership["chat_toolchain"] = toolchain
+                if self._batch_receptor is not None:
+                    ownership["batch_receptor"] = self._batch_receptor
             else:
                 runtime_config = query.get("runtime_config")
             service = MolecularDockingService(config=runtime_config, **ownership)

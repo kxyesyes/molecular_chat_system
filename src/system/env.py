@@ -10,6 +10,13 @@ def chat_docking_enabled() -> bool:
     return os.environ.get("MEDCHAT_CHAT_DOCKING_ENABLED", "1") == "1"
 
 
+def get_int_env(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
 def load_env_file(env_path: str | Path = ".env") -> None:
     """Load simple ``KEY=VALUE`` pairs without overwriting the process env."""
     path = Path(env_path)

@@ -740,7 +740,7 @@ class TaskStore:
 
     def close_chat_docking_draft(
         self, *, preparation_id, owner_session_id, expected_revision, expected_version,
-        task_id, trace_id, origin_turn_id,
+        task_id, trace_id, origin_turn_id, batch_binding_digest=None,
     ) -> bool:
         """Revoke only the exact settled waiting chat draft, after confirmed commit.
 
@@ -783,11 +783,19 @@ class TaskStore:
                 if (any(identity[key] != value for key, value in expected_identity.items())
                         or row["task_id"] != task_id):
                     raise DockingConsentError("consent_binding_mismatch")
+                # Batch approval transfers work to a separate parent record.
+                # Only its originating draft may close beside that parent.
+                # BEGIN IMMEDIATE keeps this ownership check valid through the CAS.
+                owned_batch = batch_binding_digest is not None and conn.execute(
+                    """SELECT 1 FROM home_docking_batches JOIN tasks USING(task_id)
+                    WHERE task_id=? AND task_type='home_docking_batch' AND owner_session_id=?
+                    AND json_extract(manifest_json,'$.binding_digest')=?""",
+                    (task_id, owner_session_id, batch_binding_digest)).fetchone() is not None
                 if (row["state"] != "AWAITING_INPUT" or row["cleanup_state"] != "settled"
                         or row["operation_token"] is not None
                         or row["execution_token"] is not None or row["execution_occupied"] != 0
                         or row["dispatch_state"] != "not_reserved"
-                        or conn.execute("SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone()):
+                        or not owned_batch and conn.execute("SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone()):
                     raise DockingConsentError("consent_not_waiting")
                 changed = conn.execute(
                     """UPDATE docking_consents SET state='REVOKED',version=version+1,
@@ -796,8 +804,8 @@ class TaskStore:
                     AND identity_json=? AND version=? AND draft_json IS NOT NULL
                     AND state='AWAITING_INPUT' AND cleanup_state='settled' AND operation_token IS NULL
                     AND execution_token IS NULL AND execution_occupied=0 AND dispatch_state='not_reserved'
-                    AND NOT EXISTS (SELECT 1 FROM tasks WHERE task_id=?)""",
-                    (preparation_id, owner_session_id, task_id, row["identity_json"], expected_version, task_id),
+                    AND (? OR NOT EXISTS (SELECT 1 FROM tasks WHERE task_id=?))""",
+                    (preparation_id, owner_session_id, task_id, row["identity_json"], expected_version, owned_batch, task_id),
                 ).rowcount
                 if changed != 1:
                     raise DockingConsentError("consent_revision_conflict")
@@ -1112,6 +1120,9 @@ class TaskStore:
     def _docking_stage_protected(self, task_id: str, *, cleanup_token=None) -> bool:
         """Fail-closed orphan seam; only the settled writer's cleanup gets bypass."""
         with connection(self.db_path) as conn:
+            if conn.execute("SELECT 1 FROM home_docking_batch_rows WHERE child_id=?",
+                            (task_id,)).fetchone():
+                return True
             row = conn.execute("SELECT * FROM docking_consents WHERE task_id=?", (task_id,)).fetchone()
         if row is None:
             return False

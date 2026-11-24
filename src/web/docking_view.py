@@ -170,6 +170,7 @@ async def capture_docking_view(coordinator, *, root_id, owner_session_id,
             _deny()
         reason = (view['reason_code'] if status == 'AWAITING_INPUT'
             and view['reason_code'] in _WAIT_REASONS else 'status_' + status.lower())
+        batch = {"batch": view["batch"]} if "batch" in view else {}
         return _detach(dict(type='docking_event', schema='DockingView@1',
             request_id=root_id, root_trace_id=root_id, task_id=identity[0],
             preparation_id=identity[1], origin_turn_id=origin_turn_id,
@@ -177,6 +178,6 @@ async def capture_docking_view(coordinator, *, root_id, owner_session_id,
             phase=phase, segment_complete=drained, terminal=terminal, view_status=status,
             task_status='unavailable', cleanup_status='pending' if pending or not drained else 'settled',
             reason_code=reason, persistence_pending=bool(persistence),
-            missing_fields=missing, preview=preview or None, result=science))
+            missing_fields=missing, preview=preview or None, result=science, **batch))
     except Exception:
         raise ValueError('docking_view_unavailable') from None

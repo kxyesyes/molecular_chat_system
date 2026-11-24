@@ -32,10 +32,16 @@ def _fingerprint(root):
         confirmation=root.confirmation_key, confirmation_revision=root.confirmation_revision,
         preview=root.prepared_preview_json, selection=root.selection,
         source=root.source_result["source"], evidence=root.source_result["evidence"],
-        projection=root.projected["projection"], pocket=root.projected["pocket"],
-        ligand={key: value for key, value in root.ligand.items() if key != "sdf_bytes"})
+        projection=root.projected["projection"], pocket=root.projected["pocket"])
+    ligands = root.batch_ligands if root.batch is not None else [root.ligand]
+    descriptors = [{key: value for key, value in item.items() if key != "sdf_bytes"} for item in ligands]
+    if root.batch is None:
+        body["ligand"] = descriptors[0]
+    else:
+        body.update(batch=root.batch, ligands=descriptors)
     digest = hashlib.sha256(canonical_json(body))
-    for value in (root.source_result["pdb_bytes"], root.projected["pdb_bytes"], root.ligand["sdf_bytes"]):
+    for value in (root.source_result["pdb_bytes"], root.projected["pdb_bytes"],
+                  *(item["sdf_bytes"] for item in ligands)):
         if type(value) is not bytes:
             _deny()
         digest.update(len(value).to_bytes(8, "big"))
@@ -88,9 +94,10 @@ class ChatDockingInputContext:
                 or any(root.accepted_slots[key] != dict(state="fixed", value=value)
                        for key, value in refs.items())):
             _deny()
+        ligands = root.batch_ligands if root.batch is not None else [root.ligand]
         for content, digest in ((root.source_result["pdb_bytes"], root.source_result["source"]["sha256"]),
                                 (root.projected["pdb_bytes"], root.projected["projection"]["derived_input"]["sha256"]),
-                                (root.ligand["sdf_bytes"], root.ligand["sha256"])):
+                                *((item["sdf_bytes"], item["sha256"]) for item in ligands)):
             if type(content) is not bytes or hashlib.sha256(content).hexdigest() != digest:
                 _deny()
         self._coordinator, self._root = coordinator, root
@@ -99,7 +106,8 @@ class ChatDockingInputContext:
         self._parameters = {key: root.accepted_slots[key]["value"]
                             for key in ("center", "size", "exhaustiveness", "num_modes")}
         self._parameters = json.loads(canonical_json(self._parameters))
-        self._receptor, self._ligand = root.projected["pdb_bytes"], root.ligand["sdf_bytes"]
+        self._receptor = root.projected["pdb_bytes"]
+        self._ligand = root.ligand["sdf_bytes"] if root.batch is None else None
         self._lock, self._claimed = threading.Lock(), False
         self._operation = self._runtime = self._verified_manifest = None
         self._begun = False
@@ -126,7 +134,7 @@ class ChatDockingInputContext:
         from src.task_runtime.runtime import TaskRuntime
         root = self._root
         with self._lock:
-            if self._claimed:
+            if self._claimed or root.batch is not None:
                 _deny()
             self._claimed = True
             if (type(runtime) is not TaskRuntime or runtime.store is not self._coordinator._tasks

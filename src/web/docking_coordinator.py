@@ -243,6 +243,10 @@ class _Root:
     ready_preview_json: str | None = None
     publication: object = None
     text_refinements: list = field(default_factory=list)
+    batch: dict | None = None
+    batch_ligands: list = field(default_factory=list)
+    batch_proof: tuple[str, str] | None = None
+    batch_submitting: asyncio.Event | None = None
 
 
 def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
@@ -253,6 +257,9 @@ def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
         missing_fields=list(root.missing) if root else [],
         input_ready=False, execution_authorized=False)
     if root is not None:
+        if not root.closed and root.batch is not None:
+            view["batch"] = dict(task_id=root.task_id, pdb_id=root.batch["pdb_id"],
+                                 ligands=[dict(row) for row in root.batch["ligands"]])
         execution = root.input_context._execution if root.input_context is not None else None
         if execution is not None:
             view['execution_authorized'] = not root.closed and execution.acquired
@@ -312,6 +319,7 @@ class DockingRequestCoordinator:
     def __init__(self, *, task_store, state_store, gate, capture_current,
                  wall_time_ms=None, monotonic=None, enabled=False):
         self._tasks, self._state, self._gate = task_store, state_store, gate
+        self.batch_execution = None
         self._capture_current = capture_current
         self._wall = _wall_time_ms if wall_time_ms is None else wall_time_ms
         self._mono = time.monotonic if monotonic is None else monotonic
@@ -397,6 +405,8 @@ class DockingRequestCoordinator:
             if root.structure_context_json is not None:
                 metadata[_CLAIM_KEY]["structure_context_digest"] = hashlib.sha256(
                     root.structure_context_json.encode("utf-8")).hexdigest()
+            if root.batch is not None:
+                metadata[_CLAIM_KEY]["batch_ref"] = _content_ref(root.batch)
             changed = conn.execute(
                 "UPDATE agent_runs SET metadata_json=?,updated_at=? WHERE trace_id=? AND session_id=? AND status='running'",
                 (json.dumps(metadata, ensure_ascii=True, allow_nan=False), time.time(), root.root_id, root.owner),
@@ -420,7 +430,8 @@ class DockingRequestCoordinator:
                     allow_nan=False) == root.claim.binding_json
             except (ValueError, TypeError, KeyError):
                 matches = False
-            if not matches:
+            if not matches or (root.batch is not None and
+                    json.loads(root.claim.binding_json).get("batch_ref") != _content_ref(root.batch)):
                 # A replaced/invalidated run cannot make this local attempt reusable.
                 root.durable = False
                 raise _Unavailable("root_unavailable")
@@ -539,6 +550,9 @@ class DockingRequestCoordinator:
         root.structure_context_json = root.source_reference = root.source_result = None
         root.inspection = root.source_preview_json = None
         root.selection = root.projected = root.ligand = None
+        root.batch = root.batch_proof = None
+        root.batch_ligands.clear()
+        root.batch_submitting = None
         root.receptor_descriptor = root.ligand_descriptor = root.prepared_preview_json = None
         root.ready_preview_json = root.input_context = None
         root.preparation_owners.clear()
@@ -586,7 +600,8 @@ class DockingRequestCoordinator:
             receipt = await self._sql(self._tasks.close_chat_docking_draft,
                 preparation_id=root.preparation_id, owner_session_id=root.owner,
                 expected_revision=root.accepted_revision, expected_version=root.draft["version"],
-                task_id=root.task_id, trace_id=root.root_id, origin_turn_id=root.origin)
+                task_id=root.task_id, trace_id=root.root_id, origin_turn_id=root.origin,
+                **({'batch_binding_digest': root.batch_proof[0]} if root.batch_submitting else {}))
             root.close_state = "confirmed" if receipt is True else "unconfirmed"
         except (Exception, asyncio.CancelledError):
             # No retry/readback: the accepted version may be older than an
@@ -640,7 +655,7 @@ class DockingRequestCoordinator:
             root.close_state = 'unconfirmed'
 
     async def begin(self, *, root_id, owner_session_id, origin_turn_id, query,
-                    history, descriptors, enable_tools, mode, structure_context=None):
+                    history, descriptors, enable_tools, mode, structure_context=None, batch=None):
         # Entire input capture/preflight, clocks and the local attempt burn precede
         # the first await; duplicate coroutines cannot race to create an issuer.
         try:
@@ -656,6 +671,21 @@ class DockingRequestCoordinator:
             assessment = assess_docking_request_text(query, enabled=self._enabled, enable_tools=enable_tools)
             if not assessment["assessed"]:
                 return _view(reason="clarification_required", phase="AWAITING_INPUT")
+            if batch is not None:
+                # Batch is assembled by the server's request resolver. Bind the
+                # existing proposal/source path to the first canonical ligand.
+                batch = json.loads(_small_json(batch))
+                inputs = assessment["inputs"]
+                if (type(batch) is not dict or set(batch) != {"pdb_id", "ligands"}
+                        or batch["pdb_id"] != inputs.get("pdb_id")
+                        or type(batch["ligands"]) is not list or len(batch["ligands"]) < 2
+                        or any(type(row) is not dict or set(row) != {"ordinal", "smiles"}
+                               or type(row["ordinal"]) is not int or row["ordinal"] < 1
+                               or type(row["smiles"]) is not str or not row["smiles"]
+                               for row in batch["ligands"])
+                        or len({r["ordinal"] for r in batch["ligands"]}) != len(batch["ligands"])
+                        or batch["ligands"][0]["smiles"] != inputs.get("smiles")):
+                    return _view(reason="invalid_input")
             root = self._roots.get(root_id)
             if root is not None:
                 # A duplicate cannot replace or reconstruct the original inputs.
@@ -671,7 +701,7 @@ class DockingRequestCoordinator:
         root = _Root(root_id, owner_session_id, origin_turn_id, str(uuid4()), str(uuid4()),
                      snapshot, mode, wall + _WORK_MS, mono + _WORK_MS / 1000,
                      tuple(assessment["missing_fields"]), structure_context_json=structure_context_json,
-                     physical_deadline=physical_begin + _WORK_MS / 1000)
+                     physical_deadline=physical_begin + _WORK_MS / 1000, batch=batch)
         self._roots[root_id] = root
         root.task = asyncio.create_task(self._run(root))
         self._gate.retain_task(root.task)
@@ -1153,10 +1183,16 @@ class DockingRequestCoordinator:
         receptor = dict(schema="chat-docking-receptor-v1", kind="explicit-residue-conformer-v1",
             source_evidence=root.source_result["evidence"], projection=root.projected["projection"],
             pocket=root.projected["pocket"])
-        ligand = dict(schema="chat-docking-ligand-v1", kind="modeled_input_not_experimental_pose",
-            query_digest=root.snapshot.query_digest, sha256=root.ligand["sha256"],
-            canonical_smiles=root.ligand["canonical_smiles"], atom_count=root.ligand["atom_count"],
-            formal_charge=root.ligand["formal_charge"], provenance=root.ligand["provenance"])
+        if root.batch is not None:
+            ligand = dict(schema="chat-docking-ligands-v1", query_digest=root.snapshot.query_digest,
+                          ligands=[{key: row[key] for key in ("ordinal", "canonical_smiles",
+                                   "sha256", "atom_count", "formal_charge", "provenance")}
+                                   for row in root.batch_ligands])
+        else:
+            ligand = dict(schema="chat-docking-ligand-v1", kind="modeled_input_not_experimental_pose",
+                query_digest=root.snapshot.query_digest, sha256=root.ligand["sha256"],
+                canonical_smiles=root.ligand["canonical_smiles"], atom_count=root.ligand["atom_count"],
+                formal_charge=root.ligand["formal_charge"], provenance=root.ligand["provenance"])
         return receptor, ligand, dict(receptor_ref=_content_ref(receptor), ligand_ref=_content_ref(ligand))
 
     def _read_refinement_context(self, *, root, require_source):
@@ -1202,7 +1238,17 @@ class DockingRequestCoordinator:
             root.projected = await self._selected_child(root, "projection", dict(
                 pdb_bytes=root.source_result["pdb_bytes"], source=root.source_result["source"],
                 selection=root.selection))
-            root.ligand = await self._selected_child(root, "ligand", dict(smiles=assessed["inputs"]["smiles"]))
+            if root.batch is not None:
+                prepared = []
+                for row in root.batch["ligands"]:
+                    item = await self._selected_child(root, "ligand", dict(smiles=row["smiles"]))
+                    if (item["canonical_smiles"] != row["smiles"]
+                            or hashlib.sha256(item["sdf_bytes"]).hexdigest() != item["sha256"]):
+                        raise _Unavailable("selected_input_unavailable")
+                    prepared.append(dict(item, **row))
+                root.batch_ligands = prepared
+            else:
+                root.ligand = await self._selected_child(root, "ligand", dict(smiles=assessed["inputs"]["smiles"]))
             receptor, ligand, refs = await self._sql(self._input_descriptors, root=root)
             await self._check_source(root)
             explicit = {key: value for key, value in assessed["fields"].items()
@@ -1219,9 +1265,11 @@ class DockingRequestCoordinator:
             suggested.update(explicit)  # Original explicit values are never overwritten.
             preview_json = _small_json(dict(input_kind="explicit-residue-conformer-v1",
                 source_sha256=root.source_result["source"]["sha256"],
-                derived_sha256=projected["derived_input"]["sha256"], ligand_sha256=root.ligand["sha256"],
+                derived_sha256=projected["derived_input"]["sha256"],
+                ligand_sha256=refs["ligand_ref"][7:] if root.batch else root.ligand["sha256"],
                 selection_sha256=projected["selection"]["sha256"], refinement_revision=root.accepted_revision,
-                parameters_suggestion=suggested, ligand_provenance=root.ligand["provenance"],
+                parameters_suggestion=suggested,
+                ligand_provenance=(root.batch_ligands[0] if root.batch else root.ligand)["provenance"],
                 reference_residue=pocket["residue"], pocket_rule=pocket["rule_version"],
                 pocket_margin=pocket["margin"], pocket_atom_count=pocket["atom_count"],
                 input_ready=False, execution_authorized=False, **refs))
@@ -1320,7 +1368,7 @@ class DockingRequestCoordinator:
         if type(runtime) is not TaskRuntime or runtime.store is not self._tasks:
             return _view()
         root = self._owned(root_id, owner_session_id)
-        if (root is None or root.closed or type(expected_revision) is not int
+        if (root is None or root.closed or root.batch is not None or type(expected_revision) is not int
                 or expected_revision != root.accepted_revision
                 or any(type(value) is not str or root.accepted_slots[key] !=
                        dict(state="fixed", value=value) for key, value in
@@ -1375,7 +1423,7 @@ class DockingRequestCoordinator:
                              binding_digest, confirm):
         """Internal owned proof bridge; never called by preparation or text."""
         root = self._owned(root_id, owner_session_id)
-        if root is None or root.input_context is None:
+        if root is None or root.batch is not None or root.input_context is None:
             return _view()
         context = root.input_context
         try:
