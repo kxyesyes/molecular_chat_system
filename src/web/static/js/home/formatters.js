@@ -113,10 +113,11 @@ window.HomeFormatters = (function () {
           return renderEscapedMarkdown(once);
         }
         const heading = header.map(function (cell) { return '<th scope="col">' + renderCell(cell) + '</th>'; }).join("");
+        // In SMILES, [C@@H](C) is a stereocenter and branch, not a Markdown link.
+        const structureColumns = header.map(cell => /(?:^|\s)SMILES$/i.test(cell));
         const body = rows.map(function (row) {
           return '<tr>' + row.map(function (cell, column) {
-            const structure = scientific && header[column] === 'SMILES';
-            if (structure) return '<td class="home-structure-cell">' + cell.replace(/^`([^`]+)`$/, '$1') + '</td>';
+            if (structureColumns[column]) return '<td class="home-structure-cell">' + cell.replace(/^`([^`]+)`$/, '$1') + '</td>';
             return '<td>' + renderCell(cell) + '</td>';
           }).join("") + '</tr>';
         }).join("");
