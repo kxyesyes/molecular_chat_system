@@ -184,6 +184,19 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
+  await test("a delivered target stays readable and the next draft waits for its own handoff", () => {
+    const h = loadHome(); h.ready("pi", true); start(h);
+    h.socket.emit(result("completed"));
+    h.socket.emit({...complete("completed"), metadata: {structure_handoff_pending: true}});
+    h.input.value = "用这个结构对接"; h.send();
+    assert.equal(h.input.value, "用这个结构对接");
+    assert(h.chat.textContent.includes("Measured value"));
+    const ready = {type: "followup_ready", turn_id: turn, trace_id: trace};
+    h.socket.emit({...ready, trace_id: nonce}); h.send();
+    assert.equal(h.socket.sent.filter(f => f.type === "chat").length, 1);
+    h.socket.emit(ready); h.send(); h.send();
+    assert.deepEqual(h.socket.sent.filter(f => f.type === "chat").map(f => f.message), ["Explain logP", "用这个结构对接"]);
+  });
   await test("first send opens the chat and enables system messages in the renderer", () => {
     const h = loadHome(); h.ready("pi");
     assert.equal(h.chat.style.display, "none");

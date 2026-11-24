@@ -2325,11 +2325,16 @@ class WebDecisionRuntime:
         if sender.writable and turn.pending_complete is not None:
             try:
                 capture_delivered = False
-                terminal_status = json.loads(turn.pending_complete).get('status')
+                frame = json.loads(turn.pending_complete)
+                terminal_status = frame.get('status')
+                controller = _enabled_docking_controller(handler, self)
+                handoff = terminal_status == 'completed' and turn.docking_result is not None and controller is not None
                 if turn.history_update is not None:
-                    frame = json.loads(turn.pending_complete)
                     frame['metadata'] = {'history_omission': turn.history_update.omission,
                                          'history_evicted_pairs': turn.history_update.evicted_pairs}
+                if handoff:
+                    frame.setdefault('metadata', {})['structure_handoff_pending'] = True
+                if turn.history_update is not None or handoff:
                     turn.pending_complete = json.dumps(frame, ensure_ascii=False, allow_nan=False)
                 def completed():
                     nonlocal capture_delivered
@@ -2363,11 +2368,16 @@ class WebDecisionRuntime:
                     turn.terminal_sent = True
                 await sender.send_text(turn.pending_complete,
                     on_sent=completed)
-                controller = _enabled_docking_controller(handler, self)
-                if capture_delivered and turn.docking_result is not None and controller is not None:
+                if capture_delivered and handoff:
                     await _capture_docking_result(controller, sender, turn.docking_result)
+                    turn.docking_result = None
+                    if sender.writable and not self.closing:
+                        await sender.send({'type': 'followup_ready', 'turn_id': turn.turn_id,
+                                           'trace_id': turn.trace_id})
             except (asyncio.CancelledError, ConnectionError, WebSocketDisconnect, asyncio.TimeoutError):
                 sender.writable = False
+                if capture_delivered and handoff and sender.receiver_attached and not self.closing:
+                    await sender.close_failed_delivery()
                 if self.semantic:
                     sender.waiting = None
                     turn.next_waiting = None

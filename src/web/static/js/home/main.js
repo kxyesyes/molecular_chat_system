@@ -200,7 +200,7 @@
       (typeof dockingUI !== "undefined" && dockingUI?.blocked()) ||
       (decisionMode && Boolean(decisionActive() || decisionWaiting || decisionAbandonAwait));
     if (!decisionControls) return;
-    decisionControls.box.hidden = !decisionMode || !(decisionActive() || decisionWaiting);
+    decisionControls.box.hidden = !decisionMode || decisionTurn?.phase === "handoff" || !(decisionActive() || decisionWaiting);
     decisionControls.stop.hidden = !decisionActive();
     decisionControls.resume.hidden = decisionControls.fresh.hidden = !decisionWaiting || Boolean(decisionActive());
     decisionControls.stop.disabled = !decisionMode || !decisionActive() || !decisionTurn.turnId ||
@@ -245,7 +245,7 @@
     decisionAwaitingReady = true; // every new socket must announce its own mode
     if (decisionMode) {
       scientificReferences?.startRequest(); // invalidate pending ACKs/restores, never replay
-      if (decisionActive()) {
+      if (decisionActive() && decisionTurn.phase !== "handoff") {
         if (!decisionTurn.result) {
           finishPendingSourceCheck(decisionTurn, "disconnected", "连接已断开，结果未确认", "is-warning");
         }
@@ -390,6 +390,14 @@
       return true;
     }
     if (!turn || turn.socket !== socket || turn.phase === "ended") return true;
+    if (turn.phase === "handoff") {
+      if (message.type === "followup_ready" && message.turn_id === turn.turnId && message.trace_id === turn.traceId) {
+        turn.phase = "ended";
+        updateDecisionControls();
+        if (turn.repeatAfterHandoff) sendDecisionMessage(false, turn.repeat);
+      }
+      return true;
+    }
     if (message.type === "request_accepted") {
       if (turn.phase !== "pending" || !/^[a-f0-9]{32}$/.test(message.turn_id || "") ||
         !/^[a-f0-9]{32}$/.test(message.trace_id || "") || decisionSeenTurns.has(message.turn_id) ||
@@ -575,7 +583,7 @@
           turn.box.appendChild(notice);
         }
       }
-      turn.phase = "ended";
+      turn.phase = message.metadata?.structure_handoff_pending === true ? "handoff" : "ended";
       if (projectionFailed) {
         setDecisionWaiting(null);
       } else if (status === "waiting_for_input" && /^[a-f0-9]{32}$/.test(metadata.continuation_id || "") &&
@@ -589,7 +597,8 @@
         if (repeat.runs.length === 1 && message.model_generation) {
           repeat.payload.expected_model_generation = message.model_generation;
         }
-        sendDecisionMessage(false, repeat);
+        if (turn.phase === "handoff") turn.repeatAfterHandoff = true;
+        else sendDecisionMessage(false, repeat);
       }
       return true;
     }

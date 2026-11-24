@@ -79,11 +79,10 @@ class DockingChatController:
         sequence = result.get('tool_result_sequence') if type(result) is dict else None
         logger.info("chat docking source capture sequence_items=%s pointer=%s",
                     len(sequence) if type(sequence) is list else -1, pointer is not None)
-        if (pointer is None or not self._live(sender)
-                or sender.websocket.scope.get('agent_session_id') != owner):
+        if not self._live(sender) or sender.websocket.scope.get('agent_session_id') != owner:
             return False
         sender._docking_structure = pointer
-        return True
+        return pointer is not None
 
     def _live(self, sender, attachment=None):
         return (not self.runtime.closing and sender in self.runtime.sockets
