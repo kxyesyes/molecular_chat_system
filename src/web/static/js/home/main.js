@@ -489,7 +489,7 @@
       }
       decisionStatus(turn, deliveryStatus + retrievalNotice);
       turn.box.setAttribute("data-content", text);
-      turn.box.querySelector(".message-content").innerHTML = HomeFormatters.formatContent(text,
+      renderAssistantContent(turn.box.querySelector(".message-content"), text,
         {displayKind: message.metadata?.display_kind});
       updateDecisionControls(); return true;
     }
@@ -2044,7 +2044,7 @@
     timeStamp.textContent = HomeChatRenderer.getCurrentTime();
 
     const messageContent = document.createElement("div");
-      messageContent.innerHTML = HomeFormatters.formatContent(content);
+    renderAssistantContent(messageContent, content);
 
     messageBox.appendChild(timeStamp);
     messageBox.appendChild(messageContent);
@@ -2143,7 +2143,7 @@
     const currentContent = lastMessage.getAttribute("data-content") || "";
     const newContent = currentContent + content;
     lastMessage.setAttribute("data-content", newContent);
-      messageContent.innerHTML = HomeFormatters.formatContent(newContent);
+    renderAssistantContent(messageContent, newContent);
 
     // 添加光标闪烁效果
     if (!messageContent.querySelector(".cursor")) {
@@ -2227,7 +2227,7 @@
           lastMessage.querySelector(".message-content") ||
           lastMessage.querySelector("div:last-child");
         if (messageContent) {
-          messageContent.innerHTML = HomeFormatters.formatContent(content, displayOptions);
+          renderAssistantContent(messageContent, content, displayOptions);
         }
       }
 
@@ -2253,6 +2253,17 @@
     } finally {
       moleculeCandidateLifecycle.clear();
       if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
+    }
+  }
+
+  function renderAssistantContent(target, content, displayOptions) {
+    try {
+      target.innerHTML = HomeFormatters.formatContent(content, displayOptions);
+    } catch {
+      const plain = document.createElement("span");
+      plain.style.whiteSpace = "pre-wrap";
+      plain.textContent = content;
+      target.replaceChildren(plain);
     }
   }
 

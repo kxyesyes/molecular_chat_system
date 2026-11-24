@@ -72,7 +72,7 @@ class Element {
   closest(selector) {return this.matches(selector) ? this : this.parentNode?.closest(selector) || null;}
 }
 
-function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = null,
+function loadHome({request, fetchDetails, format = String, storedPointer = null, storedWaiting = null,
                    advancedConfig = {ragCount: 3, temperature: 0.7, molCount: 1}} = {}) {
   const body = new Element("body"); body.root = true;
   const composer = body.appendChild(new Element("div")); composer.className = "chat-composer";
@@ -115,7 +115,7 @@ function loadHome({request, fetchDetails, storedPointer = null, storedWaiting = 
     }};
   const context = vm.createContext({window, document, WebSocket: Socket, TextEncoder, AbortController, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
-    HomeChatRenderer: renderer, HomeFormatters: {formatContent: (s, options) => {formatCalls.push(options); return String(s);}},
+    HomeChatRenderer: renderer, HomeFormatters: {formatContent: (s, options) => {formatCalls.push(options); return format(s);}},
     HomeAdvancedOptions: {getConfig: () => ({...advancedConfig})},
     setTimeout: (fn, ms) => {timers.set(++timer, {fn, ms}); return timer;}, clearTimeout: id => timers.delete(id),
     fetch: async (url, options) => {requests.push([url, JSON.parse(options.body)]);
@@ -981,6 +981,23 @@ async function run() {
     assert(box.querySelector('[data-candidate-id="' + candidateEvent().candidate_set.candidates[0].candidate_id + '"]'));
     assert.equal(h.requests.length, 1, 'the confirmed selection must still belong to the generated collection');
   });
+  await test('a formatting error keeps the accepted text, scientific status and next turn', () => {
+    const text = 'CCO · logP -0.001\n<img src=x onerror=alert(1)>';
+    const h = loadHome({format(value) {
+      if (value.includes(text)) throw new Error('formatting failed');
+      return value;
+    }});
+    h.ready('pi'); start(h);
+    h.socket.emit({...result('partial'), display_answer: text});
+    h.socket.emit(complete('partial'));
+    const box = h.chat.querySelector('.assistant-message.complete');
+    assert.equal(h.socket.readyState, 1, 'a local display failure must not close the session');
+    assert(box && box.querySelector('.message-content').textContent.includes(text));
+    assert.equal(box.querySelector('img'), null);
+    assert(box.querySelector('.decision-runtime-status').textContent.includes('部分完成'));
+    h.input.value = '继续解释 logP'; h.send();
+    assert.deepEqual(h.socket.sent.filter(f => f.type === 'chat').map(f => f.message), ['Explain logP', '继续解释 logP']);
+  });
   await test('a retrieval card render failure retains the accepted answer and releases the turn', () => {
     const h = loadHome(); h.ready('pi'); start(h);
     const frame = result('completed');
@@ -1250,7 +1267,7 @@ async function run() {
   await test("active main script cache version includes multiline composer binding", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261121-card-carousels"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261124-result-text"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
