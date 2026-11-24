@@ -34,7 +34,7 @@ from .user_llm_config import (
 from .models import generate_for_chat
 from .model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
 from src.rag.service import RAGSystem
-from src.system.env import load_env_file as _load_env_file
+from src.system.env import chat_docking_enabled, load_env_file as _load_env_file
 from src.system.model_clients import OllamaModel
 
 # Add project root to path for imports
@@ -226,7 +226,7 @@ class MolecularChatApp:
         normal_chat_mode = self._validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy)
         if ordinary_chat_policy == 'semantic_v1':
             raise ValueError('Semantic assembly requires create_async')
-        if os.environ.get('MEDCHAT_CHAT_DOCKING_ENABLED') != '1':
+        if not chat_docking_enabled():
             self._assemble(config_path, normal_chat_mode=normal_chat_mode,
                            decision_wire_mode=decision_wire_mode, ordinary_chat_policy=ordinary_chat_policy)
             return
@@ -1133,12 +1133,12 @@ class MolecularChatApp:
             return await generate_document_answer(self.model, prompt)
 
     def _bind_task_runtime(self, docking_service):
-        # Exact trusted opt-in only. The default does not import or construct C.
-        if os.environ.get('MEDCHAT_CHAT_DOCKING_ENABLED') == '1':
+        if chat_docking_enabled():
             from .docking_app import assemble_docking_app
             assembly = assemble_docking_app(self, docking_service, logger=logger)
-            self._register_assembly_owner(assembly.binding)
-            return assembly.binding
+            if assembly is not None:
+                self._register_assembly_owner(assembly.binding)
+                return assembly.binding
         task_runtime = None
         try:
             from src.task_runtime import TaskRuntimeBinding

@@ -63,7 +63,9 @@ def app_class():
     tree = ast.parse(source.read_text(encoding='utf-8'))
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                and node.name == 'MolecularChatApp')
+    from src.system.env import chat_docking_enabled
     namespace = dict(__name__='src.web.app', __package__='src.web', __file__=str(source),
+        chat_docking_enabled=chat_docking_enabled,
         asyncio=asyncio, os=os, logger=logging.getLogger('d6-test'),
         Any=Any, Dict=Dict, Optional=Optional, Path=Path, WebSocket=WebSocket,
         Request=Request, HTTPException=HTTPException, StaticFiles=StaticFiles,
@@ -126,11 +128,10 @@ async def test_runtime_binding_only_reaches_private_executor(application, rig):
         await runtime.close()
 
 
-@pytest.mark.parametrize('flag', [None, '', '0', 'true', ' 1', '1 '])
-def test_default_disabled_has_no_feature_construction(application, monkeypatch, flag):
+@pytest.mark.parametrize('flag', ['', '0', 'true', ' 1', '1 '])
+def test_explicit_disable_has_no_feature_construction(application, monkeypatch, flag):
     module = api()
-    if flag is not None:
-        monkeypatch.setenv('MEDCHAT_CHAT_DOCKING_ENABLED', flag)
+    monkeypatch.setenv('MEDCHAT_CHAT_DOCKING_ENABLED', flag)
     before = dict(vars(application))
     assert module.assemble_docking_app(application, object()) is None
     assert vars(application) == before
@@ -197,6 +198,21 @@ def test_invalid_assembly_is_atomic_and_safe(application, rig, monkeypatch, case
     assert application.app.routes == routes
 
 
+@pytest.mark.parametrize('prerequisite', ['toolchain', 'backend'])
+def test_default_without_docking_prerequisites_keeps_generic_runtime(
+        application, app_class, rig, monkeypatch, prerequisite):
+    from src.task_runtime.runtime import acquire_task_runtime
+    app = app_class.__new__(app_class)
+    app.__dict__.update(vars(application))
+    if prerequisite == 'backend':
+        monkeypatch.setenv('MEDCHAT_TASK_BACKEND', 'temporal_canary')
+    service = object() if prerequisite == 'toolchain' else rig.service
+    binding = app._bind_task_runtime(service)
+    assert binding._factory is acquire_task_runtime
+    assert not hasattr(app.chat_handler, 'docking_controller')
+    assert not any(route.path.startswith('/api/agent/docking/') for route in app.app.routes)
+
+
 @run_async
 async def test_shutdown_retains_transport_before_runtime_and_is_idempotent(application, rig, monkeypatch):
     monkeypatch.setenv('MEDCHAT_CHAT_DOCKING_ENABLED', '1')
@@ -232,7 +248,6 @@ async def test_shutdown_retains_transport_before_runtime_and_is_idempotent(appli
 @run_async
 async def test_actual_route_setup_shares_one_binding_with_generic_apis(application, app_class, rig, monkeypatch):
     import builtins
-    monkeypatch.setenv('MEDCHAT_CHAT_DOCKING_ENABLED', '1')
     app = app_class.__new__(app_class)
     app.__dict__.update(vars(application))
     app.config = {'docking': rig.config}
@@ -305,12 +320,11 @@ async def test_unresolved_transport_never_closes_runtime(application, rig, monke
     await assembly.binding.close()
 
 
-@pytest.mark.parametrize('flag', [None, 'true', ' 1'])
+@pytest.mark.parametrize('flag', ['0', 'true', ' 1'])
 def test_app_disabled_keeps_default_binding_without_feature_import(application, app_class, monkeypatch, flag):
     import builtins
     from src.task_runtime.runtime import acquire_task_runtime, release_task_runtime
-    if flag is not None:
-        monkeypatch.setenv('MEDCHAT_CHAT_DOCKING_ENABLED', flag)
+    monkeypatch.setenv('MEDCHAT_CHAT_DOCKING_ENABLED', flag)
     original = builtins.__import__
     def checked(name, *args, **kwargs):
         assert 'docking_app' not in name
@@ -771,7 +785,8 @@ async def test_sync_bootstrap_cleanup_cancelled_before_entry_keeps_owners(bootst
 
 
 @pytest.mark.parametrize('mode', ['pi', 'decision_a2'])
-def test_actual_sync_bootstrap_success_transfers_owners(bootstrap, mode):
+def test_actual_sync_bootstrap_success_transfers_owners(bootstrap, mode, monkeypatch):
+    monkeypatch.delenv('MEDCHAT_CHAT_DOCKING_ENABLED')
     app = bootstrap.cls(normal_chat_mode=mode)
     assert not bootstrap.closed
     assert app._assembly_stack is None
@@ -781,12 +796,9 @@ def test_actual_sync_bootstrap_success_transfers_owners(bootstrap, mode):
     assert sorted(bootstrap.closed) == ['generator', 'model', 'rag', 'tool']
 
 
-@pytest.mark.parametrize('flag', [None, 'true', '0'])
-def test_actual_sync_bootstrap_default_off_has_no_new_ownership(bootstrap, monkeypatch, flag):
-    if flag is None:
-        monkeypatch.delenv('MEDCHAT_CHAT_DOCKING_ENABLED')
-    else:
-        monkeypatch.setenv('MEDCHAT_CHAT_DOCKING_ENABLED', flag)
+@pytest.mark.parametrize('flag', ['true', '0'])
+def test_actual_sync_bootstrap_explicit_off_has_no_new_ownership(bootstrap, monkeypatch, flag):
+    monkeypatch.setenv('MEDCHAT_CHAT_DOCKING_ENABLED', flag)
     app = bootstrap.cls()
     assert not hasattr(app, '_assembly_stack')
     assert not hasattr(app, 'docking_assembly')

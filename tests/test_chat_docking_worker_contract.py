@@ -56,7 +56,6 @@ def run_startup(tmp_path, *, arguments=(), environment=None, env_text="",
         if {rejected!r}:
             assert result != 0, ('unsafe startup accepted', result, calls)
             assert calls == [], ('fail-fast must precede startup effects', calls)
-            assert os.environ['MEDCHAT_CHAT_DOCKING_ENABLED'] == '1'
         else:
             assert result == 0, result
             assert [call[0] for call in calls] == [
@@ -83,6 +82,8 @@ def run_startup(tmp_path, *, arguments=(), environment=None, env_text="",
 
 
 @pytest.mark.parametrize("arguments,environment", [
+    (("--workers", "2"), {}),
+    ((), {"MEDCHAT_WORKERS": "2"}),
     (("--workers", "2"), {"MEDCHAT_CHAT_DOCKING_ENABLED": "1"}),
     ((), {"MEDCHAT_CHAT_DOCKING_ENABLED": "1", "MEDCHAT_WORKERS": "2"}),
     (("--workers", "3"), {"MEDCHAT_CHAT_DOCKING_ENABLED": "1", "MEDCHAT_WORKERS": "1"}),
@@ -106,11 +107,11 @@ def test_env_file_is_loaded_before_chat_docking_worker_validation(
     )
 
 
-@pytest.mark.parametrize("flag", [None, "0", "", "true", "TRUE", "yes", "on", " 1 ", "01"])
+@pytest.mark.parametrize("flag", ["0", "", "true", "TRUE", "yes", "on", " 1 ", "01"])
 @pytest.mark.parametrize("via_environment", [False, True])
-def test_only_exact_one_enables_chat_docking_and_disabled_preserves_multiworker(
+def test_explicitly_disabled_chat_docking_preserves_multiworker(
         tmp_path, flag, via_environment):
-    environment = {} if flag is None else {"MEDCHAT_CHAT_DOCKING_ENABLED": flag}
+    environment = {"MEDCHAT_CHAT_DOCKING_ENABLED": flag}
     if via_environment:
         environment["MEDCHAT_WORKERS"] = "3"
     run_startup(
@@ -120,6 +121,7 @@ def test_only_exact_one_enables_chat_docking_and_disabled_preserves_multiworker(
 
 
 @pytest.mark.parametrize("arguments,environment,env_text", [
+    ((), {}, ""),
     ((), {"MEDCHAT_CHAT_DOCKING_ENABLED": "1"}, ""),
     ((), {"MEDCHAT_CHAT_DOCKING_ENABLED": "1", "MEDCHAT_WORKERS": "1"}, ""),
     (("--workers", "1"), {"MEDCHAT_CHAT_DOCKING_ENABLED": "1", "MEDCHAT_WORKERS": "2"}, ""),
@@ -149,7 +151,8 @@ def test_chat_docking_single_worker_retains_reload_controls(tmp_path, arguments)
 
 
 def test_disabled_chat_docking_retains_existing_reload_worker_behavior(tmp_path):
-    run_startup(tmp_path, arguments=("--workers", "2", "--reload"), expected_reload=True)
+    run_startup(tmp_path, arguments=("--workers", "2", "--reload"),
+                environment={"MEDCHAT_CHAT_DOCKING_ENABLED": "0"}, expected_reload=True)
 
 
 def test_deployment_documents_entrypoint_guarantee_and_external_asgi_boundary():

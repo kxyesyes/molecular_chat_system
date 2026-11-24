@@ -5,6 +5,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+
+def chat_docking_enabled() -> bool:
+    return os.environ.get("MEDCHAT_CHAT_DOCKING_ENABLED", "1") == "1"
+
+
 def load_env_file(env_path: str | Path = ".env") -> None:
     """Load simple ``KEY=VALUE`` pairs without overwriting the process env."""
     path = Path(env_path)

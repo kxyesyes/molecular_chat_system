@@ -12,7 +12,7 @@ from html.parser import HTMLParser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from urllib.parse import urlsplit
-from src.system.env import load_env_file as _load_env_file
+from src.system.env import chat_docking_enabled, load_env_file as _load_env_file
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 6000
@@ -292,13 +292,13 @@ def main():
     reload_enabled = args.reload or _parse_bool(os.environ.get("MEDCHAT_RELOAD"), False)
     workers = args.workers if args.workers is not None else _env_int("MEDCHAT_WORKERS", 1)
 
-    # Match the app's exact opt-in, after env-file/CLI resolution and before
-    # reload can silently reduce workers. Chat task ownership is process-local.
-    if os.environ.get("MEDCHAT_CHAT_DOCKING_ENABLED") == "1" and workers > 1:
+    # Check after env-file/CLI resolution and before reload can reduce workers.
+    if chat_docking_enabled() and workers > 1:
         logger.error(
             "MEDCHAT_CHAT_DOCKING_ENABLED=1 requires exactly one worker: "
             "chat docking task ownership and HTTP controls are process-local; "
-            "use --workers 1 or MEDCHAT_WORKERS=1. Refusing startup."
+            "use --workers 1 or MEDCHAT_WORKERS=1, or disable chat docking "
+            "with MEDCHAT_CHAT_DOCKING_ENABLED=0. Refusing startup."
         )
         return 1
 
