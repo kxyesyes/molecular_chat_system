@@ -86,10 +86,13 @@ def run_contract() -> dict[str, Any]:
             fabricated=False,
             structured_output=True,
         )
+        passed = (scored["score"] >= 7 and scored["completion"] == 2
+                  and not scored["forbidden_called"]
+                  and (not case.expected_steps or scored["workflow_order"] == 2))
         workflow_results.append(
             EvaluationResult(
                 case_id=case.case_id,
-                status="passed" if scored["score"] >= 7 else "failed",
+                status="passed" if passed else "failed",
                 score=scored["score"],
                 actual_skill=decision.selected_skill,
                 actual_tools=actual_tools,

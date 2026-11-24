@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -25,33 +26,17 @@ def score_workflow(
     fabricated: bool,
     structured_output: bool,
 ) -> dict[str, Any]:
-    expected_set = set(expected_tools)
-    actual_set = set(actual_tools)
-    forbidden_called = bool(actual_set & set(forbidden_tools))
-    tool_selection = (
-        2
-        if expected_set.issubset(actual_set) and not forbidden_called
-        else 1
-        if expected_set & actual_set and not forbidden_called
-        else 0
-    )
-    expected_order = [tool for tool in expected_tools if tool in actual_set]
-    actual_expected_order = [tool for tool in actual_tools if tool in expected_set]
-    workflow_order = (
-        2
-        if expected_order == expected_tools
-        and actual_expected_order[: len(expected_tools)] == expected_tools
-        else 1
-        if actual_expected_order == expected_order and expected_order
-        else 0
-    )
-    completion = (
-        2
-        if expected_set.issubset(actual_set)
-        else 1
-        if expected_set & actual_set
-        else 0
-    )
+    missing = Counter(expected_tools) - Counter(actual_tools)
+    completion = 2 if not missing else int(sum(missing.values()) < len(expected_tools))
+    forbidden_called = not set(forbidden_tools).isdisjoint(actual_tools)
+    tool_selection = 0 if forbidden_called else completion
+
+    # Match stages in order, allowing other permitted steps between them.
+    matched = 0
+    for tool in actual_tools:
+        if matched < len(expected_tools) and tool == expected_tools[matched]:
+            matched += 1
+    workflow_order = 2 if matched == len(expected_tools) else int(matched > 0)
     anti_hallucination = 0 if fabricated else 2
     output_usability = 2 if structured_output else 0
     score = (
