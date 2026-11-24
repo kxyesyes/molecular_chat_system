@@ -69,6 +69,44 @@ async function verificationBrowser(t) {
   return { browser, executions };
 }
 
+// Opt in only when the local generation model and MedChat can run together.
+test("首页生成两个候选，选中第二个后复述和重算都使用同一结构", {
+  skip: process.env.MEDCHAT_VERIFY_HOME_GENERATION !== "1",
+}, async t => {
+  const { browser, executions } = await verificationBrowser(t);
+  const ask = await conversation(browser, executions, true);
+  const generated = await ask("请生成两个类药候选分子。", ["llm_molecular_generator"]);
+  const batch = generated.outputs[0].data;
+  assert.equal(batch.requested_count, 2);
+  assert.equal(batch.unique_count, 2);
+  assert.equal(batch.candidates.length, 2);
+  const cards = generated.answer.page().locator(".molecule-card");
+  await cards.nth(1).waitFor();
+  assert.deepEqual(await cards.evaluateAll(nodes => nodes.map(n => n.dataset.candidateId)),
+    batch.candidates.map(row => row.candidate_id));
+  for (const [i, row] of batch.candidates.entries()) {
+    assert.equal(row.metadata.model, "gmm-llama:latest");
+    assert.equal(row.validation.valid, true);
+    await cards.nth(i).getByText("显示 SMILES", { exact: true }).click();
+    assert.ok(await cards.nth(i).getByText(row.canonical_smiles, { exact: true }).isVisible());
+  }
+  const chosen = cards.nth(1).getByRole("button", { name: "选择此分子" });
+  await chosen.click();
+  assert.equal(await cards.nth(1).getByRole("button", {name: "已选择"}).getAttribute("aria-pressed"), "true");
+  const result = await ask("请计算这个分子的分子量。", ["property_calculator"]);
+  const [row] = result.outputs[0].data;
+  assert.equal(result.outputs[0].data.length, 1);
+  assert.equal(row.smiles, batch.candidates[1].canonical_smiles);
+  const weight = row.properties.molecular_weight.toFixed(2);
+  assert.ok(result.text.includes(weight));
+  const recalled = await ask("它刚才的分子量是多少？");
+  assert.ok(recalled.text.includes(weight));
+  const repeated = await ask("请把这个分子的分子量重新算一次。", ["property_calculator"]);
+  assert.deepEqual(repeated.outputs[0].data.map(r => [r.smiles, r.properties.molecular_weight]),
+    [[row.smiles, row.properties.molecular_weight]]);
+  assert.ok(repeated.text.includes(weight));
+});
+
 test("停止知识咨询后可在原会话重试并继续计算分子性质", async t => {
   const { browser, executions } = await verificationBrowser(t);
   const ask = await conversation(browser, executions, true);

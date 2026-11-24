@@ -1285,10 +1285,13 @@ async function run() {
     assert.equal(h.socket.sent.at(-1).message, message);
     assert.equal(h.input.value, "", "successful send clears the textarea");
   });
-  await test("active main script cache version includes multiline composer binding", () => {
+  await test("the homepage loads the matching candidate selection controller before its consumer", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
-    const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261124-result-text"]);
+    const scripts = [...template.matchAll(/<script\s+src="([^"]*\/home\/(?:main|scientific_references)\.js[^"]*)"/g)].map(m => m[1]);
+    assert.deepEqual(scripts, [
+      "/static/js/home/scientific_references.js?v=20261124-selection-confirmation",
+      "/static/js/home/main.js?v=20261124-selection-confirmation",
+    ]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
