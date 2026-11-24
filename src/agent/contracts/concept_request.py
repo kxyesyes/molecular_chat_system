@@ -4,21 +4,22 @@ import re
 
 _TOPIC = (
     r'(?:ADMET|ADME|(?:药物)?分子设计|药物设计|分子对接|反向寻靶|'
-    r'理化性质|类药性|分子活性|logP|logD|TPSA|QED|分子量|'
+    r'理化性质|类药性|分子活性|(?:分配系数\s*)?logP|logD|TPSA|QED|分子量|'
     r'(?:drug|molecular)\s+design|molecular\s+docking|'
     r'pIC50|IC50|活性概率|活性分类|分类(?:与|和)回归不一致|'
     r'activity\s+(?:probability|classification)|'
     r'classification(?:/|\s+and\s+)regression\s+(?:disagreement|inconsistency))'
 )
 _EXPLANATION = re.compile(
-    rf'(?:(?:请\s*)?(?:简单\s*)?(?:什么是|解释(?:一下)?|介绍(?:一下)?|'
+    rf'(?:(?:请\s*)?(?:简单\s*|用(?:通俗|简单|易懂)的?(?:中文|语言|话)\s*)?(?:什么是|解释(?:一下)?|介绍(?:一下)?|'
     rf'what\s+(?:is|are)\s+|(?:please\s+)?explain\s+)\s*(?:the\s+)?{_TOPIC}'
     rf'\s*(?:是什么意思|是什么|的含义|的概念|意味着什么|'
-    rf'在药物设计中(?:是)?(?:什么意思|什么|有何意义|的作用))?|'
+    rf'在药物设计中(?:是)?(?:什么意思|什么|有何意义)|(?:在药物(?:设计|研发)中)?的(?:作用|用途))?|'
     rf'{_TOPIC}\s*(?:是什么|是什么意思)|'
     rf'what\s+does\s+(?:the\s+)?{_TOPIC}\s+mean)', re.I,
 )
 _READ_ONLY = re.compile(
+    r'(?:请\s*)?(?:不要|不用|无需|不必)举(?:具体(?:分子)?)?的?例子|'
     r'(?:请\s*)?(?:不要|不用|无需|不必)(?:再|重新)?(?:计算|重算|预测(?:任何分子)?|运行科学工具)|'
     r'(?:please\s+)?(?:do\s+not|don[’\x27]t)\s+(?:recalculate|recompute|rerun(?:\s+(?:tools|predictions|calculations))?)|'
     r'(?:please\s+)?do\s+not\s+predict\s+any\s+molecules|'

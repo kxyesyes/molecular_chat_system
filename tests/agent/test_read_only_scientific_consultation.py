@@ -23,6 +23,8 @@ CALIBRATION_QUESTION = (
     '只解释核对方法，不要检索，也不要重新预测。')
 DISCUSSIONS = [
     AUC_QUESTION, CALIBRATION_QUESTION,
+    '请用通俗的中文解释分配系数 logP 在药物研发中的用途，不用举具体分子的例子。',
+    '用简单的话介绍 TPSA 的作用。',
     '我想理解刚才模型的校准曲线和置信区间分别说明什么。请只解释，不运行工具。',
     'Please explain whether a reported ROC-AUC of 0.95 establishes confidence for the first molecule. '
     'Do not run tools or predictions.',
@@ -79,6 +81,10 @@ def test_discussion_prefix_does_not_hide_new_operations(extra):
 ])
 def test_discussion_requires_a_subject_and_no_independent_operation(query):
     assert not is_concept_explanation(query)
+
+
+def test_presentation_preference_does_not_hide_a_calculation():
+    assert not is_concept_explanation('用简单的话介绍 TPSA 的作用，再计算 CCO 的 TPSA。')
 
 
 def test_model_metric_discussion_preserves_candidate_evidence(actual_app):

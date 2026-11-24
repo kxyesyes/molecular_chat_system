@@ -27,20 +27,25 @@ async function conversation(browser, executions, verifyModel = false) {
     await page.locator("#closeLlmSettings").click();
   }
 
-  return async (question, tools = [], status = "completed") => {
+  return async (question, tools = [], status = "completed", { stopAfterAcceptance = false } = {}) => {
     const answers = page.locator(".assistant-message.complete");
     const index = await answers.count();
     await page.getByRole("textbox", { name: "消息" }).fill(question);
+    const stop = stopAfterAcceptance && socket.waitForEvent("framereceived", {
+      predicate: event => JSON.parse(event.payload).type === "request_accepted",
+    }).then(() => page.getByRole("button", { name: "停止", exact: true }).click());
     const [frame] = await Promise.all([
       socket.waitForEvent("framereceived", {
         predicate: event => JSON.parse(event.payload).type === "complete",
         timeout: 180000,
       }),
       page.getByRole("button", { name: "发送消息", exact: true }).click(),
+      stop,
     ]);
     const done = JSON.parse(frame.payload);
     assert.ok(done.trace_id, question);
-    assert.ok([].concat(status).includes(done.status), question + " returned " + done.status);
+    assert.ok([].concat(status).includes(done.status),
+      question + " returned " + done.status + " (" + (done.error?.code || done.content || done.trace_id) + ")");
     const calls = executions.all(done.trace_id);
     assert.deepEqual(calls.map(row => row.tool_name), tools, question);
     const answer = answers.nth(index);
@@ -48,6 +53,7 @@ async function conversation(browser, executions, verifyModel = false) {
     return {
       text: (await answer.innerText()).replace(/\s+/g, " ").trim(),
       outputs: calls.map(row => JSON.parse(row.output_json)),
+      traceId: done.trace_id,
       answer,
     };
   };
@@ -62,6 +68,21 @@ async function verificationBrowser(t) {
   t.after(() => browser.close());
   return { browser, executions };
 }
+
+test("停止知识咨询后可在原会话重试并继续计算分子性质", async t => {
+  const { browser, executions } = await verificationBrowser(t);
+  const ask = await conversation(browser, executions, true);
+  const question = "请用通俗的中文解释分配系数 logP 在药物研发中的用途，不用举具体分子的例子。";
+  const stopped = await ask(question, [], "cancelled", { stopAfterAcceptance: true });
+  assert.match(stopped.text, /已取消/);
+  const retried = await ask(question);
+  assert.notEqual(stopped.traceId, retried.traceId);
+  assert.match(retried.text, /亲脂|脂溶|疏水|油水/);
+  const result = await ask("请计算 CCO 的分子量。", ["property_calculator"]);
+  const [row] = result.outputs[0].data;
+  assert.equal(row.smiles, "CCO");
+  assert.ok(result.text.includes(row.properties.molecular_weight.toFixed(2)));
+});
 
 test("性质与 ADMET 的组合比较逐行对应两个工具的原始数据", async t => {
   const { browser, executions } = await verificationBrowser(t);
