@@ -120,6 +120,51 @@ def test_goal_revision_during_real_worker_reuses_only_shared_verified_inputs():
     asyncio.run(scenario())
 
 
+def test_followup_comparison_uses_the_new_order_and_rejects_missing_rows():
+    async def scenario():
+        tools = Tools()
+        weights = {"CCO": 46.07, "CCN": 45.08}
+        tools.execute_hook = lambda step: {
+            "ok": True, "message": "verified", "facts": [
+                {"smiles": s, "molecular_weight": weights[s]} for s in step.arguments["smiles"]]}
+        previous = {}
+        for order in (["CCO", "CCN"], ["CCN", "CCO"]):
+            state = GoalState("compare " + " ".join(order), previous)
+            async def choose(payload, n):
+                if n == 1:
+                    return plan(("property_calculator", {"smiles": order}))
+                return finish(next(r["id"] for r in payload["observations"] if r["arguments"]["smiles"] == order))
+            assert (await run(state, Model(choose), tools))["status"] == "completed"
+            previous = state.completed_observations
+            assert [r["arguments"]["smiles"] for r in previous.values()] == [order]
+
+        state = GoalState("compare candidate 2 to the lightest", previous)
+        async def compare(payload, n):
+            record, = payload["observations"]
+            if n == 3:
+                return finish(record["id"])
+            proposal = plan(("property_calculator", record["arguments"]))
+            proposal.arguments["mass_difference"] = {"subject": 3 if n == 1 else 2, "reference": "min"}
+            if n == 2:
+                assert "rejected" in payload["feedback"]
+            return proposal
+        answer = await run(state, Model(compare), tools)
+        assert answer["status"] == "completed"
+        assert "CCO（46.07 Da）比 CCN（45.08 Da）重 0.99 Da" in answer["text"]
+        assert len(tools.calls) == 2 and not state.receipts
+    asyncio.run(scenario())
+
+
+def test_new_batch_with_a_difference_still_displays_all_rows_in_input_order():
+    from src.web.goal_planning import _checked_report
+    step = SimpleNamespace(key="batch", tool_name="property_calculator")
+    rows = [{"smiles": s, "molecular_weight": w} for s, w in [("CCN", 45.08), ("CCO", 46.07), ("C", 16.04)]]
+    record = {"revision": 1, "ok": True, "facts": rows, "message": "CCN\nCCO\nC"}
+    answer = _checked_report([step], {"batch": record}, difference={"subject": "max", "reference": "min"})
+    assert answer["text"].startswith(record["message"] + "\n\n")
+    assert "30.03 Da" in answer["text"]
+
+
 def test_late_plan_and_revision_during_running_notification_never_dispatch_old_work():
     async def scenario():
         state = GoalState("look up P06276")

@@ -317,6 +317,7 @@ class _Sender:
         self.writable = True
         self.memory = []
         self.scientific_memory = []
+        self.completed_goal = {}
         self.waiting = None
         self.close_attempted = False
         self.close_delivered = False
@@ -2241,6 +2242,7 @@ class WebDecisionRuntime:
     async def _execute(self, handler, sender, turn):
         turn.started = True
         if self.full_web:
+            sender.completed_goal = {}
             turn.scientific_update = deepcopy(sender.scientific_memory[-1:])
             # Keep bounded socket-local records without letting an interrupted
             # or rejected intervening turn expose older evidence as "previous".
@@ -2349,6 +2351,8 @@ class WebDecisionRuntime:
                     # disconnect cleared this socket's server-only state.
                     if sender.writable and not self.closing:
                         capture_delivered = terminal_status == 'completed'
+                        if capture_delivered and turn.goal is not None:
+                            sender.completed_goal = turn.goal.completed_observations
                         if turn.history_update is not None:
                             sender.memory = turn.history_update.memory
                         if self.full_web and turn.scientific_update is not None:
@@ -2578,7 +2582,7 @@ class WebDecisionRuntime:
                 turn.expected_model_generation = expected_generation
                 if kind == 'goal_start':
                     from .goal_planning import GoalState
-                    turn.goal = GoalState(payload['message'])
+                    turn.goal = GoalState(payload['message'], sender.completed_goal)
                 await sender.send({'type': 'request_accepted', 'turn_id': turn.turn_id,
                                    'trace_id': turn.trace_id, **({'goal_revision': 1} if turn.goal else {})})
                 if self.closing:
@@ -2612,6 +2616,7 @@ class WebDecisionRuntime:
             sender.waiting = None
             sender.memory = []
             sender.scientific_memory.clear()
+            sender.completed_goal = {}
             sender.receiver_attached = False
             if controller is not None:
                 await controller.disconnect(sender)
@@ -2633,6 +2638,7 @@ class WebDecisionRuntime:
             sender.waiting = None
             sender.memory = []
             sender.scientific_memory.clear()
+            sender.completed_goal = {}
             controller = getattr(sender, '_chat_controller', None)
             if controller is not None:
                 await controller.disconnect(sender)

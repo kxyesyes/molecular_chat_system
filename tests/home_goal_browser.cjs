@@ -68,12 +68,51 @@ async function condition({frames, waitFor, submit}, smiles, shouldCheck) {
   console.log(JSON.stringify({test:"condition",smiles,calls,trace:done.trace_id,answer:done.content}));
 }
 
+async function finishedFollowups({frames, waitFor, submit, page}) {
+  for (const [question, expectedCalls, expectedText] of [
+    ["比较 CCO 和 CCN 的分子量", ["property_calculator"], /46\.07/],
+    ["第二个比分子量最大的那个轻多少", [], /0\.99 Da/],
+    ["只给较轻的那个查类药规则", ["drug_likeness_assessment"], /CCN：Lipinski/],
+  ]) {
+    frames.length = 0;
+    await submit(question, "发送消息");
+    const done = await waitFor(f => f.type === "complete");
+    assert.equal(done.status, "completed", done.content);
+    const calls = frames.filter(f => f.phase === "running").map(f => f.tool);
+    assert.deepEqual(calls, expectedCalls);
+    assert.match(done.content, expectedText);
+    if (calls.includes("property_calculator")) {
+      assert.match(done.content, /CCO：分子量 46\.07 Da[^\n]*\nCCN：分子量 45\.08 Da/);
+    }
+    if (!calls.length) {
+      assert.match(done.content, /CCN.*比 CCO.*轻 0\.99 Da/);
+      assert(frames.some(f => f.phase === "reused" && f.tool === "property_calculator"));
+    }
+    await page.getByText(expectedText).last().waitFor();
+    console.log(JSON.stringify({test:"completed_followup", trace:done.trace_id, calls, answer:done.content}));
+  }
+}
+
+async function emptySession({frames, waitFor, submit, page}) {
+  await submit("第二个呢", "发送消息");
+  const done = await waitFor(f => f.type === "complete");
+  assert.match(done.content, /请补充/);
+  assert.doesNotMatch(done.content, /CCO|CCN|0\.99/);
+  assert(!frames.some(f => f.phase === "running" || f.phase === "reused"));
+  await page.getByText(/请补充/).last().waitFor();
+  console.log(JSON.stringify({test:"empty_session", trace:done.trace_id, answer:done.content}));
+}
+
 (async () => {
   const browser = await chromium.launch({channel:"chrome"});
   try {
-    await exercise(browser, steering);
-    await exercise(browser, context => condition(context, "CCN", true));
-    await exercise(browser, context => condition(context, "CCCCCC", false));
+    if (!process.argv.includes("--followups")) {
+      await exercise(browser, steering);
+      await exercise(browser, context => condition(context, "CCN", true));
+      await exercise(browser, context => condition(context, "CCCCCC", false));
+    }
+    await exercise(browser, finishedFollowups);
+    await exercise(browser, emptySession);
   } finally {
     await browser.close();
   }

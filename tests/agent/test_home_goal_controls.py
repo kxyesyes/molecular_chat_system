@@ -4,6 +4,58 @@ import json
 from tests.agent.test_web_decision_runtime import ActualSocket, actual_app, cookie_for
 
 
+def test_finished_goal_followups_use_only_delivered_socket_evidence(actual_app):
+    from src.agent.evidence import EvidenceLedger
+
+    async def scenario():
+        async def respond(payload):
+            current = json.loads(payload["messages"][-1]["content"])
+            goal = current["goal"]
+            observations = current["observations"]
+            prop = dict(tool_name="property_calculator", arguments={"smiles": ["CCO", "CCN"]})
+            rule = dict(tool_name="drug_likeness_assessment", arguments={"smiles": ["CCN"]})
+            if goal == "第二个呢" or ("第二个" in goal and not observations):
+                assert not observations
+                return dict(version="1", action="clarify", question="请提供分子。", missing_fields=["smiles"])
+            step = rule if "类药" in goal else prop
+            args = {"steps": [step]}
+            if "轻多少" in goal:
+                args["mass_difference"] = {"subject": 2, "reference": "max"}
+            if current["plan_revision"]:
+                return dict(version="1", action="finish", response_kind="scientific", text="完成",
+                            evidence_ids=[r["id"] for r in observations if r["tool_name"] == step["tool_name"]])
+            return dict(version="1", action="tool", tool_name="plan_goal", purpose="核对请求", arguments=args)
+
+        async def ask(socket, message):
+            await socket.send(dict(type="goal_start", message=message, enable_tools=True))
+            frames = []
+            while not frames or frames[-1]["type"] != "complete":
+                frames.append(await socket.receive())
+            return frames[-1], [f["tool"] for f in frames if f.get("phase") == "running"]
+
+        async with actual_app(ordinary_policy=None, respond=respond) as bundle:
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                first, calls = await ask(socket, "比较 CCO 和 CCN 的分子量")
+                assert first["status"] == "completed" and calls == ["property_calculator"]
+                difference, calls = await ask(socket, "第二个比分子量最大的那个轻多少")
+                assert difference["status"] == "completed" and "0.99 Da" in difference["content"]
+                assert "CCN" in difference["content"] and "CCO" in difference["content"] and calls == []
+                rules, calls = await ask(socket, "只给较轻的那个查类药规则")
+                assert rules["status"] == "completed" and calls == ["drug_likeness_assessment"]
+                meta = bundle.app.decision_runtime.store.get_run(rules["trace_id"])["metadata"]
+                receipt, = meta["goal_receipts"]
+                assert receipt["provenance"]["input_digest"] == EvidenceLedger.output_digest(
+                    ["drug_likeness_assessment", receipt["tool_version"], {"query": "CCN"}])
+                again, calls = await ask(socket, "原来第二个轻多少")
+                assert "0.99 Da" in again["content"] and not calls
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as other:
+                await other.ready()
+                empty, calls = await ask(other, "第二个呢")
+                assert "请补充" in empty["content"] and not calls
+    asyncio.run(scenario())
+
+
 def test_goal_replans_on_the_actual_pi_socket_and_audits_only_real_calls(actual_app):
     async def check():
         awaiting_old_plan, release = asyncio.Event(), asyncio.Event()

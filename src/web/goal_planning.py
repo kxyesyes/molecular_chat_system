@@ -1,5 +1,6 @@
 """Plan one read-only homepage goal from user revisions and verified observations."""
 import asyncio
+from decimal import Decimal
 import json
 from threading import Lock
 import time
@@ -15,12 +16,14 @@ from .result_summary import TOOL_LABELS
 
 class GoalState:
     """One active turn. Revisions are applied on its WebSocket's event loop."""
-    def __init__(self, goal):
+    def __init__(self, goal, previous=None):
         self._texts = [goal]
         self._dispatch_lock = Lock()
         self.sealed = False
         self.receipts = []
         self.model_requests = 0
+        self.previous = previous or {}
+        self.completed_observations = {}
 
     @property
     def goal(self):
@@ -69,13 +72,22 @@ When ALL steps of the current plan have valid results, submit action "finish", r
 text "完成", and evidence_ids containing every actual receipt id from that plan, with no obsolete receipts.
 Do not fabricate id values. If inputs or a requirement cannot be resolved with this catalog, submit action
 "clarify" with a question and missing_fields (e.g. ["smiles"], ["uniprot_id"], ["goal"]). Never claim success
-when a necessary analysis is unsupported. Never propose writes, new molecules, or docking execution."""
+when a necessary analysis is unsupported. Never propose writes, new molecules, or docking execution.
+Revision 0 observations came from the immediately preceding completed analysis on this connection. Their
+ordered rows are the user's displayed candidates. Resolve ordinal references in that order, and lighter or
+heavier by molecular_weight. Prefer the explicit subjects of a new goal. Without matching evidence or
+explicit inputs, clarify. For a weight difference, plan the existing property_calculator batch with its exact
+SMILES in their original order. In the same plan_goal arguments include a "mass_difference" object
+with "subject" and "reference" selectors taken from the question: each is a 1-based row number,
+"min" (the lightest), or "max" (the heaviest).
+The server computes the difference from the verified rows. When asked for rules on a selected candidate,
+plan drug_likeness_assessment only for its exact SMILES. No new property check is required."""
 
 
-def _bind_plan(decision, tools, state, max_steps):
-    if decision.tool_name != 'plan_goal' or set(decision.arguments) != {'steps'}:
+def _bind_plan(decision, tools, user_texts, max_steps):
+    if decision.tool_name != 'plan_goal' or set(decision.arguments) - {'steps', 'mass_difference'}:
         raise ValueError
-    items = decision.arguments['steps']
+    items = decision.arguments.get('steps')
     if type(items) is not list or not 1 <= len(items) <= max_steps:
         raise ValueError
     steps = []
@@ -83,18 +95,40 @@ def _bind_plan(decision, tools, state, max_steps):
         if (type(item) is not dict or set(item) != {'tool_name', 'arguments'}
                 or type(item['tool_name']) is not str or type(item['arguments']) is not dict):
             raise ValueError
-        steps.append(tools.bind(item['tool_name'], item['arguments'], user_texts=state.user_texts))
+        steps.append(tools.bind(item['tool_name'], item['arguments'], user_texts=user_texts))
     if len({step.key for step in steps}) != len(steps):
         raise ValueError
-    return steps
+    difference = decision.arguments.get('mass_difference')
+    if 'mass_difference' in decision.arguments:
+        batches = [step for step in steps if step.tool_name == 'property_calculator']
+        if (len(batches) != 1 or type(difference) is not dict or set(difference) != {'subject', 'reference'}
+                or not all((type(value) is int and 1 <= value <= len(batches[0].arguments['smiles']))
+                           or value in ('min', 'max') for value in difference.values())):
+            raise ValueError
+    return steps, difference
 
 
-def _checked_report(steps, observations, *, notice='', status='completed'):
+def _checked_report(steps, observations, *, notice='', status='completed', difference=None):
     paragraphs = [notice] if notice else []
     for step in steps:
         observation = observations.get(step.key)
         if observation:
-            paragraphs.append(observation['message'])
+            if difference and step.tool_name == 'property_calculator' and observation['ok']:
+                if observation['revision'] > 0:
+                    paragraphs.append(observation['message'])
+                rows = observation['facts']
+                def select(selector):
+                    if type(selector) is int:
+                        return rows[selector - 1]
+                    return (min if selector == 'min' else max)(rows, key=lambda row: row['molecular_weight'])
+                subject, reference = select(difference['subject']), select(difference['reference'])
+                left, right = (Decimal(str(row['molecular_weight'])) for row in (subject, reference))
+                relation = '轻' if left < right else '重'
+                comparison = (f"比 {reference['smiles']}（{right} Da）{relation} {abs(right-left)} Da"
+                              if left != right else f"与 {reference['smiles']} 的分子量相同，相差 0 Da")
+                paragraphs.append(f"{subject['smiles']}（{left} Da）{comparison}。")
+            else:
+                paragraphs.append(observation['message'])
     return {'status': status, 'text': '\n\n'.join(paragraphs)}
 
 
@@ -115,7 +149,19 @@ class _GoalRun:
         self.deadline = deadline
         self.steps = []
         self.plan_revision = 0
+        self.difference = None
+        self.previous_inputs = []
         self.observations = {}
+        for key, record in state.previous.items():
+            args = record['arguments']
+            inputs = args['smiles'] if 'smiles' in args else [args['uniprot_id']]
+            try:
+                step = tools.bind(record['tool_name'], args, user_texts=inputs)
+            except ValueError:
+                continue
+            if step.key == key:
+                self.previous_inputs.extend(inputs)
+                self.observations[key] = dict(record, revision=0, id=f'p{len(self.observations)+1}')
         self.reported_reuse = set()
         self.failed_steps = {}
         self.feedback = ''
@@ -129,13 +175,17 @@ class _GoalRun:
         if self.cancelled():
             raise asyncio.CancelledError
 
+    @property
+    def binding_inputs(self):
+        return (*self.state.user_texts, *self.previous_inputs)
+
     def _current_steps(self):
         if self.plan_revision != self.state.revision:
             return []
         valid = []
         for step in self.steps:
             try:
-                matched = self.tools.bind(step.tool_name, step.arguments, user_texts=self.state.user_texts)
+                matched = self.tools.bind(step.tool_name, step.arguments, user_texts=self.binding_inputs)
             except ValueError:
                 continue
             if step.key == matched.key:
@@ -150,7 +200,25 @@ class _GoalRun:
             completed = False
         partial = any(self.observations.get(s.key, {}).get('ok') for s in steps)
         status = 'completed' if completed else 'partial' if partial else 'not_calculated'
-        self.answer = _checked_report(steps, self.observations, notice=notice, status=status)
+        self.answer = _checked_report(steps, self.observations, notice=notice, status=status,
+                                      difference=self.difference)
+        if completed:
+            selected = {s.key: self.observations[s.key] for s in steps}
+            prior = {k: r for k, r in self.observations.items() if r['revision'] == 0}
+            batches = [k for k, r in prior.items() if r['tool_name'] == 'property_calculator']
+            # A narrower rule check still belongs to the displayed batch. A new
+            # property batch (including a reordered one) starts its own context.
+            if len(batches) == 1:
+                batch = prior[batches[0]]
+                if all(s.key == batches[0] or (s.tool_name == 'drug_likeness_assessment'
+                       and set(s.arguments['smiles']) <= set(batch['arguments']['smiles'])) for s in steps):
+                    relevant = {k: r for k, r in prior.items() if r['tool_name'] == 'drug_likeness_assessment'
+                                and k not in selected}
+                    retained = {**relevant, **selected}
+                    retained.pop(batches[0], None)
+                    retained[batches[0]] = batch
+                    selected = dict(list(retained.items())[-self.tool_budget:])
+            self.state.completed_observations = selected
         # Stop accepting revisions at the same event-loop boundary as this
         # selection. The WebSocket publishes only after Pi physically settles.
         self.state.sealed = True
@@ -230,10 +298,11 @@ class _GoalRun:
             self.feedback = 'Finish rejected: replan missing checks; cite exactly the current matching receipts.'
         else:
             try:
-                steps = _bind_plan(decision, self.tools, self.state, self.tool_budget)
+                steps, difference = _bind_plan(decision, self.tools, self.binding_inputs, self.tool_budget)
             except ValueError:
                 self.feedback = 'Plan rejected: use plan_goal, catalog arguments and explicit user inputs.'
             else:
+                self.difference = difference
                 await self._advance(revision, steps)
         if self.answer is not None:
             return {'content': json.dumps({'status': self.answer['status']}), 'terminate': True}
