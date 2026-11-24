@@ -80,15 +80,15 @@ def assemble_docking_app(application, docking_service, *, logger=None):
                 raise DockingConsentError('consent_policy_unavailable')
             require_local_output_construction()
             toolchain = ChatDockingToolchain(docking_service)
+            timeout = toolchain.runtime_config()['docking']['vina_timeout_seconds']
+            if not 0 < timeout <= 300 or int(timeout) != timeout:
+                raise DockingConsentError('consent_policy_unavailable')
         except DockingConsentError:
             if 'MEDCHAT_CHAT_DOCKING_ENABLED' in os.environ:
                 raise
             if logger is not None:
-                logger.warning("Homepage docking unavailable: check the local task backend, chat handler and docking tools.")
+                logger.warning("Homepage docking unavailable: check the local task backend, chat handler, docking tools and Vina timeout (1–300 whole seconds).")
             return None
-        timeout = toolchain.runtime_config()['docking']['vina_timeout_seconds']
-        if not 0 < timeout <= 300 or int(timeout) != timeout:
-            raise ValueError
         policy = DockingConsentPolicy(toolchain.digest, MOLECULAR_DOCKING_ADAPTER_VERSION,
             'local', uuid4().hex, uuid4().hex, int(timeout), 420)
         output_root = private_output_root(os.environ.get('MEDCHAT_CHAT_DOCKING_OUTPUT_ROOT',

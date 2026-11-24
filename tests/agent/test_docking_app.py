@@ -198,7 +198,7 @@ def test_invalid_assembly_is_atomic_and_safe(application, rig, monkeypatch, case
     assert application.app.routes == routes
 
 
-@pytest.mark.parametrize('prerequisite', ['toolchain', 'backend'])
+@pytest.mark.parametrize('prerequisite', ['toolchain', 'backend', 'long_timeout', 'fractional_timeout'])
 def test_default_without_docking_prerequisites_keeps_generic_runtime(
         application, app_class, rig, monkeypatch, prerequisite):
     from src.task_runtime.runtime import acquire_task_runtime
@@ -206,6 +206,8 @@ def test_default_without_docking_prerequisites_keeps_generic_runtime(
     app.__dict__.update(vars(application))
     if prerequisite == 'backend':
         monkeypatch.setenv('MEDCHAT_TASK_BACKEND', 'temporal_canary')
+    elif prerequisite in {'long_timeout', 'fractional_timeout'}:
+        rig.service.vina_timeout_seconds = 600.0 if prerequisite == 'long_timeout' else 17.5
     service = object() if prerequisite == 'toolchain' else rig.service
     binding = app._bind_task_runtime(service)
     assert binding._factory is acquire_task_runtime
