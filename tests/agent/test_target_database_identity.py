@@ -72,6 +72,13 @@ def test_exact_pdb_named_accession_and_structure_details_keep_identity(gene, suc
         assert not service.structure_calls
 
 
+def test_exact_structure_at_end_of_named_accession_lookup_keeps_both_identifiers():
+    query = '请查询人源 WDR5（UniProt P61964）的实验结构 PDB 4QL1。'
+    result, service = execute(query, [{**bche_row(), 'gene_symbol': 'WDR5', 'uniprot_id': 'P61964'}])
+    assert result['success']
+    assert service.calls == [('P61964', {'pdb_id': '4QL1'})]
+
+
 def test_two_aliases_for_one_database_record_share_one_structure_lookup():
     row = {**egfr_row(), 'target_id': 131, 'gene_symbol': 'PDE5A', 'uniprot_id': 'O76074'}
     result, service = execute(['PDE5A', 'PDE5'], {'PDE5A': [row], 'PDE5': [row]})

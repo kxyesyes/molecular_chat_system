@@ -49,7 +49,7 @@ _EXPLICIT_ACCESSION_QUERY = re.compile(
     r"|[，,。]\s*列出(?:可用于对接的)?实验结构(?:编号与配体信息|，说明物种、结构编号和共晶配体信息)?"
     r"|的实验结构\s+列出结构信息和配体)?"
     r"(?:[，,]\s*列出\s*PDB\s*编号(?:及|和|与)结构方法)?"
-    r"[。.！!]?\s*", re.I,
+    r"\s*[。.！!]?\s*", re.I,
 )
 
 # Full evidence and model input have distinct limits. Leave envelope headroom
