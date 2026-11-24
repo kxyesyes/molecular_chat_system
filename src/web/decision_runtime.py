@@ -297,6 +297,7 @@ class _Turn:
     scientific_update: list | None = None
     reference_claim: dict | None = None
     result_format: str | None = None
+    goal: object = None
 
     def cancel(self):
         if self.result_started or self.finishing or self.cancel_event.is_set():
@@ -580,6 +581,8 @@ class _TurnSender:
                         row.get('status') in {'succeeded', 'partial'} and row.get('error') is None
                         for row in retrievals) else None)
             flag = self.turn.payload.get('enable_rag', True)
+            if getattr(self.turn, 'goal', None) is not None:
+                flag = False
             if self.turn.waiting is not None:
                 flag = self.turn.waiting.context.metadata['capabilities']['rag']
             frame['metadata']['rag_requested'] = flag if type(flag) is bool else None
@@ -1535,6 +1538,10 @@ class WebDecisionRuntime:
     async def _execute_segment(self, handler, sender, turn, *, allocation_sender=None):
         """The lease and all physical settlement stay inside the supervised child."""
         self._credit(turn)
+        if turn.goal is not None:
+            from .goal_delivery import execute_goal
+            await execute_goal(self, handler, sender, turn, allocation_sender or _TurnSender(sender, turn))
+            return
         execution_payload = turn.payload
         if self.full_web and turn.waiting is not None and tool_free_consultation_requested(turn.payload['message']):
             raise DecisionAdmissionError('consultation_requires_clarification')
@@ -2410,10 +2417,13 @@ class WebDecisionRuntime:
             scientific_tools = (WEB_TOOLS - {'rag_search'} if self.full_web else {
                 'property_calculator', 'drug_likeness_assessment',
                 'activity_predictor', 'target_database_search'})
+            from .goal_delivery import goal_available, valid_goal_text
+            goals = self.full_web and goal_available(registered)
             await sender.send({'type': 'connection_ready', 'normal_chat_mode': 'pi',
                 'reconnect_supported': not self.semantic,
                 'run_snapshot_api': True,
                 'capabilities': {'cancel': True, 'rag_retrieval': self.full_web and 'rag_search' in registered,
+                                 **({'goal_steering': True} if goals else {}),
                                  'scientific_tools': sorted(registered & scientific_tools),
                                  **({'result_formats': ['summary_details_v1']} if self.full_web else {}),
                                  **({'chat_docking': {'preparation_available': True,
@@ -2464,11 +2474,34 @@ class WebDecisionRuntime:
                     else:
                         await sender.send({'type': 'error', 'code': 'invalid_control'})
                     continue
+                if kind == 'goal_update':
+                    matched = (turn is not None and turn.goal is not None and payload.get('turn_id') == turn.turn_id
+                               and payload.get('trace_id') == turn.trace_id)
+                    if (not matched or set(payload) != {'type', 'turn_id', 'trace_id', 'revision', 'message'}
+                            or type(payload.get('revision')) is not int or payload['revision'] != turn.goal.revision
+                            or turn.goal.revision >= self.max_model_requests
+                            or turn.goal.model_requests >= self.max_model_requests or turn.goal.sealed or turn.result_started
+                            or turn.finishing or turn.task.done() or turn.cancel_event.is_set()
+                            or not valid_goal_text(payload.get('message'), handler._input_limit())):
+                        await sender.send(dict(type='error', code='goal_update_rejected', turn_id=payload.get('turn_id'),
+                            trace_id=payload.get('trace_id'), revision=turn.goal.revision if matched else None))
+                        continue
+                    turn.goal.revise(payload['message'])
+                    await sender.send(dict(type='goal_updated', turn_id=turn.turn_id, trace_id=turn.trace_id,
+                        revision=turn.goal.revision, message=payload['message']))
+                    continue
                 allowed_kinds = {'chat', 'resume', 'abandon'}
+                if goals:
+                    allowed_kinds.add('goal_start')
                 if controller is not None:
                     allowed_kinds.update({'docking_refine', 'docking_watch'})
                 if kind not in allowed_kinds:
                     await sender.send({'type': 'error', 'code': 'invalid_control'})
+                    continue
+                if kind == 'goal_start' and (
+                        set(payload) != {'type', 'message', 'enable_tools'} or payload['enable_tools'] is not True
+                        or sender.waiting is not None or not valid_goal_text(payload['message'], handler._input_limit())):
+                    await sender.send(dict(type='error', code='invalid_goal_request'))
                     continue
                 # C controls address an existing attachment, not a new A2
                 # turn. Preserve their strict validation/status semantics even
@@ -2543,8 +2576,11 @@ class WebDecisionRuntime:
                         if waiting is not None else _Turn(payload))
                 turn.result_format = result_format
                 turn.expected_model_generation = expected_generation
+                if kind == 'goal_start':
+                    from .goal_planning import GoalState
+                    turn.goal = GoalState(payload['message'])
                 await sender.send({'type': 'request_accepted', 'turn_id': turn.turn_id,
-                                   'trace_id': turn.trace_id})
+                                   'trace_id': turn.trace_id, **({'goal_revision': 1} if turn.goal else {})})
                 if self.closing:
                     break
                 operation = self._execute(handler, sender, turn)

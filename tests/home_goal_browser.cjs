@@ -1,0 +1,80 @@
+// Against one running homepage, using its saved model configuration and real tools.
+const assert = require("node:assert/strict");
+const {chromium} = require("playwright");
+
+async function exercise(browser, run) {
+  const page = await browser.newPage();
+  const frames = [];
+  page.on("websocket", socket => socket.on("framereceived", envelope => {
+    frames.push(JSON.parse(envelope.payload));
+  }));
+  async function waitFor(predicate) {
+    const deadline = Date.now() + 180000;
+    while (Date.now() < deadline) {
+      const match = frames.find(predicate);
+      if (match) return match;
+      const terminal = frames.find(frame => frame.type === "complete" || frame.type === "error");
+      if (terminal) throw Error(JSON.stringify(terminal));
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw Error("Timed out waiting for homepage goal event");
+  }
+  async function submit(question, button) {
+    await page.getByRole("textbox", {name: "消息"}).fill(question);
+    await page.getByRole("button", {name: button, exact: true}).click();
+  }
+  try {
+    await page.goto("http://127.0.0.1:6001");
+    await page.getByRole("button", {name: "按目标分析", exact: true}).click();
+    await run({frames, waitFor, submit, page});
+  } finally {
+    await page.close();
+  }
+}
+
+async function steering({frames, waitFor, submit, page}) {
+  await submit("请先比较 CCO 和 CCN 的分子量和亲脂性，再检查这两个分子的类药规则。", "发送消息");
+  const first = await waitFor(f => f.type === "goal_progress" && f.phase === "observed");
+  assert.equal(first.tool, "property_calculator");
+  assert(!frames.some(f => f.type === "complete"));
+  await submit("保留两者刚算出的分子量和 logP，取消类药规则检查。再查 UniProt P06276 的结构记录，给我能核对的实验 PDB 编号。", "更新目标");
+  const changed = await waitFor(f => f.type === "goal_updated");
+  assert.equal(changed.revision, 2);
+  assert.equal(changed.trace_id, first.trace_id);
+  const done = await waitFor(f => f.type === "complete");
+  assert.equal(done.status, "completed", done.content);
+  assert.equal(done.goal_revision, 2);
+  assert.deepEqual(frames.filter(f => f.phase === "running").map(f => f.tool),
+                   ["property_calculator", "target_database_search"]);
+  assert(frames.some(f => f.revision === 2 && f.phase === "reused" && f.tool === "property_calculator"));
+  assert.match(done.content, /46\.0/);
+  assert.match(done.content, /45\.0/);
+  assert.match(done.content, /P06276/);
+  assert.match(done.content, /\b[1-9][A-Z0-9]{3}\b/);
+  await page.getByText(/UniProt P06276/).last().waitFor();
+  console.log(JSON.stringify({test:"steering",trace:first.trace_id,revision:done.goal_revision,
+    calls:frames.filter(f=>f.phase==="running").map(f=>f.tool),answer:done.content}));
+}
+
+async function condition({frames, waitFor, submit}, smiles, shouldCheck) {
+  await submit(`比较 CCO 和 ${smiles} 的分子量。如果两者实际分子量相差不到 2 Da，再核对这两个分子的类药规则；否则只给出已算出的性质。`, "发送消息");
+  const done = await waitFor(f => f.type === "complete");
+  assert.equal(done.status, "completed", done.content);
+  const calls = frames.filter(f => f.phase === "running").map(f => f.tool);
+  assert.deepEqual(calls, shouldCheck ? ["property_calculator","drug_likeness_assessment"] : ["property_calculator"]);
+  assert.match(done.content, /CCO/);
+  assert(done.content.includes(smiles));
+  assert.equal(done.content.includes("Lipinski"), shouldCheck);
+  console.log(JSON.stringify({test:"condition",smiles,calls,trace:done.trace_id,answer:done.content}));
+}
+
+(async () => {
+  const browser = await chromium.launch({channel:"chrome"});
+  try {
+    await exercise(browser, steering);
+    await exercise(browser, context => condition(context, "CCN", true));
+    await exercise(browser, context => condition(context, "CCCCCC", false));
+  } finally {
+    await browser.close();
+  }
+})().catch(error => {console.error(error.message); process.exitCode = 1;});

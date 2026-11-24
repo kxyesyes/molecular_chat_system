@@ -152,9 +152,9 @@ function loadHome({request, fetchDetails, format = String, storedPointer = null,
     renderer: window.HomeChatRenderer, detailsMounts, detailsAborts: () => detailsAborts,
     send: () => window.testHome.sendMessage(), reconnect: () => window.testHome.connectWebSocket(),
     button: name => body.querySelectorAll("button").find(b => b.textContent === name),
-    ready: (mode, docking = false, details = false) => sockets.at(-1).emit({type: "connection_ready", normal_chat_mode: mode,
+    ready: (mode, docking = false, details = false, goals = false) => sockets.at(-1).emit({type: "connection_ready", normal_chat_mode: mode,
       capabilities: {cancel: true, rag_retrieval: false, scientific_tools: ["property_calculator"],
-        ...(details ? {result_formats: ["summary_details_v1"]} : {}),
+        ...(goals ? {goal_steering: true} : {}), ...(details ? {result_formats: ["summary_details_v1"]} : {}),
         ...(docking ? {chat_docking: {preparation_available: true, execution_authorized: false}} : {})}}),
     flushTimers: () => {const pending = [...timers.values()]; timers.clear(); pending.forEach(t => t.fn());},
   };
@@ -189,6 +189,72 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
+  await test("goal revisions update one live analysis and preserve a newer draft", () => {
+    const h = loadHome(); h.ready("pi", false, false, true);
+    const mode = h.button("按目标分析"), send = h.render.elements.sendBtn;
+    const offset = h.socket.sent.length;
+    mode.click();
+    h.input.value = "为这两个结构准备实验前简报"; send.click(); send.click();
+    assert.deepEqual(h.socket.sent.slice(offset), [{type: "goal_start", message: "为这两个结构准备实验前简报",
+      enable_tools: true}]);
+    assert(send.disabled);
+    h.socket.emit({...accepted(), goal_revision: 1});
+    assert(!send.disabled && mode.disabled);
+    const frame = {turn_id: turn, trace_id: trace, revision: 1, type: "goal_progress", phase: "observed", message: "性质已核验"};
+    h.socket.emit(frame); assert(h.chat.textContent.includes("性质已核验"));
+    const changed = "保留性质数据，只补做剩余分析";
+    h.input.value = changed; send.click(); h.send();
+    assert.deepEqual(h.socket.sent.at(-1), {type: "goal_update", turn_id: turn, trace_id: trace, revision: 1, message: changed});
+    assert(send.disabled && h.socket.sent.length === offset + 2);
+    h.input.value = "第三版草稿";
+    const ack = {...frame, type: "goal_updated", revision: 2, message: changed};
+    h.socket.emit({...ack, trace_id: nonce}); h.socket.emit({...ack, revision: 3});
+    assert(send.disabled && !h.chat.textContent.includes(changed));
+    h.socket.emit(ack); h.socket.emit(ack);
+    assert.equal(h.chat.querySelectorAll(".user-message").length, 2);
+    assert(h.chat.textContent.includes(changed) && !send.disabled);
+    assert.equal(h.input.value, "第三版草稿");
+    h.socket.emit({...frame, message: "迟到的旧进度"}); assert(!h.chat.textContent.includes("迟到的旧进度"));
+    h.socket.emit({...frame, revision: 2, phase: "reused", message: "已复用性质"}); assert(h.chat.textContent.includes("已复用性质"));
+    h.socket.emit({...result("completed"), goal_revision: 1}); assert(!send.disabled);
+    h.socket.emit({...complete("completed"), goal_revision: 1}); assert(mode.disabled);
+    h.socket.emit(result("completed")); assert(send.disabled);
+    h.socket.emit(complete("completed")); assert(!send.disabled && !mode.disabled);
+    assert.equal(h.chat.querySelectorAll(".assistant-message.complete").length, 1);
+  });
+  await test("goal mode requires the server capability and a rejected update keeps its draft", () => {
+    const h = loadHome(); h.ready("pi"); assert(!h.button("按目标分析") || h.button("按目标分析").hidden);
+    h.ready("pi", false, false, true); h.button("按目标分析").click();
+    h.input.value = "研究目标"; h.send(); h.socket.emit({...accepted(), goal_revision: 1});
+    h.input.value = "改目标"; h.send();
+    const error = {type: "error", code: "goal_update_rejected", trace_id: trace, turn_id: turn, revision: 1};
+    h.socket.emit({...error, turn_id: nonce}); assert(h.render.elements.sendBtn.disabled);
+    h.socket.emit(error); assert(!h.render.elements.sendBtn.disabled && h.input.value === "改目标");
+    assert(h.chat.querySelector('[role="status"]').textContent.includes("更新未被接受"));
+    h.send(); assert.deepEqual(h.socket.sent.at(-1), h.socket.sent.at(-2));
+  });
+  await test("rejected goal start restores the draft without sending a second request", () => {
+    const h = loadHome(); h.ready("pi", false, false, true); h.button("按目标分析").click();
+    h.input.value = "我的目标"; h.send();
+    const sent = h.socket.sent.length;
+    h.socket.emit({type: "error", code: "invalid_goal_request"});
+    assert(!h.render.elements.sendBtn.disabled && h.input.value === "我的目标");
+    assert(h.chat.textContent.includes("目标未被接受") && h.socket.sent.length === sent);
+    h.send(); h.input.value = "后来编辑的草稿";
+    h.socket.emit({type: "error", code: "invalid_goal_request"});
+    assert.equal(h.input.value, "后来编辑的草稿");
+  });
+  await test("a finished goal never swallows a racing revision", () => {
+    const h = loadHome(); h.ready("pi", false, false, true); h.button("按目标分析").click();
+    const notices = []; h.renderer.showNotification = msg => notices.push(msg);
+    h.input.value = "初始目标"; h.send(); h.socket.emit({...accepted(), goal_revision: 1});
+    h.input.value = "刚编辑的目标"; h.send();
+    h.socket.emit({...result("completed"), goal_revision: 1});
+    h.socket.emit({...complete("completed"), goal_revision: 1});
+    assert(!h.render.elements.sendBtn.disabled && h.input.value === "刚编辑的目标");
+    assert.equal(h.chat.querySelectorAll(".user-message").length, 1);
+    assert(notices.some(msg => msg.includes("目标修改未生效")));
+  });
   await test("a delivered target stays readable and the next draft waits for its own handoff", () => {
     const h = loadHome(); h.ready("pi", true); start(h);
     h.socket.emit(result("completed"));
@@ -1290,7 +1356,7 @@ async function run() {
     const scripts = [...template.matchAll(/<script\s+src="([^"]*\/home\/(?:main|scientific_references)\.js[^"]*)"/g)].map(m => m[1]);
     assert.deepEqual(scripts, [
       "/static/js/home/scientific_references.js?v=20261124-selection-confirmation",
-      "/static/js/home/main.js?v=20261124-selection-confirmation",
+      "/static/js/home/main.js?v=20261124-goal-steering",
     ]);
   });
   await test("WebSocket transport follows the page protocol", () => {
