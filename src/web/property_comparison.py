@@ -365,7 +365,7 @@ def accepted_batch_property_evidence(result, query, session_id):
             rows[identity.canonical_smiles]['molecule_label'] = labels[identity.smiles]
     return {'session_id': session_id, 'trace_id': result['trace_id'],
             'evidence_id': sequence[0]['quality']['evidence_id'],
-            'rows': [{'smiles': smiles, **rows[smiles]} for smiles in expected]}
+            'rows': [{'smiles': smiles, **values} for smiles, values in rows.items()]}
 
 
 def batch_property_followup(query, history, session_id) -> tuple[dict, dict] | None:

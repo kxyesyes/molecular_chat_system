@@ -2,6 +2,7 @@ const TargetSearchApp = (() => {
   const STRUCTURES_PER_PAGE = 8;
   let searchVersion = 0;
   let selectionVersion = 0;
+  let preparingButton = null;
   let selectedTargetId = null;
   let currentDetail = null;
   let structurePage = 1;
@@ -194,7 +195,7 @@ const TargetSearchApp = (() => {
   async function runSearch(query) {
     const trimmed = (query || "").trim();
     const version = ++searchVersion;
-    ++selectionVersion;
+    changeSelection();
     selectedTargetId = null;
     currentDetail = null;
     structurePage = 1;
@@ -298,7 +299,7 @@ const TargetSearchApp = (() => {
   }
 
   async function loadDetail(targetId) {
-    const version = ++selectionVersion;
+    const version = changeSelection();
     currentDetail = null;
     hideMessage();
     selectedTargetId = Number(targetId);
@@ -635,24 +636,30 @@ const TargetSearchApp = (() => {
     }
   }
 
-  async function sendToDocking(structureId, button) {
-    const version = ++selectionVersion;
+  function changeSelection(button = null) {
+    if (preparingButton) preparingButton.disabled = false;
+    preparingButton = button;
     if (button) button.disabled = true;
+    return ++selectionVersion;
+  }
+
+  async function sendToDocking(structureId, button) {
+    const version = changeSelection(button);
     showMessage("正在准备对接结构…", "info");
     try {
       const data = await TargetSearchApi.sendToDocking(structureId);
-      if (version === selectionVersion) {
-        if (data.file_format !== "pdb" || data.structure_db_id !== Number(structureId)) {
-          throw new Error("未取得所选结构的 PDB 文件，请重试。");
-        }
-        showMessage(formatPreflightMessage(data.preflight, "docking"), data.preflight.suitable_for_direct_docking ? "success" : "info");
-        window.location.href = `/molecular-docking?target_structure=${encodeURIComponent(structureId)}`;
-        return;
+      if (version !== selectionVersion) return;
+      if (data.file_format !== "pdb" || data.structure_db_id !== Number(structureId)) {
+        throw new Error("未取得所选结构的 PDB 文件，请重试。");
       }
+      showMessage(formatPreflightMessage(data.preflight, "docking"), data.preflight.suitable_for_direct_docking ? "success" : "info");
+      window.location.href = `/molecular-docking?target_structure=${encodeURIComponent(structureId)}`;
     } catch (error) {
-      if (version === selectionVersion) showMessage(formatStructureActionError(error), "error");
+      if (version !== selectionVersion) return;
+      showMessage(formatStructureActionError(error), "error");
+      if (button) button.disabled = false;
+      preparingButton = null;
     }
-    if (button) button.disabled = false;
   }
 
   function formatPreflightMessage(preflight, intent) {

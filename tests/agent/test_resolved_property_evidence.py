@@ -34,6 +34,35 @@ def turn(chat, query, history, *, reference=None, selection=None, owner="owner")
     return complete
 
 
+def test_reread_and_repeat_follow_the_rendered_order_through_web_turns(tmp_path):
+    from src.agent.utils.validators import InputValidator
+
+    class ReverseRows(RecordingProperties):
+        def execute(self, query):
+            result = super().execute(query)
+            result['data'].reverse()
+            return result
+
+    properties = ReverseRows()
+    chat = make_web_handler([properties], SQLiteAgentStateStore(str(tmp_path / 'agent.sqlite')))
+    history = []
+    batch = turn(chat, '比较 CCO 和 CCN 的分子量。', history)
+    assert batch['status'] == 'completed', (batch['content'], properties.calls)
+    assert batch['content'].index('CCN') < batch['content'].index('CCO')
+    assert len(properties.calls) == 1
+    for query, smiles in [('第二个的分子量是多少？', 'CCO'), ('那第一个呢？', 'CCN'), ('它的分子量是多少？', 'CCN')]:
+        view = turn(chat, query, history)
+        assert view['status'] == 'completed' and smiles in view['content']
+        assert ('CCO' if smiles == 'CCN' else 'CCN') not in view['content']
+        assert len(properties.calls) == 1
+    repeat = turn(chat, '重新算一次', history)
+    assert repeat['status'] == 'completed' and 'CCN' in repeat['content']
+    assert len(properties.calls) == 2
+    assert list(InputValidator().analyze_molecular_input(properties.calls[-1]).valid_smiles) == ['CCN']
+    assert 'CCO' in turn(chat, '那第二个呢？', history)['content']
+    assert len(properties.calls) == 2
+
+
 @pytest.mark.parametrize("query,selection,smiles", [
     ("只计算刚才第一个分子的分子量和 logP，不要 ADMET 或活性", None, "CCO"),
     ("只计算分子量和 logP，不要 ADMET 或活性", {"ordinal": 2}, "CCN"),

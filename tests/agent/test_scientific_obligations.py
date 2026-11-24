@@ -550,8 +550,13 @@ def test_batch_property_results_must_match_every_requested_structure():
     from src.web.decision_runtime import _batch_property_rows_match
     plan = ScientificObligationCompiler().compile('比较 CCO 和 CCN 的分子性质。')
     assert _batch_property_rows_match(plan, [{'smiles': 'CCO'}, {'smiles': 'CCN'}])
+    assert _batch_property_rows_match(plan, [{'smiles': 'CCN'}, {'smiles': 'OCC'}])
+    assert not _batch_property_rows_match(plan, [{'smiles': 'CCO'}, {'smiles': 'OCC'}])
     assert not _batch_property_rows_match(plan, [{'smiles': 'CCO'}])
     assert not _batch_property_rows_match(plan, [{'smiles': 'CCO'}, {'smiles': 'CCC'}])
+    combined = ScientificObligationCompiler().compile('比较 CCO 和 CCN 的分子量、logP 和 ADMET。')
+    assert combined.workflow_version == 'web-property-admet-batch-v1'
+    assert not _batch_property_rows_match(combined, [{'smiles': 'CCN'}, {'smiles': 'CCO'}])
 
 
 def test_batch_plan_rejects_identity_and_step_tampering():
