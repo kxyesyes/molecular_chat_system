@@ -1985,7 +1985,11 @@
     messageWrapper.appendChild(messageContainer);
     elements.chatContainer.appendChild(messageWrapper);
 
-    if (typeof dockingUI !== "undefined") dockingUI?.begin(ws, messageWrapper);
+    if (typeof dockingUI !== "undefined") dockingUI?.begin(ws, tag => {
+      const response = document.createElement(tag);
+      messageWrapper.parentNode?.insertBefore(response, messageWrapper.nextSibling);
+      return response;
+    });
   }
 
   // 添加助手消息 - 美化版

@@ -39,6 +39,11 @@ class Element {
   focus() {}
   get isConnected() {return this.root === true || Boolean(this.parentNode?.isConnected);}
   get lastChild() {return this.children.at(-1);}
+  get nextSibling() {
+    if (!this.parentNode) return null;
+    const siblings = this.parentNode.children;
+    return siblings[siblings.indexOf(this) + 1] ?? null;
+  }
   contains(c) {return c === this || this.children.some(x => x.contains(c));}
   get textContent() {return this._text + this.children.map(c => c.textContent).join("");}
   set textContent(s) {this.replaceChildren(); this._text = String(s);}
@@ -846,7 +851,10 @@ async function run() {
         view_status: "ACTIVE", task_status: "unavailable", cleanup_status: "pending", reason_code: "status_active",
         persistence_pending: false, missing_fields: [], preview: null, result: null};
       h.socket.emit(event);
-      assert(h.chat.textContent.includes("MOLECULAR DOCKING"), "normal homepage must mount its actual C event");
+      assert(h.chat.textContent.includes("分子对接"), "normal homepage must mount its actual C event");
+      const card = h.chat.querySelector(".docking-consent-card");
+      assert(card.parentNode === h.chat, "docking response needs its own chat row");
+      assert(h.chat.querySelector(".user-wrapper").nextSibling === card, "response must follow its original request");
       const count = h.socket.sent.filter(frame => frame.type === "chat").length;
       h.input.value = "another message"; h.send();
       assert.strictEqual(h.socket.sent.filter(frame => frame.type === "chat").length, count);
