@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 _PREFLIGHT_MESSAGES = {
+    'source_unknown_element': (
+        '这份实验结构将部分原子的元素标为 X，无法可靠准备受体，本次未启动对接。'
+        '请从该靶点的实验结构中选择元素标注完整的记录。'),
     'source_context_unsupported': (
         '实验结构文件已获取，但其中的结构语境暂不受当前核验流程支持；本次未启动对接。'
         '请尝试其他实验结构。'),

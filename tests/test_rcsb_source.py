@@ -95,6 +95,15 @@ def compile_sample(sample, **kwargs):
     return api().compile_rcsb_source(*sample, pdb_id="1ABC", target=kwargs.get("target", {"uniprot_id": "P06276", "taxonomy_id": 9606}))
 
 
+def test_unknown_element_marker_cannot_be_used_for_receptor_preparation(sample):
+    pdb, cif, components = sample
+    lines = pdb.splitlines(keepends=True)
+    index = next(i for i, line in enumerate(lines) if line.startswith(b"HETATM"))
+    lines[index] = lines[index][:76] + b" X" + lines[index][78:]
+    result = compile_sample((b"".join(lines), cif, components))
+    assert result == {"ok": False, "code": "RCSB_SOURCE_INVALID", "reason": "unknown_element"}
+
+
 def rejected(result):
     assert result["ok"] is False
     assert result["code"] == "RCSB_SOURCE_INVALID"

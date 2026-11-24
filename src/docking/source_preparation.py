@@ -74,7 +74,7 @@ def _source_candidate(pdb_id, accession, taxonomy, deadline):
         reason = exc.args[0] if len(exc.args) == 1 and type(exc.args[0]) is str else "cif_invalid"
         return compiler._error(reason if reason in compiler.SAFE_REASONS else "cif_invalid")
     except pdb.ProjectionInvalid as exc:
-        return compiler._error("resource_limit" if exc.args == ("resource_limit",) else "source_invalid")
+        return compiler._projection_error(exc)
     except (ValueError, RuntimeError, KeyError, IndexError, UnicodeError, MemoryError, ImportError):
         # Mirror the pure compiler's fixed parsing-error boundary ONLY while
         # comparing. A download failure (also RuntimeError) is not a CIF error.

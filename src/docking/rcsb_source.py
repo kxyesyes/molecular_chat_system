@@ -35,7 +35,7 @@ MAX_CELLS = 2_000_000
 SAFE_REASONS = frozenset({"input_invalid", "resource_limit", "parser_version",
     "cif_invalid", "revision_mismatch", "inventory_mismatch", "sequence_invalid",
     "target_mismatch", "component_invalid", "context_unsupported", "connection_invalid",
-    "constraint_invalid", "source_invalid"})
+    "constraint_invalid", "source_invalid", "unknown_element"})
 
 
 class _Invalid(ValueError):
@@ -49,6 +49,12 @@ def _require(condition, reason="cif_invalid"):
 
 def _error(reason):
     return {"ok": False, "code": "RCSB_SOURCE_INVALID", "reason": reason}
+
+
+def _projection_error(exc):
+    if isinstance(exc, p1.UnknownAtomElement):
+        return _error("unknown_element")
+    return _error("resource_limit" if exc.args == ("resource_limit",) else "source_invalid")
 
 
 def _text(value, pattern=r"[A-Za-z0-9_.:+-]{1,128}"):
@@ -1098,6 +1104,6 @@ def compile_rcsb_source(pdb_bytes, cif_bytes, component_files, *, pdb_id, target
     except _Invalid as exc:
         return _error(exc.args[0])
     except p1.ProjectionInvalid as exc:
-        return _error("resource_limit" if exc.args == ("resource_limit",) else "source_invalid")
+        return _projection_error(exc)
     except (ValueError, RuntimeError, KeyError, IndexError, UnicodeError, MemoryError, ImportError):
         return _error("cif_invalid")
