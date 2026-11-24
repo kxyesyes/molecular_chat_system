@@ -2,8 +2,19 @@
 import re
 
 
-def asks_about_given_information(query):
-    """Limit reconsideration of rejected plans to explicit evidence-interpretation questions."""
+def selected_row_summary(query):
+    """A request to restate the chosen row, with no new labelled structure input."""
+    return (re.search(r'(?:选中|所选)(?:的)?(?:那|这)?一?(?:行|个分子|候选)|(?:当前这?|这|那)一?行|它的', query) is not None
+            and re.search(r'摘要|总结|概括|转述|复述|简述', query) is not None
+            and not re.search(r'SMILES\s*[:：=]', query, re.I))
+
+
+def asks_about_given_information(query, *, prior_activity_context=None, prior_candidate_context=None):
+    """Recognize readback of a resolved row or explicitly supplied evidence."""
+    if prior_activity_context and prior_activity_context.get('selected_smiles'):
+        return True
+    if prior_candidate_context and prior_candidate_context.get('selected_smiles') and selected_row_summary(query):
+        return True
     return re.search(
         r'(?:仅|只)(?:凭|据|根据|依据)(?:上述|以上|这些|现有|所给)(?:信息|数据|结果|证据)'
         r'|(?:能否|能|可以|可否)(?:仅)?(?:由此|据此)(?:认定|断定|推断|判断|认为|证明|声称)'
@@ -28,6 +39,9 @@ def tool_free_consultation_requested(query):
         return False
     # Quoted examples are objects of the request, including their punctuation.
     query = re.sub(r'''"[^"]*"|“[^”]*”|‘[^’]*’|「[^」]*」|(?<!\w)'[^']*'(?!\w)|`[^`]*`''', '_', query)
+    if re.search(r'(?:^|[。！？!?，,]\s*)只(?:给|写|输出)(?:[一二三四五六七八九十\d]+句)?(?:台词|问句|问题)'
+                 r'[，,]\s*(?:不要|不)(?:解答|回答)(?:台词中|其中|里面)?的?问题[。.!！]?\s*$', query):
+        return True
     return any(
         _NO_TOOLS.fullmatch(clause.strip()) for clause in re.split(
             r'[，,；;。!?！？\n]|\.(?=\s|$)', query))

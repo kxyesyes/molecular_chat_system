@@ -86,6 +86,7 @@ def test_activity_batch_switches_candidate_without_losing_consistency_question(t
     rows = {'一': ('CCO', '0.13', '4.3', '一致'), '二': ('CCN', '0.21', '6.7', '不一致')}
     for query, position in [(f'第{first}个分子的分类与回归是否一致？', first),
                             (f'那第{second}个呢？', second),
+                            ('刚才那两个里，另一个呢？', first), ('那另一个呢？', second),
                             ('那第3个呢？', None), ('那它呢？', second),
                             (f'第{first}个呢？', first)]:
         result = ask(query)
@@ -296,11 +297,153 @@ def accepted_snapshot():
     return evidence
 
 
+NAMED_BATCH = '回到刚才那批 BuChE 活性预测，第二个分子的 pIC50 换算成多少 μM？只使用已有结果。'
+
+
+def test_brief_activity_clarification_survives_row_corrections_and_bounds(tmp_path):
+    handler, tool, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+    turn(handler, '预测 CCO 和 CCN 对 BuChE 的活性。', history, SESSION)
+    brief = '这两种估计怎么对不上，你能用一句话说说是怎么回事吗？'
+    def ask(question):
+        return turn(handler, question, history, SESSION)[0]
+
+    assert '序号或 SMILES' in ask(brief)['content']
+    assert '缺少所选分子' in ask('CCC')['content']
+    for question, selected, result in (
+        ('帮我看一下第二行。', 'CCN', '标签不一致'),
+        ('不好意思，其实我想看的是第一行。', 'CCO', '标签一致'),
+        ('那第三行呢？', None, '序号'),
+        ('下一行', 'CCN', '标签不一致'),
+        ('不是第二行，是第一行。', 'CCO', '标签一致'),
+        ('CCO', 'CCO', '标签一致'),
+    ):
+        view = ask(question)
+        assert result in view['content']
+        if selected:
+            assert selected in view['content'] and '指标 | 结果' not in view['content']
+        else:
+            assert view['status'] == 'not_calculated' and '4.3' not in view['content']
+    assert len(tool.calls) == 1
+
+
+@pytest.mark.parametrize('query', ['能把刚才那个微摩尔数值帮我换算成 nM 吗？', '那用纳摩尔呢？', '改用 nM'])
+def test_change_only_the_unit_of_the_selected_row(query):
+    selection = {'activity_evidence': accepted_snapshot(), 'activity_display_order': ['CCN', 'CCO'],
+                 'activity_position': 1, 'activity_conversion': {'unit': 'μM', 'explain': False}}
+    changed = followup_answer(query, [selection], SESSION)
+    assert changed and '199.5 nM' in changed['final_answer'] and 'CCO' not in changed['final_answer']
+    assert '需复核' in changed['final_answer']
+    following = followup_answer('那第二个呢？', [{**selection, **changed}], SESSION)
+    assert '5.012e+04 nM' in following['final_answer'] and 'CCO' in following['final_answer']
+    back = followup_answer('剩下那个呢？', [{**selection, **following}], SESSION)
+    assert '199.5 nM' in back['final_answer'] and '需复核' in back['final_answer']
+    assert 'CCN' in back['final_answer'] and 'CCO' not in back['final_answer']
+    assert followup_answer(query, [selection], 'other') is None
+    assert followup_answer(query + ' 再预测 CCC。', [selection], SESSION) is None
+    waiting = followup_answer(query, [{**selection, 'activity_position': None}], SESSION)
+    assert waiting['status'] == 'not_calculated' and '序号或 SMILES' in waiting['final_answer']
+    assert waiting['activity_conversion']['unit'] == 'nM'
+
+
+def test_colloquial_two_weights_are_calculated_and_compared(tmp_path):
+    handler, activity, admet = handler_for(tmp_path, synthetic_rows())
+    view, _ = turn(handler, '麻烦你先查一下 CCO 和 CCN 各有多重，再告诉我哪个更重？', [], SESSION)
+    assert view['status'] == 'completed'
+    assert all(word in view['content'] for word in ('CCO', 'CCN', '46.07', '45.08', '第一个结构较高'))
+    assert not activity.calls and not admet.calls
+
+
+@pytest.mark.parametrize('position,smiles,score,conclusion', [(1, 'CCN', '6.7', '不一致'), (2, 'CCO', '4.3', '一致')])
+def test_one_sentence_checks_current_row_before_accepting_the_question(position, smiles, score, conclusion):
+    selection = {'activity_evidence': accepted_snapshot(), 'activity_display_order': ['CCN', 'CCO'],
+                 'activity_position': position, 'activity_conversion': {'unit': 'nM', 'explain': False}}
+    question = '这两种估计怎么对不上，你能用一句话说说是怎么回事吗？'
+    view = followup_answer(question, [selection], SESSION)
+    assert view and smiles in view['final_answer'] and score in view['final_answer']
+    assert conclusion in view['final_answer']
+    assert ('需复核' in view['final_answer']) == (position == 1)
+    assert view['activity_conversion'] == selection['activity_conversion']
+    assert view['activity_position'] == position
+
+
+def test_one_sentence_preserves_failed_row_without_borrowing_a_sibling_prediction():
+    evidence = accepted_snapshot()
+    evidence['observations'][0]['data'][0].update(
+        activity_class=None, activity_probability=None, predicted_pIC50=None,
+        classification_regression_consistent=None, status='failed', execution_status='failed',
+        success=False, errors={'classification': 'unavailable', 'regression': 'unavailable'})
+    history = [{'activity_evidence': evidence, 'activity_display_order': ['CCN', 'CCO'], 'activity_position': 2}]
+    answer = followup_answer('这两项结果为什么不一致，请一句话解释原因。', history, SESSION)
+    assert answer['status'] == 'partial' and '无法判断' in answer['final_answer']
+    assert 'CCO' in answer['final_answer'] and '6.7' not in answer['final_answer']
+
+
+def test_explicit_batch_reference_restores_the_original_display_order_and_unit(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+    turn(handler, '预测 CCO 和 CCN 对 BuChE 的活性。', history, SESSION)
+    turn(handler, '第二个分子的分类与回归是否一致？', history, SESSION)
+    turn(handler, '解释一下什么是分子量。', history, SESSION)
+    view, _ = turn(handler, NAMED_BATCH, history, SESSION)
+    assert 'CCN' in view['content'] and '0.1995' in view['content'] and '需复核' in view['content']
+    first, _ = turn(handler, '那第一个呢？', history, SESSION)
+    assert 'CCO' in first['content'] and '50.12' in first['content'] and 'μM' in first['content']
+    assert len(activity.calls) == 1
+
+
+def test_named_batch_requires_a_unique_owned_trace_and_rechecks_accepted_evidence(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    record = {'activity_evidence': accepted_snapshot(), 'activity_display_order': ['CCN', 'CCO']}
+    other = deepcopy(record)
+    other['activity_evidence']['trace_id'] = 'second-lookup'
+    other['activity_display_order'] = ['CCO', 'CCN']
+    corrupt = deepcopy(record)
+    corrupt['activity_evidence']['observations'][0]['quality']['validated'] = False
+    for history, owner, message in (
+            ([record, other], SESSION, '多个'),
+            ([corrupt], SESSION, '无法确认'),
+            ([record], 'other-session', '找不到'),
+            ([record], SESSION, None)):
+        view, _ = turn(handler, NAMED_BATCH, list(history), owner)
+        if message:
+            assert view['status'] == 'not_calculated' and message in view['content']
+            assert all(value not in view['content'] for value in ('50.12', '0.1995'))
+        else:
+            assert 'CCO' in view['content'] and '50.12' in view['content']
+    latest, _ = turn(handler, NAMED_BATCH.replace('刚才那批', '最近展示的'), [record, other], SESSION)
+    assert 'CCN' in latest['content'] and '0.1995' in latest['content']
+    assert not activity.calls
+
+
+def test_named_batch_anchor_can_select_older_result_without_reprediction(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+    turn(handler, '预测 CCO 和 CCN 对 BuChE 的活性。', history, SESSION)
+    activity.rows = [prediction('CCC', 4.5), prediction('CCO', 4.3)]
+    turn(handler, '预测 CCC 和 CCO 对 BuChE 的活性。', history, SESSION)
+    ambiguous, _ = turn(handler, NAMED_BATCH, history, SESSION)
+    assert '多个' in ambiguous['content']
+    anchored, _ = turn(handler, NAMED_BATCH.replace('刚才那批', '含 CCN 的'), history, SESSION)
+    assert 'CCN' in anchored['content'] and '0.1995' in anchored['content']
+    missing, _ = turn(handler, NAMED_BATCH.replace('BuChE', 'PDE5A'), history, SESSION)
+    assert '找不到' in missing['content']
+    assert len(activity.calls) == 2
+
+
+def test_named_readback_leaves_new_work_and_implicit_references_to_the_current_turn():
+    from src.agent.evidence_followup import named_activity_readback
+
+    for query in ('那它呢？', NAMED_BATCH + '再预测 CCC 对 BuChE 的活性。',
+                  '回到刚才那批 BuChE 活性预测，重新预测所有分子。'):
+        assert named_activity_readback(query, [], SESSION) is None
+
+
 CONVERT = '把刚才预测的 pIC50 换算为 IC50（nM），并说明结果代表什么。'
 CONVERT_CCO = '把上一轮 CCO 的 pIC50 换算为 IC50（nM），并说明结果代表什么。'
 
 
-@pytest.mark.parametrize('reply', ['第二个', 'CCN'])
+@pytest.mark.parametrize('reply', ['第二个', 'CCN', '2'])
 def test_batch_conversion_keeps_unit_selection_and_pending_clarification(tmp_path, reply):
     handler, activity, _ = handler_for(tmp_path, synthetic_rows())
     history = []
@@ -327,6 +470,28 @@ def test_batch_conversion_keeps_unit_selection_and_pending_clarification(tmp_pat
     second = ask(reply)
     assert second['status'] == 'partial' and '199.5 nM' in second['content'] and 'CCN' in second['content']
     assert '5.012e+04 nM' in ask('那第一个呢？')['content']
+    assert len(activity.calls) == 2
+
+
+def test_correcting_the_current_batch_selection_keeps_units_and_new_actions_separate(tmp_path):
+    handler, activity, _ = handler_for(tmp_path, synthetic_rows())
+    history = []
+
+    def ask(question):
+        return turn(handler, question, history, SESSION)[0]
+
+    ask('预测 CCO 和 CCN 对 BuChE 的活性。')
+    ask('第二个分子的分类与回归是否一致？')
+    ask('这个 pIC50 换算成多少微摩尔？')
+    for question, smiles, amount in [('我指的是第一个', 'CCO', '50.12'), ('CCN', 'CCN', '0.1995'),
+                                     ('那它呢？', 'CCN', '0.1995')]:
+        answer = ask(question)['content']
+        assert smiles in answer and amount in answer and 'μM' in answer, question
+    assert len(activity.calls) == 1
+    assert followup_answer('我指的是第一个，再计算它的分子量。', history, SESSION) is None
+    assert followup_answer('请重新预测 CCO 对 BuChE 的活性。', history, SESSION) is None
+    assert followup_answer('我指的是第一个', history, 'different-session') is None
+    ask('预测 CCO 和 CCN 对 BuChE 的活性。')
     assert len(activity.calls) == 2
 
 

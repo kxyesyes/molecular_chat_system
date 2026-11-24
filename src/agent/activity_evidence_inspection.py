@@ -5,6 +5,8 @@ no-recalculation inspection requests fail here rather than becoming new science.
 """
 import re
 
+from .contracts.displayed_row import ORDINAL, displayed_row_position, ordinal_number
+
 
 _SMILES = r'[A-Za-z0-9@+\-\[\]().=#\\/:%*]+'
 _PRIOR_ZH = r'(?:(?:上一轮|上次|刚才|上述)(?:的)?(?:比较|预测|计算)?(?:结果)?(?:中)?(?:的)?\s*)?'
@@ -27,11 +29,13 @@ _SHOW_EN = re.compile(rf'(?:please\s+)?(?:show|list|display|provide)\s+'
 _PRIOR_VALUE = re.compile(
     r'(?:我)?(?:上一轮|上次|刚才)(?:的)?\s*(?:预测的?)?pIC50\s*(?:是)?(?:多少|什么)|'
     r'what\s+(?:was|is)\s+(?:my|the)\s+(?:previous|last)\s+(?:predicted\s+)?pIC50', re.I)
-_ORDINAL = r'(?:[0-9]+|[一二三四五六七八九十百]+)'
 _ORDINAL_CONSISTENCY = re.compile(
     rf'(?:请\s*)?(?:(?:解释|说明|查看)\s*)?{_PRIOR_ZH}第\s*'
-    rf'(?P<position>{_ORDINAL})\s*个\s*(?:分子|候选(?:分子)?)的'
+    rf'(?P<position>{ORDINAL})\s*个\s*(?:分子|候选(?:分子)?)的'
     r'分类(?:和|与)回归(?:预测|结果)?(?:是否一致|一致吗|为什么不一致)')
+_BRIEF_CONSISTENCY = re.compile(
+    r'(?:这|那)两(?:种|项|个)(?:估计|预测|结果)(?:怎么|为什么|为啥)(?:对不上|不一致|有分歧)'
+    r'[，,？?]\s*(?:你能|请)?(?:用)?一句话(?:说说|说明|解释)(?:是怎么回事|一下|原因)?(?:吗)?[？?。]?\s*')
 _EXPLAIN = re.compile(
     r'(?:请\s*)?(?:并\s*)?解释(?:分类(?:与|和)回归不一致(?:意味着什么|的含义|的原因)?|'
     r'(?:上一轮|上次|刚才|上述)(?:的)?活性(?:结果|预测))|'
@@ -66,19 +70,10 @@ def split_concept_prior_value(query):
     return concept_query, prior[0]
 
 
-def _position(number):
-    chinese = ('一', '二', '三', '四', '五', '六', '七', '八', '九', '十',
-               '十一', '十二', '十三', '十四', '十五', '十六')
-    if number.isascii() and len(number) <= 2:
-        return int(number)
-    return chinese.index(number) + 1 if number in chinese else 0
-
-
-def batch_reply_position(query, current):
-    match = re.fullmatch(rf'\s*(?:那)?(?:第({_ORDINAL})个(?:分子)?|它)(?:呢)?[？?。]?\s*', query)
-    if match:
-        return _position(match[1]) if match[1] else current
-    return None
+def batch_reply_position(query, current, *, choices=()):
+    if query.strip() in choices:
+        return choices.index(query.strip()) + 1
+    return displayed_row_position(query, current, count=len(choices) if choices else None)
 
 
 def inspection_request(query, *, batch=None):
@@ -90,9 +85,21 @@ def inspection_request(query, *, batch=None):
     if not isinstance(query, str):
         return None
     if batch:
-        position = batch_reply_position(query, batch.get('activity_position'))
+        current = batch.get('activity_position')
+        if _BRIEF_CONSISTENCY.fullmatch(query.strip()):
+            return {'selectors': (), 'all': False, 'positions': (current,) if current else (), 'brief': True}
+        brief = batch.get('activity_brief', False)
+        choices = batch.get('activity_display_order', ()) if current is not None or brief else ()
+        position = batch_reply_position(query, current, choices=choices)
+        if brief and current is None and position is None and re.fullmatch(_SMILES, query.strip()):
+            from .evidence_followup import _canonical
+            smiles = _canonical(query.strip())
+            if smiles:
+                position = next((i for i, choice in enumerate(choices, 1) if _canonical(choice) == smiles), None)
+                if position is None:
+                    return {'selectors': (smiles,), 'all': False, 'brief': True}
         if position is not None:
-            query = f'第{position}个分子的分类与回归是否一致'
+            return {'selectors': (), 'all': False, 'positions': (position,), 'brief': brief}
     clauses = [part.strip() for part in re.split(r'[，,；;。!?！？\n]|\.(?=\s|$)', query)
                if part.strip()]
     selectors, recognized, unknown, all_candidates = [], False, False, False
@@ -108,7 +115,7 @@ def inspection_request(query, *, batch=None):
             selectors.extend(value for value in match.groups() if value is not None)
             all_candidates = all_candidates or bool(re.search(r'所有候选|全部候选|这些候选|它们', clause))
         elif ordinal := _ORDINAL_CONSISTENCY.fullmatch(clause):
-            positions.append(_position(ordinal['position']))
+            positions.append(ordinal_number(ordinal['position']))
             recognized = activity_inspection = True
         elif _EXPLAIN.fullmatch(clause) or _PRIOR_VALUE.fullmatch(clause):
             recognized = True
@@ -181,9 +188,30 @@ def inspection_answer(evidence, selection):
     if any(value is None or value not in evidence['smiles'] for value in canonical):
         names = '、'.join(f'`{_cell(value)}`' for value in selectors)
         return {'final_answer': f'缺少所选分子 {names} 在上一轮中的可对应活性证据；未改用其他候选，也未重新计算。',
-                'status': 'not_calculated', 'success': False}
+                'status': 'not_calculated', 'success': False,
+                **({'activity_evidence': evidence} if selection.get('brief') else {})}
     selected = set(canonical) if canonical and not selection['all'] else set(evidence['smiles'])
     rows = [row for row in observation['data'] if _canonical(row['smiles']) in selected]
+    if selection.get('brief'):
+        if len(rows) != 1:
+            return {'final_answer': '请指定要解释的分子序号或 SMILES。', 'status': 'not_calculated',
+                    'success': False, 'activity_evidence': evidence}
+        row, = rows
+        consistent = row.get('classification_regression_consistent')
+        probability, value = row.get('activity_probability'), row.get('predicted_pIC50')
+        complete = all(item is not None for item in (consistent, row.get('activity_class'), probability, value))
+        reason = _exclusion(row)
+        if complete:
+            assessment = '标签一致' if consistent else '标签不一致，需复核'
+            explanation = (f"分类模型给出{_cell(row['activity_class'])}（活性概率 {probability:.4g}），"
+                           f"回归模型预测 pIC50 为 {value:.4g}，按模型阈值两者{assessment}")
+        else:
+            explanation = '缺少可核对的完整分类和回归结果，暂时无法判断两者是否一致'
+        if reason and consistent is not False:
+            explanation += '，' + reason
+        partial = not complete or reason is not None
+        return {'final_answer': f"对于 `{_cell(row['smiles'])}` 对 {_cell(row['requested_target'])} 的预测，{explanation}。",
+                'status': 'partial' if partial else 'completed', 'success': not partial, 'activity_evidence': evidence}
     lines = ['活性结果解读（复用上一轮证据）', '',
              '仅查看已验证的原始记录，未重新运行科学工具。模型预测非实验结论；需复核的值不能作为已确认活性。']
     summary_lines = ['活性预测解读', '', '复用已有模型预测，非实验测量；未重新计算。']

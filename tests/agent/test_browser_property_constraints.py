@@ -66,7 +66,9 @@ def test_drug_likeness_result_preserves_only_verified_single_molecule():
 
 
 def test_batch_lipinski_followup_uses_verified_previous_result():
-    from src.web.property_comparison import accepted_batch_property_evidence, batch_lipinski_followup
+    from src.web.property_comparison import (
+        accepted_batch_property_evidence, batch_lipinski_followup, recorded_descriptor,
+    )
     query = '比较 CCO 和 CCN 的分子量、LogP、HBA 和 HBD。'
     result = _generation_result()
     result['tool_result_sequence'] = [result['tool_result_sequence'][1]]
@@ -86,6 +88,29 @@ def test_batch_lipinski_followup_uses_verified_previous_result():
     mismatch = batch_lipinski_followup(followup, history, 's')
     assert mismatch['status'] == 'not_calculated' and 'SMILES' in mismatch['content']
     assert mismatch['pending'] == evidence
+    selected = recorded_descriptor('第二个的 logP 多少？', history, 's')['history_update']
+    assert batch_lipinski_followup(followup, [selected], 's')['pending'] == evidence
+    assert 'pending' not in batch_lipinski_followup(followup, [selected], 'foreign')
+
+
+def test_descriptor_reference_matches_the_rendered_table_when_tool_rows_are_reordered():
+    from types import SimpleNamespace
+    from src.web.decision_chat import scientific_display_answer
+    from src.web.property_comparison import accepted_batch_property_evidence, recorded_descriptor
+
+    result = _generation_result()
+    observation = result['tool_result_sequence'][1]
+    result['tool_result_sequence'] = [observation]
+    rows = observation['data']
+    for row in rows:
+        row['properties'].update(hba=1, hbd=1)
+    rendered = scientific_display_answer([SimpleNamespace(tool_name='property_calculator',
+        status=SimpleNamespace(value='succeeded'), data=rows)], concise=True, metrics=['mw'])
+    assert rendered.index('CCN') < rendered.index('CCO')
+    record = accepted_batch_property_evidence(result, '比较 CCO 和 CCN 的分子量。', 's')
+    selected = recorded_descriptor('帮我看一下第一行。', [{'batch_property_evidence': record,
+                                   'descriptor_metric': 'molecular_weight'}], 's')
+    assert selected['history_update']['property_evidence']['canonical_smiles'] == 'CCN'
 
 
 def test_batch_property_followup_reuses_evidence_after_lipinski():
@@ -132,9 +157,40 @@ def test_batch_ordinals_cover_all_supported_rows_and_reject_missing_row():
     history = [{'agent_used': True, 'batch_property_evidence': batch, 'descriptor_metric': 'logp'}]
     chosen = recorded_descriptor('那第十六个呢？', history, 's')
     assert chosen['history_update']['property_evidence']['canonical_smiles'] == rows[-1]['smiles']
+    corrected = recorded_descriptor('不好意思，其实我想看的是第一行。', [chosen['history_update']], 's')
+    assert corrected['history_update']['property_evidence']['canonical_smiles'] == rows[0]['smiles']
+    for reply, pos in [('下一行', 2), ('最后一行', 16), ('上一行', 15), ('看第8行', 8)]:
+        corrected = recorded_descriptor(reply, [corrected['history_update']], 's')
+        assert corrected['history_update']['property_evidence']['canonical_smiles'] == rows[pos - 1]['smiles']
+    assert recorded_descriptor('看第8行，再算 CCC', history, 's') is None
     invalid = recorded_descriptor('那第17个呢？', [chosen['history_update']], 's')
     assert invalid['status'] == 'not_calculated'
     assert invalid['history_update']['property_evidence'] == chosen['history_update']['property_evidence']
+
+
+def test_other_descriptor_row_requires_a_unique_alternative_in_this_session():
+    from src.web.property_comparison import recorded_descriptor
+
+    rows = [{'smiles': 'CCO', 'logp': -0.001}, {'smiles': 'CCC', 'logp': 1.416}]
+    batch = {'session_id': 's', 'trace_id': 't', 'evidence_id': 'e', 'rows': rows}
+    history = [{'batch_property_evidence': batch, 'descriptor_metric': 'logp'}]
+    query = '那另一个呢？'
+    assert recorded_descriptor(query, history, 's')['status'] == 'not_calculated'
+    selected = recorded_descriptor('第二行', history, 's')['history_update']
+    for phrase in (query, '刚才那两个里，另一个呢？', '另一个的情况呢？', '剩下那个呢？',
+                   '另一个分子的 logP 多少？'):
+        answer = recorded_descriptor(phrase, [selected], 's')
+        assert answer['status'] == 'completed' and 'CCO' in answer['content']
+        assert 'CCC' not in answer['content']
+    assert recorded_descriptor(query, [selected], 'foreign') is None
+    assert recorded_descriptor('另一个呢？另外预测活性。', [selected], 's') is None
+    for size in (1, 3):
+        available = (rows + [{'smiles': 'CCN', 'logp': -0.035}])[:size]
+        history = [{'batch_property_evidence': {**batch, 'rows': available}, 'descriptor_metric': 'logp'}]
+        selected = recorded_descriptor('第一行', history, 's')['history_update']
+        unclear = recorded_descriptor(query, [selected], 's')
+        assert unclear['status'] == 'not_calculated' and '序号' in unclear['content']
+        assert unclear['history_update']['property_evidence'] == selected['property_evidence']
 
 
 def test_batch_lipinski_does_not_trust_incomplete_or_rounded_evidence():

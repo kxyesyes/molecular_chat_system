@@ -1,7 +1,7 @@
 """Bounded comparison of accepted observations, never a scientific executor.
 
-Only the immediately preceding socket-local turn is reusable. This module has
-no database, model, tool execution, prose extraction or shared state access.
+Follow-ups use the preceding turn. An explicit batch reference may select
+an older delivered activity record from the same socket.
 """
 from collections.abc import Mapping
 from copy import deepcopy
@@ -29,8 +29,19 @@ _PIC50_CONVERSION = re.compile(
     r'(?P<explain>解释为什么分类(?:和|与)回归结果不一致)))?'
     r'(?:\s*是多少)?[。.!！?？]?\s*', re.I)
 _PIC50_NATURAL_CONVERSION = re.compile(
-    r'\s*(?:请)?(?:把|将)?(?:这个|刚才的|上一轮的|它的|其)\s*pIC50\s*(?:换算|转换)\s*(?:成|为)\s*'
+    r'\s*(?:请)?(?:把|将)?(?:这个|刚才的|上一轮的|它的|其|(?P<position>第[0-9一二三四五六七八九十百]+个)(?:分子|候选)?的)'
+    r'\s*pIC50\s*(?:换算|转换)\s*(?:成|为)\s*'
     r'(?:多少)?\s*(?P<unit>微摩尔|μM|µM|uM|nM)\s*[？?。.!！]?\s*', re.I)
+_NAMED_ACTIVITY_BATCH = re.compile(
+    r'\s*(?:请)?(?:回到|回看)\s*(?:(?:刚才|之前|(?P<latest>最近展示))(?:的)?)?(?:那批)?\s*'
+    r'(?:含\s*(?P<anchor>[A-Za-z0-9@+\-\[\]().=#\\/:%*]+)\s*的\s*)?'
+    r'(?P<target>[A-Za-z][A-Za-z0-9_-]*)\s*(?:的)?活性预测(?:结果)?\s*[，,:：]\s*'
+    r'(?P<question>.+?)(?:\s*(?:只|仅)使用已有结果[。.!！]?)?\s*', re.I | re.S)
+_CHANGE_CONCENTRATION_UNIT = re.compile(
+    r'\s*(?:能否?|可以|请|那)?(?:把|将)?(?:刚才)?(?:那个|这个)?'
+    r'(?:(?:微摩尔|纳摩尔|[μµun]M)?(?:数值|结果))?(?:帮我)?'
+    r'(?:换算[成为]|换[成为]|改用|换用|用)\s*(?P<unit>微摩尔|纳摩尔|[μµun]M)'
+    r'\s*(?:表示)?(?:吗|呢)?[？?。！!]?\s*', re.I)
 
 
 def comparison_tools(query):
@@ -334,6 +345,45 @@ def _converted_activity(row, unit, explain):
             'success': not bool(review)}
 
 
+def named_activity_readback(query, history, session_id):
+    """Resolve a named batch within this socket, then use ordinary read-only evidence handling."""
+    from .activity_evidence_inspection import inspection_request
+    name = _NAMED_ACTIVITY_BATCH.fullmatch(query)
+    if not name or history is None:
+        return None
+    question = name['question']
+    if not (_PIC50_NATURAL_CONVERSION.fullmatch(question) or _PIC50_CONVERSION.fullmatch(question)
+            or isinstance(inspection_request(question), dict)):
+        return None
+    batches = {}
+    target = name['target'].casefold()
+    for entry in reversed(history):
+        record = entry.get('activity_evidence')
+        order = entry.get('activity_display_order')
+        if not (isinstance(record, dict) and order and session_id and record.get('session_id') == session_id
+                and record.get('trace_id') and (not name['anchor'] or name['anchor'] in order)):
+            continue
+        observations = record.get('observations')
+        if not isinstance(observations, list) or len(observations) != 1 or not isinstance(observations[0], dict):
+            continue
+        rows = observations[0].get('data')
+        if isinstance(rows, list) and rows and all(
+                isinstance(row, dict) and str(row.get('requested_target')).casefold() == target for row in rows):
+            batches.setdefault(record['trace_id'], entry)
+            if name['latest']:
+                break
+    if len(batches) != 1:
+        content = (f"找不到本会话近期展示的匹配 {name['target']} 活性批次。"
+                   if not batches else
+                   f"近期有多个 {name['target']} 活性批次。请指定其中一批独有的 SMILES，或说“回到最近展示的 {name['target']} 活性预测”并附上问题。")
+        return {'final_answer': content, 'status': 'not_calculated', 'success': False}
+    source, = batches.values()
+    view = followup_answer(question, [source], session_id)
+    if view and view.get('activity_evidence') is not None:
+        view['activity_display_order'] = source['activity_display_order']
+    return view
+
+
 def followup_answer(query, history, session_id):
     """Return None outside the deliberately closed follow-up grammar."""
     from .activity_evidence_inspection import inspection_request, inspection_answer, valid_inspection_evidence
@@ -400,10 +450,17 @@ def followup_answer(query, history, session_id):
     if conversion:
         request = {'unit': conversion['unit'], 'explain': bool(conversion.groupdict().get('explain'))}
         selector = conversion.groupdict().get('smiles')
+        if conversion.groupdict().get('position'):
+            from .activity_evidence_inspection import batch_reply_position
+            position = batch_reply_position(conversion['position'], current)
     elif owned and last.get('activity_conversion'):
         from .activity_evidence_inspection import batch_reply_position
-        position = batch_reply_position(query, current)
-        if position is not None:
+        unit_change = _CHANGE_CONCENTRATION_UNIT.fullmatch(query)
+        if unit_change:
+            unit = unit_change['unit']
+            request = {**last['activity_conversion'],
+                       'unit': 'nM' if unit.casefold() in ('nm', '纳摩尔') else 'μM'}
+        elif (position := batch_reply_position(query, current, choices=order)) is not None:
             request = last['activity_conversion']
         elif current is None and re.fullmatch(r'[A-Za-z0-9@+\-\[\]().=#\\/:%*]+', query.strip()):
             if _canonical(query.strip()) is not None:
@@ -419,7 +476,7 @@ def followup_answer(query, history, session_id):
         retained = {'activity_evidence': evidence, 'activity_conversion': request, 'activity_position': current}
         if selector is None and position is not None:
             if not 1 <= position <= len(order):
-                return {**retained, 'final_answer': '该序号不在本批展示的结果中，请指定已列出的序号或 SMILES。',
+                return {**retained, 'final_answer': '无法确定要换算本批中的哪一个分子，请指定已列出的序号或 SMILES。',
                         'status': 'not_calculated', 'success': False}
             selector = order[position - 1]
         if selector is not None:
@@ -515,17 +572,23 @@ def followup_answer(query, history, session_id):
             if inspection is not None:
                 positions = inspection.get('positions', ())
                 if any(not 1 <= pos <= len(order) for pos in positions):
-                    view = {'final_answer': '该序号不在本批展示的活性结果中，请指定已列出的序号或 SMILES。',
+                    view = {'final_answer': '无法确定要查看本批中的哪一个分子，请指定已列出的序号或 SMILES。',
                             'status': 'not_calculated', 'success': False}
                     if order and valid_inspection_evidence(evidence):
                         view.update(activity_evidence=evidence,
                                     activity_position=last.get('activity_position'))
+                        if inspection.get('brief'):
+                            view['activity_brief'] = True
                     return view
                 single_position = len(positions) == 1 and not inspection['selectors'] and not inspection['all']
                 inspection['selectors'] += tuple(order[pos - 1] for pos in positions)
                 view = inspection_answer(evidence, inspection)
+                if inspection.get('brief') and 'activity_evidence' in view and not last.get('activity_conversion'):
+                    view['activity_brief'] = True
                 if single_position and 'activity_evidence' in view:
                     view['activity_position'] = positions[0]
+                    if inspection.get('brief') and last.get('activity_conversion'):
+                        view['activity_conversion'] = last['activity_conversion']
                 return view
             view = _render(evidence["smiles"], evidence["observations"], evidence["trace_id"],
                            ("activity_predictor",), reused=True)

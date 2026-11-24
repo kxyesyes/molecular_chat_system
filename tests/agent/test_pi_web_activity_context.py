@@ -10,7 +10,7 @@ from src.web.web_business import WebTurnProjection
 from src.web.web_request import prepare_web_request
 from tests.agent.test_browser_evidence_followup import accepted_result
 from tests.agent.test_family_activity_tool import family_row
-from tests.agent.test_web_decision_runtime import actual_app, ActualSocket, cookie_for, chat_decision
+from tests.agent.test_web_decision_runtime import actual_app, ActualSocket, cookie_for, chat_decision, result_of
 
 
 QUESTION = ('这些 PDE 结果能否直接作为人源 PDE4D 的实验效力写进报告？'
@@ -19,6 +19,75 @@ SUMMARY = '请用两句话概括这些结果的报告写法和限制，保留两
 PRIORITY = ('基于刚才的结果，我应该先把哪个送去做人源 PDE4D 实验？'
             '我注意到第二个 pIC50 更高，但第一个分类分数更高，'
             '请解释这种差别能否支持优先级，不要重新预测。')
+
+
+@pytest.mark.parametrize('intent,success', [('general_knowledge', True), ('mixed', False)])
+def test_rejected_phrase_about_selected_activity_can_only_resume_as_explanation(actual_app, intent, success):
+    from tests.agent.ordinary_chat_fixtures import intent_http_response
+
+    query = '请用自己的话解释刚才选中的那个分子，写出它的 SMILES，并说说两项预测为什么需要复核。'
+
+    async def run():
+        async def respond(payload):
+            if len(bundle.calls) == 1:
+                instruction = ' '.join(m['content'] for m in payload['messages'] if m['role'] == 'system')
+                assert 'Accepted scientific records: activity predictions (selected row).' in instruction
+                assert 'CCN' not in instruction
+                return intent_http_response(intent)
+            marker = '. Immutable result requirements (not a tool sequence): '
+            prompt = next(m['content'] for m in payload['messages'] if marker in (m.get('content') or ''))
+            requirements = json.loads(prompt.split(marker, 1)[1])
+            assert requirements['steps'] == []
+            assert requirements['request']['metadata']['prior_activity_context']['selected_smiles'] == 'CCN'
+            return chat_decision('当前选中 CCN。')
+
+        async with actual_app(ordinary_policy=None, respond=respond) as bundle:
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                sender, = bundle.app.decision_runtime.sockets
+                sender.scientific_memory[:] = [{'activity_evidence': activity_evidence(sender.scope['agent_session_id']),
+                    'activity_display_order': ['CCO', 'CCN'], 'activity_position': 2,
+                    'activity_conversion': {'unit': 'nM', 'explain': False}}]
+                frames = await socket.turn({'message': query, 'enable_rag': False})
+                result = result_of(frames)
+                assert result['success'] == success, (len(bundle.calls), result.get('metadata'), frames[-1]['content'])
+                assert len(bundle.calls) == (2 if success else 1)
+                assert not bundle.app.agent_state_store.get_tool_executions(result['trace_id'])
+                if success:
+                    for question, selected, value in (('那它呢？', 'CCN', '8.318e+04'),
+                                                      ('那第一个呢？', 'CCO', '1.072e+05')):
+                        frames = await socket.turn({'message': question, 'enable_rag': False})
+                        assert selected in frames[-1]['content'] and value + ' nM' in frames[-1]['content']
+                        assert not bundle.app.agent_state_store.get_tool_executions(result_of(frames)['trace_id'])
+                    assert len(bundle.calls) == 2
+                assert not bundle.protocol_errors, bundle.protocol_errors
+
+    asyncio.run(run())
+
+
+def test_model_explanation_gets_the_selected_display_row_separately_from_tool_order():
+    record = activity_evidence('owner')
+    previous = {'activity_evidence': record, 'activity_display_order': ['CCN', 'CCO'],
+                'activity_position': 2}
+    query = '请用自己的话解释刚才选中的那个分子。'
+    context = WebTurnProjection(query, 'owner', [previous]).model_activity_context()
+    assert context['display_order'] == ['CCN', 'CCO']
+    assert context['selected_smiles'] == 'CCO'
+    assert WebTurnProjection(query, 'other', [previous]).model_activity_context() is None
+    del previous['activity_position']
+    assert 'selected_smiles' not in WebTurnProjection(query, 'owner', [previous]).model_activity_context()
+
+
+def test_model_can_quote_displayed_prediction_values_without_losing_raw_precision():
+    record = activity_evidence('owner')
+    raw = record['observations'][0]['data']
+    raw[1].update(activity_probability=.422556549, predicted_pIC50=5.00758934)
+    raw[0].pop('predicted_pIC50')
+    context = WebTurnProjection(QUESTION, 'owner', [{'activity_evidence': record}]).model_activity_context()
+    first, second = context['predictions']
+    assert second['display_values'] == {'activity_probability': '0.4226', 'predicted_pIC50': '5.008'}
+    assert second['predicted_pIC50'] == raw[1]['predicted_pIC50']
+    assert 'predicted_pIC50' not in first['display_values']
 
 
 def activity_evidence(session):

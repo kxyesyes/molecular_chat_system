@@ -56,7 +56,8 @@ def prepare_web_request(payload, *, session_id, trace_id, references=None,
                 asks_about_given_information, mentions_assay_concentration, tool_free_consultation_requested)
             if (tool_free_consultation is not True
                     or not (tool_free_consultation_requested(query) or mentions_assay_concentration(query)
-                            or asks_about_given_information(query))
+                            or asks_about_given_information(query, prior_activity_context=prior_activity_context,
+                                                            prior_candidate_context=prior_candidate_context))
                     or envelope.reference is not None or envelope.selection is not None):
                 raise DecisionAdmissionError('consultation_requires_clarification')
             count_supplied = False

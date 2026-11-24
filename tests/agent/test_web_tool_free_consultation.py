@@ -238,6 +238,8 @@ def test_varied_questions_use_whole_intent_and_zero_tool_web_chat(actual_app, qu
             calls += 1
             assert payload['messages'][-1]['content'] == query
             if calls == 1:
+                assert any('Accepted scientific records: none.' in m['content']
+                           for m in payload['messages'] if m['role'] == 'system')
                 return intent_http_response('general_knowledge', wire=wire)
             marker = '. Immutable result requirements (not a tool sequence): '
             message = next(m['content'] for m in payload['messages'] if marker in (m.get('content') or ''))
@@ -301,6 +303,9 @@ def test_consultation_keeps_accepted_candidate_record(actual_app):
             nonlocal calls
             calls += 1
             if calls % 2:
+                instruction = ' '.join(m['content'] for m in payload['messages'] if m['role'] == 'system')
+                assert 'Accepted scientific records: candidate results.' in instruction
+                assert '0.9691' not in instruction
                 return intent_http_response('general_knowledge')
             marker = '. Immutable result requirements (not a tool sequence): '
             message = next(m['content'] for m in payload['messages'] if marker in (m.get('content') or ''))
@@ -322,6 +327,21 @@ def test_consultation_keeps_accepted_candidate_record(actual_app):
                     assert result['success'], result
                     assert sender.scientific_memory[-1]['candidate_evidence'] == evidence
                 assert calls == 4 and not b.protocol_errors
+    asyncio.run(run())
+
+
+def test_consultation_cannot_resolve_a_reference_to_nonexistent_ordinary_history(actual_app):
+    async def run():
+        async def respond(payload):
+            return intent_http_response('general_knowledge', history_relation='prior_ordinary_turn')
+
+        async with actual_app(ordinary_policy=None, respond=respond) as bundle:
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                result = result_of(await socket.turn({'message': QUESTION}))
+                assert result['metadata']['stop_reason'] == 'consultation_requires_clarification'
+                assert len(bundle.calls) == 1
+                assert not bundle.app.agent_state_store.get_tool_executions(result['trace_id'])
     asyncio.run(run())
 
 
@@ -437,6 +457,9 @@ def test_intent_timeout_never_falls_back_to_scientific_execution(actual_app, mon
     ('Make a calculation. Quote: "First, do not use any tools. Then proceed."', False),
     ('请计算分子量。引文是：“第一，不运行任何工具。第二，再解释。”', False),
     ('禁止调用科学工具。只解释原理。', True),
+    ('请写三句测试台词，例子是算分子量。只给三句台词，不回答台词中的问题。', True),
+    ('请计算 CCO 的分子量，再写三句测试台词。', False),
+    ('请复述“只给三句台词，不回答台词中的问题”。再计算 CCO 的分子量。', False),
 ])
 def test_mode_requires_a_complete_global_prohibition(query, expected):
     from src.agent.contracts.consultation_request import tool_free_consultation_requested

@@ -4,6 +4,7 @@ The runtime creates one object per accepted turn. Its detached entry is publishe
 only after terminal delivery, separately from ordinary model conversation history.
 """
 from copy import deepcopy
+from functools import cached_property
 import html
 import json
 import logging
@@ -172,6 +173,8 @@ class WebTurnProjection:
     def __init__(self, query, session_id, history, *, reverse_boundary=None):
         from src.agent.activity_evidence_inspection import split_concept_prior_value
         self.query = query
+        self.acknowledgement = bool(re.fullmatch(
+            r'\s*(?:谢谢(?:你)?|多谢|好的|好|收到|明白了|thanks|thank you|got it|okay|ok)[。.!！]?\s*', query, re.I))
         self.session_id = session_id
         # Candidate evidence may be distributed across the design turn and a
         # later single-candidate ADMET turn; retain a small bounded window for
@@ -293,6 +296,18 @@ class WebTurnProjection:
         self.property_comparison_requested = comparison_request is not None
         if comparison_request:
             self.property_calculation_query = comparison_request.group(1)
+        else:
+            # A pair of explicit structures and a mass question can use the
+            # same reviewed batch calculation and comparison as a named metric.
+            smiles = r'[A-Za-z0-9@+\-\[\]()=#\\/%.:*]+'
+            weights = re.fullmatch(
+                rf'\s*(?:麻烦你|请)?(?:先)?(?:查一下|算一下|计算|查查|算算)?\s*'
+                rf'({smiles})\s*(?:和|与|、)\s*({smiles})\s*(?:各|分别)(?:有多重|的分子量)'
+                r'\s*[，,]\s*(?:再|并)?(?:告诉我|指出|比较|看看)?(?:哪一个|哪个)(?:更重|分子量更大)[？?。]?\s*',
+                query)
+            if weights:
+                self.property_calculation_query = f'计算 {weights[1]} 和 {weights[2]} 的分子量。'
+                self.property_comparison_requested = True
         origin = re.fullmatch(
             r'(.+?)[，,]\s*(?:并|以及)?\s*(?:指出|说明|标明)'
             r'(?:哪些指标是计算值|(?:这些|上述)(?:数值|结果|指标)是否(?:来自)?实验(?:测量|测定))'
@@ -409,8 +424,20 @@ class WebTurnProjection:
         self.contextual_property = resolved != self.query
         return resolved
 
+    @cached_property
+    def readback_contexts(self):
+        """Accepted facts available to both intent classification and the answer for this turn."""
+        if self.concept_history is not None:
+            return {}
+        contexts = {'prior_target_context': self.model_target_context(),
+                    'prior_candidate_context': self.model_candidate_context(),
+                    'prior_activity_context': self.model_activity_context()}
+        return {key: value for key, value in contexts.items() if value is not None}
+
     def model_target_context(self):
         """Project accepted socket-local retrieval facts for ordinary explanations."""
+        if self.acknowledgement:
+            return None
         evidence = self.history[-1].get('target_structure_evidence') if self.history else None
         if (not isinstance(evidence, dict) or not self.session_id
                 or evidence.get('session_id') != self.session_id or not evidence.get('trace_id')):
@@ -428,6 +455,16 @@ class WebTurnProjection:
 
     def model_candidate_context(self):
         """Project accepted calculation/prediction facts for ordinary explanations."""
+        from src.agent.contracts.consultation_request import selected_row_summary
+        if selected_row_summary(self.query):
+            descriptors = property_comparison.descriptor_context(self.history, self.session_id)
+            single = descriptors.get('property_evidence')
+            metric = descriptors.get('descriptor_metric')
+            smiles = single.get('canonical_smiles') if single else None
+            if (smiles and metric in ('molecular_weight', 'logp')
+                    and type(single.get(metric)) in (int, float) and math.isfinite(single[metric])):
+                return {'scope': 'selected_descriptor', 'selected_smiles': smiles,
+                        'candidates': [{'canonical_smiles': smiles, 'properties': {metric: single[metric]}}]}
         if not _PRIOR_RESULT_REFERENCE.search(self.query):
             return None
         evidence = self.history[-1].get('candidate_evidence') if self.history else None
@@ -458,6 +495,7 @@ class WebTurnProjection:
         if (not isinstance(evidence, dict) or not self.session_id
                 or evidence.get('session_id') != self.session_id or not evidence.get('trace_id')):
             return None
+        from .decision_chat import _display_prediction_value
         rows = []
         for prediction in evidence['observations'][0]['data']:
             row = {key: deepcopy(prediction[key]) for key in (
@@ -465,6 +503,9 @@ class WebTurnProjection:
                 'activity_class', 'activity_probability', 'predicted_pIC50', 'units',
                 'label_threshold', 'probability_threshold', 'classification_regression_consistent',
                 'errors', 'warnings') if key in prediction}
+            row['display_values'] = {key: _display_prediction_value(row[key])
+                                     for key in ('activity_probability', 'predicted_pIC50')
+                                     if row.get(key) is not None}
             provenance = prediction.get('provenance') or {}
             scope = provenance.get('scope', {})
             # Training-asset provenance is not the origin of this prediction.
@@ -475,9 +516,17 @@ class WebTurnProjection:
                 for task, model in provenance.get('models', {}).items()
                 if task in ('classification', 'regression')}
             rows.append(row)
-        return {'scope': 'last_activity_observations', 'predictions': rows}
+        context = {'scope': 'last_activity_observations', 'predictions': rows}
+        previous = self.history[-1]
+        order = previous.get('activity_display_order')
+        if order:
+            context['display_order'] = list(order)
+            position = previous.get('activity_position')
+            if position is not None and 1 <= position <= len(order):
+                context['selected_smiles'] = order[position - 1]
+        return context
 
-    def followup(self, *, enable_tools, enable_rag=False, resolve_selection=None):
+    def followup(self, *, enable_tools, enable_rag=False, resolve_selection=None, activity_history=None):
         if self.mixed_activity_discussion:
             return None
         from src.literature.model_sources import model_source_followup
@@ -1993,19 +2042,61 @@ class WebTurnProjection:
                 self.entry['reverse_target_evidence'] = view['context']
             return {'content': view['content'],
                     'status': 'completed' if view['status'] == 'succeeded' else view['status']}
-        view = evidence_followup.followup_answer(self.query, self.history, self.session_id)
+        view = evidence_followup.named_activity_readback(self.query, activity_history, self.session_id)
+        if view is None:
+            view = evidence_followup.followup_answer(self.query, self.history, self.session_id)
         if view is not None:
             if view.get('activity_evidence') is not None:
                 self.entry['activity_evidence'] = deepcopy(view['activity_evidence'])
-                if self.history and 'activity_display_order' in self.history[-1]:
-                    self.entry['activity_display_order'] = list(self.history[-1]['activity_display_order'])
-                for key in ('activity_position', 'activity_conversion'):
+                order = view.get('activity_display_order')
+                if order is None and self.history:
+                    order = self.history[-1].get('activity_display_order')
+                if order is not None:
+                    self.entry['activity_display_order'] = list(order)
+                for key in ('activity_position', 'activity_conversion', 'activity_brief'):
                     if view.get(key) is not None:
                         self.entry[key] = view[key]
             return {'content': view['final_answer'],
                     'summary_content': view.get('summary_answer', view['final_answer']),
                     'status': view['status']}
         return None
+
+    def _retain_activity_selection(self):
+        previous = self.history[-1]
+        for key in ('activity_display_order', 'activity_position', 'activity_conversion', 'activity_brief'):
+            if key in previous:
+                self.entry[key] = previous[key]
+
+    def _retain_target_lookup(self):
+        # The structure and function are two views of the same lookup. An
+        # explanation can carry both records, but cannot resume a pending action.
+        for key, fields in (
+            ('target_function_evidence', ('session_id', 'uniprot_id', 'gene_symbol', 'function', 'source_url')),
+            ('target_structure_evidence', ('session_id', 'trace_id', 'structures', 'selected_structure_id',
+                                           'component', 'mechanism', 'binding_sites')),
+        ):
+            record = self.history[-1].get(key)
+            if isinstance(record, dict) and record.get('session_id') == self.session_id:
+                self.entry[key] = {field: record[field] for field in fields if field in record}
+
+    def _retain_acknowledged_results(self):
+        """Keep accepted facts from this connection; pending actions belong to their original turn."""
+        if not self.session_id or not self.history:
+            return
+        previous = self.history[-1]
+        descriptors = property_comparison.descriptor_context(self.history, self.session_id)
+        if descriptors:
+            self.entry['descriptor_carry'] = descriptors
+        self._retain_target_lookup()
+        for key, fields in (
+            ('activity_evidence', ('session_id', 'trace_id', 'query', 'smiles', 'observations')),
+            ('candidate_evidence', ('session_id', 'trace_id', 'query', 'candidates')),
+        ):
+            record = previous.get(key)
+            if isinstance(record, dict) and record.get('session_id') == self.session_id:
+                self.entry[key] = {field: record[field] for field in fields if field in record}
+        if 'activity_evidence' in self.entry:
+            self._retain_activity_selection()
 
     def capture(self, result, *, context, reverse_count=10, reverse_restricted=False):
         view = self._capture(result, context=context, reverse_count=reverse_count,
@@ -2017,12 +2108,11 @@ class WebTurnProjection:
                 metrics = current.get('requested_metrics', [])
                 if len(metrics) == 1:
                     self.entry['descriptor_metric'] = {'mw': 'molecular_weight', 'logp': 'logp'}[metrics[0]]
-        if (result.outcome == RunOutcome.COMPLETED and not result.tool_results
+        if (self.acknowledgement and result.outcome == RunOutcome.COMPLETED and not result.tool_results
                 and context is not None and context.resolved_molecule is None
-                and re.fullmatch(r'\s*(?:谢谢(?:你)?|多谢|好的|好|收到|明白了)[。.!！]?\s*', self.query)):
-            carry = property_comparison.descriptor_context(self.history, self.session_id)
-            if carry:
-                self.entry['descriptor_carry'] = carry
+                and not result.metadata.get('waiting_for_input')):
+            self._retain_acknowledged_results()
+            return view
         from src.agent.contracts.concept_request import parse_ic50_ki_consultation
         consultation = parse_ic50_ki_consultation(self.query)
         if (consultation and self.session_id
@@ -2179,13 +2269,19 @@ class WebTurnProjection:
                 and result.success and result.outcome == RunOutcome.COMPLETED
                 and not result.tool_results and not result.metadata.get('waiting_for_input')):
             # Carry the accepted record, never the model's interpretation.
+            if getattr(context, 'metadata', {}).get('prior_target_context') is not None:
+                self._retain_target_lookup()
             for context_key, evidence_key in (
-                    ('prior_target_context', 'target_structure_evidence'),
                     ('prior_activity_context', 'activity_evidence'),
                     ('prior_candidate_context', 'candidate_evidence')):
-                if getattr(context, 'metadata', {}).get(context_key) is not None:
-                    self.entry[evidence_key] = deepcopy(self.history[-1][evidence_key])
+                record = getattr(context, 'metadata', {}).get(context_key)
+                if record is not None:
+                    if context_key == 'prior_candidate_context' and record.get('scope') == 'selected_descriptor':
+                        self.entry['descriptor_carry'] = property_comparison.descriptor_context(self.history, self.session_id)
+                    else:
+                        self.entry[evidence_key] = deepcopy(self.history[-1][evidence_key])
             if getattr(context, 'metadata', {}).get('prior_activity_context') is not None:
+                self._retain_activity_selection()
                 answer = (view or {}).get('final_answer', result.final_answer)
                 displayed = activity_explanation_text(answer, self.query)
                 if displayed != answer:
@@ -2396,6 +2492,9 @@ class WebTurnProjection:
             batch_properties = property_comparison.accepted_batch_property_evidence(raw, query, self.session_id)
             if batch_properties is not None:
                 self.entry['batch_property_evidence'] = batch_properties
+                metrics = context.metadata.get('metrics', ())
+                if len(metrics) == 1 and metrics[0] in {'mw', 'logp'}:
+                    self.entry['descriptor_metric'] = {'mw': 'molecular_weight', 'logp': 'logp'}[metrics[0]]
             if (context.workflow_name == 'web-property-batch-v1' and result.success
                     and 'drug_likeness_assessment' in {item['tool_name'] for item in raw['tool_result_sequence']}):
                 from .decision_chat import web_scientific_display

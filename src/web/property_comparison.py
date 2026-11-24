@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from src.agent.planning.request_parsing import positive_intent_text, restricted_properties
 from src.agent.utils.validators import InputValidator
+from src.agent.contracts.displayed_row import ORDINAL, displayed_row_position
 
 
 def _pure_property_operation(query, smiles):
@@ -61,7 +62,6 @@ _DESCRIPTOR_QUESTION = re.compile(
     r'(?:(?P<metric>分子量|MW|log\s*P)\s*(?:分别)?(?:是多少|为多少|多少|呢)|有多重)'
     r'(?:来着)?[？?。]?\s*(?P<read_only>(?:请)?(?:不要|不用|无需)重新计算[。.!！]?)?', re.I)
 _DEICTIC = ('它', '那', '这个', '那个', '该分子', '这个分子', '那个分子')
-_ORDINALS = tuple(f'第{n}个' for n in (*'一二三四五六七八九十', '十一', '十二', '十三', '十四', '十五', '十六'))
 _NAMED_COMPARISON_MEMBER = re.compile(
     r'(?:^\s*(?:请)?(?:比较|对比)|(?<=）)\s*(?:和|与|、))\s*'
     r'(?P<label>[\w-]{1,80})\s*（\s*(?:SMILES\s*[:：=]\s*)?(?P<smiles>[!-~]+?)\s*）', re.I)
@@ -117,9 +117,6 @@ def recorded_descriptor(query, history, session_id, *, selected_smiles=None):
             return None
     elif rows and context.get('descriptor_metric'):
         subject = query.rstrip('。！？!?')
-        ordinal = re.fullmatch(r'(?:那)?(第[一二三四五六七八九十\d]+个)(?:呢)?', subject)
-        if ordinal:
-            subject = ordinal[1]
         key = context['descriptor_metric']
     else:
         return None
@@ -129,11 +126,16 @@ def recorded_descriptor(query, history, session_id, *, selected_smiles=None):
         current = single and selected_smiles == single.get('canonical_smiles')
         selected = [row for row in rows if row['smiles'] == selected_smiles]
     else:
+        if subject and rows:
+            active = next((i for i, row in enumerate(rows, 1)
+                           if single and row['smiles'] == single.get('canonical_smiles')), None)
+            position = displayed_row_position(subject, active, count=len(rows))
+            if position is not None:
+                subject = str(position)
         current = single and (unnamed or subject and subject in (
             single.get('canonical_smiles'), single.get('molecule_label')))
         selected = [r for i, r in enumerate(rows, 1) if subject and subject in (
-            r['smiles'], r.get('molecule_label'), str(i), f'第{i}个',
-            _ORDINALS[i - 1] if i <= len(_ORDINALS) else None)]
+            r['smiles'], r.get('molecule_label'), str(i))]
     if len(selected) > 1 or (rows and unnamed and not single):
         choices = []
         for i, row in enumerate(rows, 1):
@@ -392,7 +394,8 @@ def batch_lipinski_followup(query, history, session_id):
     previous = history[-1] if history else {}
     pending = previous.get('batch_lipinski_pending')
     selection = re.fullmatch(
-        r'\s*(?:请)?(?:前(?P<first>两个|两种)|第(?P<a>[一二三四五六七八九十\d]+)个(?:和|与|、)第(?P<b>[一二三四五六七八九十\d]+)个)[。.!！?？]?\s*',
+        rf'\s*(?:请)?(?:前(?P<first>两个|两种|两行)|(?P<a>(?:第{ORDINAL}|最后一)(?:行|个))'
+        rf'\s*(?:和|与|、)\s*(?P<b>(?:第{ORDINAL}|最后一)(?:行|个)))[。.!！?？]?\s*',
         query)
     structure_selection = re.fullmatch(
         r'\s*(?:请)?(?:选择\s*)?(?:SMILES\s*[:：=]\s*)?(?P<one>[A-Za-z0-9@+\-\[\]()\\/=#$%.*:]+?)'
@@ -402,16 +405,14 @@ def batch_lipinski_followup(query, history, session_id):
         if (pending.get('session_id') != session_id or not pending.get('trace_id')
                 or not pending.get('evidence_id') or not pending.get('rows')):
             return {'content': '无法核对待选择的分子记录，请重新提交。', 'status': 'not_calculated'}
-        numbers = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10}
-        def ordinal(value):
-            return int(value) if value.isdecimal() else numbers.get(value, 0)
         if structure_selection:
             from src.agent.candidate_evidence_followup import _canonical
             selected = [_canonical(structure_selection.group(name)) for name in ('one', 'two')]
             available = [row['smiles'] for row in pending['rows']]
             indices = tuple(available.index(value) + 1 if value in available else 0 for value in selected)
         else:
-            indices = (1, 2) if selection.group('first') else (ordinal(selection.group('a')), ordinal(selection.group('b')))
+            indices = ((1, 2) if selection.group('first') else tuple(
+                displayed_row_position(selection[name], count=len(pending['rows'])) for name in ('a', 'b')))
         if len(set(indices)) != 2 or any(index < 1 or index > len(pending['rows']) for index in indices):
             return {'content': f"请从上一轮的 {len(pending['rows'])} 个结构中指定两个不同的结构或序号。",
                     'status': 'not_calculated', 'pending': pending}
@@ -424,10 +425,9 @@ def batch_lipinski_followup(query, history, session_id):
         query, re.I)
     if not match:
         return None
-    evidence = previous.get('batch_property_evidence')
-    if (previous.get('agent_used') is not True or not isinstance(evidence, dict)
-            or evidence.get('session_id') != session_id or not evidence.get('trace_id')
-            or not evidence.get('evidence_id') or not evidence.get('rows')):
+    context = descriptor_context([previous], session_id)
+    evidence = context.get('batch_property_evidence')
+    if not context.get('batch_property_evidence_reused') or not evidence.get('rows'):
         return {'content': '无法核对上一轮完整的分子性质记录，请先比较这些分子的性质。', 'status': 'not_calculated'}
     if match.group('subject') != '这些' and len(evidence['rows']) != 2:
         return {'content': f"上一轮包含 {len(evidence['rows'])} 个分子，请按表格顺序选择（例如“前两个”），或给出两个 SMILES。",

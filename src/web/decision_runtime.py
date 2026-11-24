@@ -208,6 +208,8 @@ _CONSULTATION_INTENT_INSTRUCTION = (
     'Classify the entire unchanged current request with ordinary_intent v1. '
     'Evaluate every clause, including any prohibition on tools. Interpreting user-supplied assay '
     'measurements or choosing a future experiment is a knowledge request. '
+    'For drafting example questions without answering them, use kind=conversation, '
+    'history_relation=none and unresolved=false. A separate request to execute those tasks is mixed. '
     'Concepts, methods, limitations and interpretation of already accepted records are knowledge requests, '
     'even when they mention ADMET, activity, docking, prediction or literature. '
     'An additional request for new scientific values, calculations, predictions, retrieval or external '
@@ -994,9 +996,23 @@ class WebDecisionRuntime:
             turn_id=turn.turn_id, model_generation=generation,
             capability_generation=self.application.capability_generation)
         turn.intent_requests += 1
+        projection = turn.scientific_projection
+        records = projection.readback_contexts if projection is not None else {}
+        ordinary_history = bool(sender.memory) and (projection is None or projection.concept_history is None)
+        labels = []
+        if 'prior_target_context' in records:
+            labels.append('target structures')
+        if 'prior_candidate_context' in records:
+            labels.append('candidate results')
+        if 'prior_activity_context' in records:
+            selected = records['prior_activity_context'].get('selected_smiles')
+            labels.append('activity predictions (selected row)' if selected else 'activity predictions')
         messages = [
             {'role': 'system', 'content': _CONSULTATION_INTENT_INSTRUCTION +
-             'Prior conversation exists: ' + str(bool(sender.memory)).lower() + '.'},
+             'Prior ordinary conversation exists: ' + str(ordinary_history).lower() +
+             '. Accepted scientific records: ' + (', '.join(labels) or 'none') +
+             '. Interpretation of an available record alone is general_knowledge with history_relation=none. '
+             'Use prior_ordinary_turn only for a reference to an actual ordinary conversation.'},
             {'role': 'user', 'content': turn.payload['message']},
         ]
         try:
@@ -1016,7 +1032,7 @@ class WebDecisionRuntime:
         intent = response.intent
         if (intent.unresolved or intent.kind not in {
                 'general_knowledge', 'conversation', 'capability', 'follow_up'}
-                or (intent.kind == 'follow_up' and not sender.memory)):
+                or (intent.history_relation == 'prior_ordinary_turn' and not ordinary_history)):
             if rejection is None:
                 return False
             raise DecisionAdmissionError(rejection)
@@ -1546,8 +1562,13 @@ class WebDecisionRuntime:
                 except ValueError:
                     raise DecisionAdmissionError('scientific_reference_unavailable') from None
 
+            # The last slot is this turn's pending delivery marker. Older turns may
+            # only be consulted by a readback explicitly scoped to a named batch.
+            activity_history = (sender.scientific_memory[:-1]
+                                if envelope.reference is None and envelope.selection is None else None)
             followup = None if turn.tool_free_consultation else await settle_owned_call(
                 lambda: projection.followup(enable_tools=envelope.enable_tools, enable_rag=envelope.enable_rag,
+                    activity_history=activity_history,
                     resolve_selection=resolve_selection if envelope.selection is not None else None),
                 worker_owner=turn.worker_owner)
             if turn.cancel_event.is_set():
@@ -1917,7 +1938,7 @@ class WebDecisionRuntime:
             compile_query = envelope.query if turn.tool_free_consultation else projection.execution_query()
             if not turn.tool_free_consultation and (_should_compile_scientific_plan(envelope)
                     or ((projection.contextual_property or projection.property_bound_question or projection.concept_calculation is not None or projection.property_explanation is not None
-                         or projection.mixed_execution_query is not None)
+                         or projection.property_comparison_requested or projection.mixed_execution_query is not None)
                         and envelope.enable_tools
                         and envelope.reference is None and envelope.selection is None
                         and ScientificObligationCompiler.is_profile_candidate(compile_query))):
@@ -1948,7 +1969,9 @@ class WebDecisionRuntime:
                       and turn.scientific_plan.status == 'rejected' and not turn.scientific_plan.message
                       and envelope.reference is None and envelope.selection is None
                       and turn.scientific_plan.original_query == execution_payload['message'] == envelope.query
-                      and asks_about_given_information(envelope.query)):
+                      and asks_about_given_information(envelope.query,
+                          prior_activity_context=projection.readback_contexts.get('prior_activity_context'),
+                          prior_candidate_context=projection.readback_contexts.get('prior_candidate_context'))):
                     # Keep the original rejection for mixed or executable requests.
                     if await self._classify_tool_free_consultation(
                             sender, turn, model, generation, handler._input_limit(), rejection=None):
@@ -2024,15 +2047,7 @@ class WebDecisionRuntime:
                             **({'history': ([] if turn.scientific_projection is not None
                                             and turn.scientific_projection.concept_history is not None
                                             else sender.memory),
-                                'prior_target_context': (turn.scientific_projection.model_target_context()
-                                    if turn.scientific_projection is not None
-                                    and turn.scientific_projection.concept_history is None else None),
-                                'prior_candidate_context': (turn.scientific_projection.model_candidate_context()
-                                    if turn.scientific_projection is not None
-                                    and turn.scientific_projection.concept_history is None else None),
-                                'prior_activity_context': (turn.scientific_projection.model_activity_context()
-                                    if turn.scientific_projection is not None
-                                    and turn.scientific_projection.concept_history is None else None),
+                                **projection.readback_contexts,
                                 'max_output_tokens': handler._model_max_tokens(model),
                                 'tool_free_consultation': turn.tool_free_consultation,
                                 'descriptor_repeat_of': projection.descriptor_repeat_of,
@@ -2049,7 +2064,10 @@ class WebDecisionRuntime:
                             # The classifier cannot authorize computation or resolve a candidate.
                             reviewable = self.full_web and (
                                 exc.code == 'activity_target_conflict_or_unknown' and mentions_assay_concentration(envelope.query)
-                                or exc.code == 'scientific_reference_unavailable' and asks_about_given_information(envelope.query))
+                                or exc.code == 'scientific_reference_unavailable' and asks_about_given_information(
+                                    envelope.query, prior_candidate_context=projection.readback_contexts.get('prior_candidate_context'))
+                                or exc.code == 'molecular_input_required' and projection.readback_contexts.get(
+                                    'prior_candidate_context', {}).get('scope') == 'selected_descriptor')
                             if not (reviewable
                                     and turn.scientific_plan is None and not turn.tool_free_consultation
                                     and envelope.reference is None and envelope.selection is None
