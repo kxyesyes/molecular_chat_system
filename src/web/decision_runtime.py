@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi import WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from src.agent.contracts import (
     AgentContext,
@@ -650,7 +651,10 @@ class WebDecisionRuntime:
             if op.sender is sender and op.kind == 'send':
                 op.seal('undeliverable')
                 op.cancel_once()
-        if sender._docking_used and not sender.close_attempted:
+        # The ASGI receive side has already observed the peer closing. Sending
+        # a second close would create an unfulfillable cleanup obligation.
+        peer_closed = getattr(sender.websocket, 'client_state', None) is WebSocketState.DISCONNECTED
+        if sender._docking_used and not sender.close_attempted and not peer_closed:
             sender.close_attempted = True  # Shared close-once claim.
             sender._docking_close = _docking._PhysicalOperation(sender, 'close')
             self.docking_operations.add(sender._docking_close)

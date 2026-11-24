@@ -69,6 +69,35 @@ def runtime_sender(socket):
     return runtime, sender
 
 
+def test_completed_docking_send_then_peer_disconnect_needs_no_second_close():
+    from starlette.websockets import WebSocket, WebSocketDisconnect
+
+    async def run():
+        incoming = asyncio.Queue()
+        incoming.put_nowait({'type': 'websocket.connect'})
+        frames = []
+
+        async def send(frame):
+            frames.append(frame['type'])
+            if frame['type'] == 'websocket.close':
+                raise RuntimeError('connection already closed by the peer')
+
+        socket = WebSocket({'type': 'websocket', 'agent_session_id': 'session'}, incoming.get, send)
+        await socket.accept()
+        runtime, sender = runtime_sender(socket)
+        receipt = await sender.send_docking('{}', identity=IDENTITY)
+        assert receipt.delivery == 'delivered'
+        incoming.put_nowait({'type': 'websocket.disconnect', 'code': 1000})
+        with pytest.raises(WebSocketDisconnect):
+            await socket.receive_text()
+        runtime._stop_docking(sender)
+        await runtime.shutdown()
+        assert not runtime.docking_operations
+        assert frames == ['websocket.accept', 'websocket.send']
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('ending', ['timeout', 'cancel'])
 def test_noncooperative_send_gate_returns_before_physical_settlement(monkeypatch, ending):
     async def run():
@@ -620,7 +649,10 @@ def test_actual_app_shutdown_retains_resources_on_unresolved_c_transport(actual_
                 feedback = asyncio.create_task(sender.send_docking('{}', identity=IDENTITY))
                 try:
                     await checkpoint(physical.send_started.is_set)
-                    with pytest.raises(decision_runtime.WorkerCleanupError):
+                    expected_error = (pytest.raises(RuntimeError, match='^docking_shutdown_unresolved$')
+                        if getattr(b.app, 'docking_assembly', None) is not None
+                        else pytest.raises(decision_runtime.WorkerCleanupError))
+                    with expected_error:
                         await b.app.shutdown()
                     assert b.app.decision_runtime is runtime
                     assert b.app.agent_tool_registry is registry and b.app.model is model
