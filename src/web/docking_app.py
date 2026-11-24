@@ -1,9 +1,10 @@
-"""Trusted opt-in assembly. No model, scientific command or service is started here."""
+"""Assemble the homepage docking workflow for local, single-worker deployments."""
 import asyncio
 import os
 from pathlib import Path
 from uuid import uuid4
 
+from src.system.env import chat_docking_enabled
 
 class _DockingAssembly:
     def __init__(self, *, task_runtime, runtime, coordinator, controller, toolchain):
@@ -52,7 +53,7 @@ def assemble_docking_app(application, docking_service, *, logger=None):
     fallible validation precedes activation; failed routing is rolled back.
     The normal decision profile and its handler dependency are never changed.
     """
-    if os.environ.get('MEDCHAT_CHAT_DOCKING_ENABLED') != '1':
+    if not chat_docking_enabled():
         return None
 
     from src.docking.chat_toolchain import ChatDockingToolchain
@@ -74,13 +75,20 @@ def assemble_docking_app(application, docking_service, *, logger=None):
         if getattr(application, 'docking_assembly', None) is not None:
             raise ValueError
         config = TaskRuntimeConfig.from_env()
-        if config.backend != 'local' or config.warnings or application.chat_handler is None:
-            raise ValueError
-        require_local_output_construction()
-        toolchain = ChatDockingToolchain(docking_service)
-        timeout = toolchain.runtime_config()['docking']['vina_timeout_seconds']
-        if not 0 < timeout <= 300 or int(timeout) != timeout:
-            raise ValueError
+        try:
+            if config.backend != 'local' or config.warnings or application.chat_handler is None:
+                raise DockingConsentError('consent_policy_unavailable')
+            require_local_output_construction()
+            toolchain = ChatDockingToolchain(docking_service)
+            timeout = toolchain.runtime_config()['docking']['vina_timeout_seconds']
+            if not 0 < timeout <= 300 or int(timeout) != timeout:
+                raise DockingConsentError('consent_policy_unavailable')
+        except DockingConsentError:
+            if 'MEDCHAT_CHAT_DOCKING_ENABLED' in os.environ:
+                raise
+            if logger is not None:
+                logger.warning("Homepage docking unavailable: check the local task backend, chat handler, docking tools and Vina timeout (1–300 whole seconds).")
+            return None
         policy = DockingConsentPolicy(toolchain.digest, MOLECULAR_DOCKING_ADAPTER_VERSION,
             'local', uuid4().hex, uuid4().hex, int(timeout), 420)
         output_root = private_output_root(os.environ.get('MEDCHAT_CHAT_DOCKING_OUTPUT_ROOT',

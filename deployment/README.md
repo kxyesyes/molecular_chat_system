@@ -109,14 +109,16 @@ REVERSE_TARGET_PREWARM_TIMEOUT_SECONDS=1800
 应用关闭会撤销发布资格并等待实际预热线程退出；原生调用尚未返回时可能需要
 等待，不应把清理中状态视为已释放。独立反向寻靶页面的 legacy 按需加载不变。
 
-聊天对接必须使用单 worker：仅当 `MEDCHAT_CHAT_DOCKING_ENABLED=1`（严格等于
-`1`，其他值仍按原逻辑禁用）时启用聊天对接。其 WebSocket 任务归属及 HTTP
+首页聊天对接默认启用。聊天对接必须使用单 worker，并使用本地任务后端和已配置的对接工具链。
+未设置开关且缺少这些条件时，服务记录原因，其他页面仍可启动。
+显式设置 `MEDCHAT_CHAT_DOCKING_ENABLED=1` 会要求对接装配成功后才启动；
+需要关闭时设置 `MEDCHAT_CHAT_DOCKING_ENABLED=0`。其 WebSocket 任务归属及 HTTP
 controls 的任务集合是 process-local，多进程分流会使控制请求落到无该任务的进程，
 产生随机 404。`main.py` 在加载 env-file 并解析 CLI `--workers` / 环境变量
 `MEDCHAT_WORKERS` 后，对聊天对接加多 worker（N > 1）执行 fail-fast，非零退出；
 该检查在 reload 的 worker 调整及环境探测、应用装配、服务器启动之前执行，
 不会自动降为单 worker 或关闭聊天对接。请显式使用 `--workers 1` 或
-`MEDCHAT_WORKERS=1`（CLI 优先）。聊天对接未启用时，其他功能保留以下原有
+`MEDCHAT_WORKERS=1`（CLI 优先）。多 worker 部署须显式关闭聊天对接，其他功能保留以下原有
 `main.py` 多 worker 支持边界。
 
 上述自动拒绝保证属于 `main.py` 启动入口。应用无法可靠获知外部 Uvicorn

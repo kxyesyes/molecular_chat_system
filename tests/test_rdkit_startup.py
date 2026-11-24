@@ -134,6 +134,7 @@ def test_main_cli_preserves_multiworker_configuration_without_external_startup(t
         main.check_environment = lambda: (True, [])
         main.check_frontend_files = lambda: True
         main.create_default_config = lambda: 'synthetic-not-opened.yaml'
+        os.environ['MEDCHAT_CHAT_DOCKING_ENABLED'] = '0'
         os.environ['MEDCHAT_WORKERS'] = '2' if VIA_ENV else '1'
         sys.argv = ['main.py', '--no-reload'] + ([] if VIA_ENV else ['--workers', '2'])
         with patch('uvicorn.run') as run:

@@ -53,6 +53,8 @@ Python/Node 依赖、npm manifest/锁文件，并按该版本执行 `npm ci`，�
 后续前端实测也覆盖了部分靶点和活性查询。云端完整科学流程与生产部署仍待验收。
 安装、权限和各次实测范围见 [Pi 运行手册](docs/PI_RUNTIME.md#实测状态与尚待验收)。
 
+单 worker 部署默认启用首页聊天对接。配置本地对接工具链后，可在首页发起请求，核对输入并确认运行。使用多个 Web worker 时请设置 `MEDCHAT_CHAT_DOCKING_ENABLED=0`。详见[部署说明](deployment/README.md)。
+
 ### 主模型接入与一次保存
 
 首页默认使用 DeepSeek 官方 OpenAI 兼容接口 `https://api.deepseek.com/chat/completions`、
