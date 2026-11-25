@@ -861,12 +861,19 @@ def test_progress_slot_accepts_only_real_controlled_phases_and_latest_value():
 def test_fast_success_flushes_final_controlled_heartbeat():
     async def scenario() -> None:
         heartbeats: list[dict] = []
+        projected_phases = []
+
+        async def project(snapshot):
+            await asyncio.sleep(0)
+            projected_phases.append(snapshot.pop("phase"))
+
         result = await _run_docking_in_test_thread(
             _FakeDockingExecution(_success_result()),
             {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
             attempt=1,
             heartbeat=heartbeats.append,
             heartbeat_interval=0.01,
+            heartbeat_projection=project,
         )
         assert result["status"] == TaskStatus.SUCCEEDED.value
         assert heartbeats
@@ -875,6 +882,7 @@ def test_fast_success_flushes_final_controlled_heartbeat():
             for item in heartbeats
         )
         assert all(item["phase"] in HEARTBEAT_PHASES for item in heartbeats)
+        assert projected_phases == [item["phase"] for item in heartbeats]
         assert heartbeats[-1]["phase"] == TaskPhase.ARTIFACT_COMMIT.value
         assert heartbeats[-1]["progress"] == 1.0
 
