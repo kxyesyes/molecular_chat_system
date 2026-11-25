@@ -36,6 +36,8 @@
   let decisionWaiting = null;
   let decisionAbandonAwait = null;
   let decisionControls = null;
+  let goalModeButton = null;
+  let initialMessagePlaceholder = "";
   const decisionSeenTurns = new Set();
   const decisionStatuses = window.MedChatStatus.workflowLabels;
   const maxWebSocketMessageLength = 256 * 1024;
@@ -198,11 +200,32 @@
   }
 
   let documentQuestionPending = false;
+  function canUpdateGoal(turn) {
+    return turn?.phase === "active" && turn.goalRevision > 0 && !turn.result &&
+      !turn.cancelSent && !turn.pendingGoal;
+  }
+
   function updateDecisionControls() {
-    if (elements.sendBtn) elements.sendBtn.disabled = documentQuestionPending ||
-      (decisionAwaitingReady && !window.HomeWorkspace?.selected) ||
-      (typeof dockingUI !== "undefined" && dockingUI?.blocked()) ||
-      (decisionMode && Boolean(decisionActive() || decisionWaiting || decisionAbandonAwait));
+    const updatingGoal = decisionActive() && decisionTurn.goalRevision > 0;
+    if (elements.sendBtn) {
+      elements.sendBtn.disabled = documentQuestionPending ||
+        (decisionAwaitingReady && !window.HomeWorkspace?.selected) ||
+        (typeof dockingUI !== "undefined" && dockingUI?.blocked()) ||
+        (decisionMode && Boolean(decisionActive() && !canUpdateGoal(decisionTurn) || decisionWaiting || decisionAbandonAwait));
+      elements.sendBtn.setAttribute("aria-label", updatingGoal ? "更新目标" : "发送消息");
+    }
+    if (goalModeButton) {
+      goalModeButton.disabled = Boolean(decisionActive() || decisionWaiting || decisionAbandonAwait ||
+        window.HomeWorkspace?.selected || documentQuestionPending || dockingUI?.blocked());
+      if (!window.HomeWorkspace?.selected) {
+        let placeholder = initialMessagePlaceholder;
+        if (updatingGoal) placeholder = "输入修改后的目标…";
+        else if (!goalModeButton.hidden && goalModeButton.getAttribute("aria-pressed") === "true") {
+          placeholder = "描述你想完成的分析目标…";
+        }
+        elements.input.placeholder = placeholder;
+      }
+    }
     if (!decisionControls) return;
     decisionControls.box.hidden = !decisionMode || decisionTurn?.phase === "handoff" || !(decisionActive() || decisionWaiting);
     decisionControls.stop.hidden = !decisionActive();
@@ -243,6 +266,10 @@
   }
 
   function clearDecisionConnection() {
+    if (goalModeButton) {
+      goalModeButton.hidden = true;
+      goalModeButton.setAttribute("aria-pressed", "false");
+    }
     window.HomeResultDetails?.abortAll?.();
     decisionResultFormat = null;
     if (typeof dockingUI !== "undefined") dockingUI?.disconnect(ws);
@@ -282,6 +309,23 @@
       message.capabilities.result_formats.includes("summary_details_v1") ? "summary_details_v1" : null;
     if (decisionMode && !decisionWaiting) decisionWaiting = readStoredDecisionWaiting();
     const composer = elements.input?.closest(".chat-composer");
+    const goalsAvailable = decisionMode && message.capabilities?.goal_steering === true;
+    if (goalsAvailable && !goalModeButton && composer) {
+      const toolbar = composer.querySelector(".tool");
+      initialMessagePlaceholder = elements.input.placeholder;
+      goalModeButton = document.createElement("button");
+      goalModeButton.type = "button";
+      goalModeButton.className = "goal-mode-toggle";
+      goalModeButton.textContent = "按目标分析";
+      goalModeButton.setAttribute("aria-pressed", "false");
+      goalModeButton.addEventListener("click", () => {
+        goalModeButton.setAttribute("aria-pressed", String(goalModeButton.getAttribute("aria-pressed") !== "true"));
+        updateDecisionControls();
+        elements.input.focus();
+      });
+      toolbar.insertBefore(goalModeButton, toolbar.querySelector(".more"));
+    }
+    if (goalModeButton) goalModeButton.hidden = !goalsAvailable;
     if (decisionMode && !decisionControls && composer) {
       const box = document.createElement("div");
       box.className = "decision-runtime-controls";
@@ -319,7 +363,8 @@
   function sendDecisionMessage(resume = false, repeat = null) {
     if (typeof dockingUI !== "undefined" && dockingUI?.blocked()) return;
     const message = repeat ? repeat.payload.message : elements.input.value;
-    if (decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
+    if (decisionActive() && !canUpdateGoal(decisionTurn) || decisionAbandonAwait ||
+        (resume ? !decisionWaiting : decisionWaiting)) return;
     if (!message.trim()) {
       HomeChatRenderer.showNotification("请输入消息内容", "warning");
       return;
@@ -328,12 +373,22 @@
       HomeChatRenderer.showNotification("模型配置有未保存的修改，请先保存。", "warning");
       return;
     }
+    if (canUpdateGoal(decisionTurn)) {
+      if (sendDecisionControl({type: "goal_update", turn_id: decisionTurn.turnId, trace_id: decisionTurn.traceId,
+          revision: decisionTurn.goalRevision, message})) {
+        decisionTurn.pendingGoal = message;
+        updateDecisionControls();
+      }
+      return;
+    }
     const format = decisionResultFormat ? {result_format: decisionResultFormat} : {};
     let payload;
     if (repeat) {
       payload = repeat.payload;
     } else if (resume) {
       payload = {type: "resume", trace_id: decisionWaiting.traceId, continuation_id: decisionWaiting.nonce, message, ...format};
+    } else if (goalModeButton && !goalModeButton.hidden && goalModeButton.getAttribute("aria-pressed") === "true") {
+      payload = {type: "goal_start", message, enable_tools: toolsEnabled};
     } else {
       const request = /^\s*请?重复执行\s*([23])\s*次\s*[A-Za-z0-9@+\-\[\]()=#\\/.:%]+\s*的综合评价[，,]\s*比较每次调用的工具顺序[、，,]事件流和最终结论是否一致[。.!！?？]?\s*$/.exec(message);
       const config = HomeAdvancedOptions.getConfig();
@@ -344,12 +399,13 @@
     }
     if (!sendDecisionControl(payload)) return;
     decisionTurn = {socket: ws, phase: "pending", turnId: null, traceId: null, requestText: message,
-      resume: resume ? decisionWaiting : null, cancelSent: false, result: null, repeat, events: []};
+      resume: resume ? decisionWaiting : null, cancelSent: false, result: null, repeat, events: [],
+      goalRevision: payload.type === "goal_start" ? 0 : null};
     scientificReferences?.startRequest();
     moleculeCandidateLifecycle.startRequest();
     evidenceReportLifecycle?.startRequest();
     enterChatMode();
-    addUserMessage(repeat && repeat.runs.length ? `第 ${repeat.runs.length + 1} 次综合评价` : message);
+    addUserMessage(repeat && repeat.runs.length ? `第 ${repeat.runs.length + 1} 次综合评价` : message, payload.type !== "goal_start");
     decisionTurn.userMessage = elements.chatContainer.lastChild;
     if (!repeat || !repeat.runs.length) elements.input.value = "";
     showTypingIndicator();
@@ -368,6 +424,26 @@
     }
     const turn = decisionTurn;
     if (message.type === "error") {
+      if (message.code === "invalid_goal_request") {
+        if (turn?.socket === socket && turn.phase === "pending" && turn.goalRevision === 0) {
+          turn.phase = "ended";
+          if (!elements.input.value) elements.input.value = turn.requestText;
+          moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear();
+          decisionStatus(turn, "目标未被接受，请检查输入后重试。");
+          turn.box.classList.add("complete");
+          updateDecisionControls();
+        }
+        return true;
+      }
+      if (message.code === "goal_update_rejected") {
+        if (turn?.socket === socket && turn.phase === "active" && turn.pendingGoal &&
+            message.turn_id === turn.turnId && message.trace_id === turn.traceId && message.revision === turn.goalRevision) {
+          turn.pendingGoal = null;
+          decisionStatus(turn, "目标更新未被接受，仍按原目标执行。可以修改后重试。");
+          updateDecisionControls();
+        }
+        return true;
+      }
       HomeChatRenderer.showNotification("请求控制未被接受，请检查当前状态后重试。", "warning");
       // Well-formed chat/resume/abandon cannot yield invalid_control. A late
       // cancel error has no request ID: notify, but retain pending authority.
@@ -406,6 +482,10 @@
       if (turn.phase !== "pending" || !/^[a-f0-9]{32}$/.test(message.turn_id || "") ||
         !/^[a-f0-9]{32}$/.test(message.trace_id || "") || decisionSeenTurns.has(message.turn_id) ||
         (turn.resume && message.trace_id !== turn.resume.traceId)) return true;
+      if (turn.goalRevision === 0) {
+        if (message.goal_revision !== 1) return true;
+        turn.goalRevision = 1;
+      }
       turn.turnId = message.turn_id; turn.traceId = message.trace_id; turn.phase = "active";
       agentTaskState = window.HomeTaskState.create();
       decisionSeenTurns.add(turn.turnId);
@@ -422,6 +502,31 @@
       return false;
     }
     if (message.trace_id !== turn.traceId) return true;
+    if (message.type === "goal_updated") {
+      if (!turn.result && turn.goalRevision > 0 && turn.pendingGoal &&
+          message.revision === turn.goalRevision + 1 && message.message === turn.pendingGoal) {
+        if (elements.input.value === turn.pendingGoal) elements.input.value = "";
+        turn.pendingGoal = null;
+        turn.goalRevision = message.revision;
+        turn.requestText = message.message;
+        addUserMessage(message.message, false);
+        turn.userMessage = elements.chatContainer.lastChild;
+        const answer = turn.box?.closest(".assistant-wrapper");
+        if (answer) elements.chatContainer.appendChild(answer);
+        decisionStatus(turn, "正在按新目标规划");
+        updateDecisionControls();
+        HomeChatRenderer.scrollToBottom();
+      }
+      return true;
+    }
+    if (message.type === "goal_progress") {
+      if (!turn.result && turn.goalRevision > 0 && message.revision === turn.goalRevision &&
+          ["planning", "running", "observed", "reused"].includes(message.phase) && typeof message.message === "string") {
+        decisionStatus(turn, message.message);
+      }
+      return true;
+    }
+    if (turn.goalRevision > 0 && message.goal_revision !== undefined && message.goal_revision !== turn.goalRevision) return true;
     if (message.type === "rag_info") {
       if (["completed", "partial"].includes(turn.result?.status) && !turn.result.retrievalCards &&
           turn.result.metadata.retrieval_performed === true && Array.isArray(message.molecules)) {
@@ -588,6 +693,10 @@
         }
       }
       turn.phase = message.metadata?.structure_handoff_pending === true ? "handoff" : "ended";
+      if (turn.pendingGoal) {
+        turn.pendingGoal = null;
+        HomeChatRenderer.showNotification("本轮已结束，目标修改未生效。", "warning");
+      }
       if (projectionFailed) {
         setDecisionWaiting(null);
       } else if (status === "waiting_for_input" && /^[a-f0-9]{32}$/.test(metadata.continuation_id || "") &&
@@ -1925,7 +2034,7 @@
   }
 
   // 添加用户消息 - 美化版
-  function addUserMessage(content) {
+  function addUserMessage(content, allowDocking = true) {
     const messageWrapper = document.createElement("div");
     messageWrapper.className = "message-wrapper user-wrapper";
     messageWrapper.style.cssText = `
@@ -1989,7 +2098,7 @@
     messageWrapper.appendChild(messageContainer);
     elements.chatContainer.appendChild(messageWrapper);
 
-    if (typeof dockingUI !== "undefined") dockingUI?.begin(ws, tag => {
+    if (allowDocking && typeof dockingUI !== "undefined") dockingUI?.begin(ws, tag => {
       const response = document.createElement(tag);
       messageWrapper.parentNode?.insertBefore(response, messageWrapper.nextSibling);
       return response;

@@ -104,6 +104,33 @@
   min-width: 0;
 }
 
+.chat-composer .goal-mode-toggle {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--theme-primary-border, #c6cfe2);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--theme-primary-text, #23304f);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chat-composer .goal-mode-toggle[aria-pressed="true"] {
+  background: var(--theme-primary-soft, #e3ebfc);
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.chat-composer .goal-mode-toggle:disabled {
+  opacity: .65;
+  cursor: default;
+}
+
+.chat-composer .goal-mode-toggle:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
 .chat-composer .decision-runtime-controls {
   display: flex;
   flex-wrap: wrap;
