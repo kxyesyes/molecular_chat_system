@@ -16,6 +16,26 @@ from src.reverse_target.generate_fingerprints import FingerprintGenerator
 from src.reverse_target.predictor import ReverseTargetPredictor
 
 
+def test_fingerprint_worker_uses_reference_conversion_before_maccs_slicing(monkeypatch, tmp_path):
+    from src.reverse_target import generate_fingerprints as builder
+
+    converted_widths = []
+    convert = builder._bitvect_to_numpy_array
+
+    def record_conversion(bits):
+        converted_widths.append(bits.GetNumBits())
+        return convert(bits)
+
+    monkeypatch.setattr(builder, "_bitvect_to_numpy_array", record_conversion)
+    morgan, maccs = builder._process_single_fp("c1ccccc1")
+    assert converted_widths == [2048, 167]
+    assert morgan.shape == (2048,) and maccs.shape == (166,)
+    assert morgan.dtype == maccs.dtype == np.uint8
+    query_morgan, query_maccs = ReverseTargetPredictor(tmp_path).compute_query_fingerprints("c1ccccc1")
+    np.testing.assert_array_equal(morgan, query_morgan)
+    np.testing.assert_array_equal(maccs, query_maccs)
+
+
 def test_target_links_use_source_identifiers_on_both_prediction_paths(tmp_path):
     from src.reverse_target.predictor import _aggregate_by_target
 

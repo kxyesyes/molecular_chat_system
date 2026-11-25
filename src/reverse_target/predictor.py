@@ -12,12 +12,12 @@ from pathlib import Path
 from typing import List, Dict, Tuple
 from urllib.parse import quote, urlencode
 from rdkit import Chem
-from rdkit import DataStructs
 from rdkit.Chem import AllChem, MACCSkeys
 import threading
 import uuid
 
 from src.reverse_target.config import get_reverse_target_data_dir
+from src.reverse_target.fingerprints import bitvect_to_numpy_array as _bitvect_to_numpy_array
 from src.reverse_target.receipt import UNIT_VERIFICATION_REQUIRED
 from src.reverse_target.owned_source import (
     INPUT_ERROR, REVISION, WEIGHT_REVISION, ReverseProofError, ReverseSourceSnapshot,
@@ -93,28 +93,6 @@ def _assay_fields(row):
         if pd.notna(value) and value != '':
             fields[key] = value
     return fields
-
-
-def _bitvect_to_numpy_array(bitvect) -> np.ndarray:
-    """
-    Convert an RDKit ExplicitBitVect to a uint8 NumPy array.
-
-    Some deployment environments expose an older RDKit/Numeric bridge that can
-    reject modern NumPy arrays with "Expecting a Numeric array object". The
-    explicit GetBit fallback is slower, but query fingerprints are tiny and this
-    keeps valid SMILES from failing at runtime.
-    """
-    num_bits = bitvect.GetNumBits()
-    arr = np.zeros((num_bits,), dtype=np.uint8)
-    try:
-        DataStructs.ConvertToNumpyArray(bitvect, arr)
-        return arr
-    except (TypeError, ValueError):
-        return np.fromiter(
-            (1 if bitvect.GetBit(index) else 0 for index in range(num_bits)),
-            dtype=np.uint8,
-            count=num_bits,
-        )
 
 
 class ReverseTargetPredictor:
