@@ -2,6 +2,7 @@
 import asyncio
 from decimal import Decimal
 import json
+import re
 from threading import Lock
 import time
 from uuid import uuid4
@@ -12,6 +13,7 @@ from src.agent.pi_runtime.bridge import PiRuntimeBridge
 from src.agent.pi_runtime.provider import ModelProviderAdapter, decision_tool_call, tool_definitions
 from src.agent.runtime.allocation import AllocationStopped, begin_tool_dispatch
 from src.agent.scientific_session.decision_execution import settle_owned_call
+from src.agent.scientific_session.decision_policy import schema_correction
 from .result_summary import TOOL_LABELS
 
 
@@ -88,7 +90,24 @@ plan drug_likeness_assessment only for its exact SMILES. No new property check i
 If the user asks to choose a candidate before proceeding, submit clarify with missing_fields ["candidate"]
 immediately. Do not guess or run any checks. A candidate_selection in the request is the user's verified
 reply to that clarification: perform its original goal for that SMILES now; do not ask again.
-For 'it' after a selection, use the selected_position in the property observation, in original row order."""
+For 'it' after a selection, use the selected_position in the property observation, in original row order.
+When candidate_batch is present, the user is still deciding. For a question about these displayed rows,
+submit plan_goal with a single candidate_view step, e.g. for the lightest use these exact arguments:
+{"steps":[{"tool_name":"candidate_view","arguments":{"field":"molecular_weight","show":"min"}}]}.
+Use min, max, all or a 1-based integer row (including when the user names a SMILES) and the requested
+field molecular_weight, logp, tpsa or qed. Python renders the verified
+values and keeps the question open. Never select a row or run checks just because it answers a question.
+If the user replaces a waiting batch, submit plan_goal with "replace_candidate_batch":true alongside
+"steps", starting with the property_calculator batch in the new user's exact order. Only mark replacement
+when the user requests a new batch. Inspecting a named row never replaces the batch."""
+
+
+def _requested_batch_change(text, smiles):
+    """Require a direct replacement command before re-running an overlapping batch."""
+    rows = r'\s*(?:、|和|与|以及|,)\s*'.join(re.escape(row) for row in smiles)
+    command = (rf'(?:换一?批|(?:换一?批(?:比较)?|(?:把)?候选换成|改为比较)\s*{rows}|'
+               rf'用\s*{rows}\s*作为新(?:的)?一?批(?:次)?|(?:start|use) (?:a )?new batch)')
+    return bool(re.search(rf'(?:^|[，,。；;！？!?\n])\s*(?:请|现在|先)?\s*{command}\s*(?:$|[，,。；;！!\n])', text, re.I))
 
 
 def _bind_plan(decision, tools, user_texts, max_steps):
@@ -180,17 +199,20 @@ class _GoalRun:
         self.expected_call = None
         self.stop_notice = ''
         self.answer = None
+        self.repair_used = False
         self.selection = None
+        self.candidate_records = {}
         if state.pending_candidate:
             self._resolve_candidate(*state.pending_candidate)
 
-    def _ask_candidate(self, key, goal, records):
+    def _ask_candidate(self, key, goal, records, summary=''):
         rows = records[key]['arguments']['smiles']
         self.state.completed_observations = records
         self.state.next_candidate_question = (key, goal)
         self.state.sealed = True
         choices = '、'.join(f'{i}. {s}' for i, s in enumerate(rows, 1))
-        self.answer = {'status': 'waiting_for_input', 'text': f'请选择候选（{choices}）。请回复序号或 SMILES。'}
+        prompt = f'请选择候选（{choices}）。请回复序号或 SMILES。'
+        self.answer = {'status': 'waiting_for_input', 'text': '\n\n'.join(filter(None, (summary, prompt)))}
         return {'content': json.dumps({'status': 'waiting_for_input'}), 'terminate': True}
 
     def _resolve_candidate(self, key, goal):
@@ -212,9 +234,34 @@ class _GoalRun:
                 else:
                     self._ask_candidate(key, goal, self.observations)
                 return
-        # A different request supersedes this question and its candidate list.
-        self.observations.clear()
+            # The planner may inspect the displayed batch. A new goal can bind
+            # scientific steps only to its own inputs, never to these rows.
+            self.candidate_records = self.observations
+        self.observations = {}
         self.previous_inputs.clear()
+
+    def _view_candidates(self, view):
+        labels = {'molecular_weight': '分子量', 'logp': 'logP', 'tpsa': 'TPSA', 'qed': 'QED'}
+        if not isinstance(view, dict) or set(view) != {'field', 'show'}:
+            raise ValueError
+        field, show = view['field'], view['show']
+        key, goal = self.state.pending_candidate
+        rows = self.candidate_records[key]['facts']
+        single = type(show) is int and 1 <= show <= len(rows)
+        if not isinstance(field, str) or field not in labels or (not single and show not in ('min', 'max', 'all')):
+            raise ValueError
+        extreme = None
+        if show in ('min', 'max'):
+            extreme = (min if show == 'min' else max)(row[field] for row in rows)
+        lines = []
+        for i, row in enumerate(rows, 1):
+            if (not single or i == show) and (extreme is None or row[field] == extreme):
+                unit = row['units'].get(field, '')
+                value = f'{row[field]} {unit}'.rstrip()
+                lines.append(f"第 {i} 个 {row['smiles']}（{labels[field]} {value}）")
+        heading = {'min': '最低', 'max': '最高'}.get(show, '')
+        summary = (f'{labels[field]}{heading}的是' if heading else '') + '、'.join(lines) + '。'
+        return self._ask_candidate(key, goal, self.candidate_records, summary)
 
     def _check_cancel(self):
         if self.cancelled():
@@ -285,6 +332,9 @@ class _GoalRun:
             observations=list(self.observations.values()), feedback=self.feedback)
         if self.selection and self.proposal_revision == 1:
             request['candidate_selection'] = self.selection
+        if self.candidate_records and self.proposal_revision == 1:
+            key, _ = self.state.pending_candidate
+            request['candidate_batch'] = self.candidate_records[key]['facts']
         messages = [*payload['messages'], {'role': 'user', 'content':
             json.dumps(request, ensure_ascii=False, separators=(',', ':'))}]
         timeout = min(self.deadline - time.monotonic(), 60)
@@ -303,11 +353,14 @@ class _GoalRun:
             else:
                 if response.success:
                     self.decision = response.decision
+                elif not self.repair_used and (correction := schema_correction(response)):
+                    self.repair_used = True
+                    self.feedback = correction
                 else:
                     self.stop_notice = '模型没有返回可用的计划。'
         self._check_cancel()
         proposal = self.decision
-        if (self.proposal_revision != self.state.revision or self.stop_notice
+        if (self.proposal_revision != self.state.revision or proposal is None or self.stop_notice
                 or isinstance(proposal, ToolDecision) and proposal.tool_name != 'plan_goal'):
             # This non-scientific callback acknowledges stale/invalid proposals
             # without sending an unregistered or stale tool call to the Pi host.
@@ -352,9 +405,30 @@ class _GoalRun:
             if steps and len(ids) == len(self.steps) and set(ids) == set(decision.evidence_ids):
                 return self._stop(completed=True)
             self.feedback = 'Finish rejected: replan missing checks; cite exactly the current matching receipts.'
-        else:
+        elif isinstance(decision, ToolDecision):
             try:
+                if self.candidate_records and revision == 1 and decision.tool_name == 'plan_goal':
+                    match decision.arguments:
+                        case {'steps': [{'tool_name': 'candidate_view', 'arguments': view, **step_extra}],
+                              **extra} if not (step_extra or extra):
+                            return self._view_candidates(view)
+                waiting = self.candidate_records and revision == 1
+                replacing = waiting and decision.arguments.get('replace_candidate_batch') is True
+                if replacing:
+                    args = dict(decision.arguments)
+                    del args['replace_candidate_batch']
+                    decision = decision.model_copy(update={'arguments': args})
                 steps, difference = _bind_plan(decision, self.tools, self.binding_inputs, self.tool_budget)
+                if replacing and steps[0].tool_name != 'property_calculator':
+                    raise ValueError
+                if waiting:
+                    key, _ = self.state.pending_candidate
+                    waiting_rows = self.candidate_records[key]['arguments']['smiles']
+                    if any('smiles' in s.arguments and set(s.arguments['smiles']).issubset(waiting_rows) for s in steps):
+                        # Mentioning displayed structures authorizes viewing them. Re-running those
+                        # rows as a new batch also requires an affirmative instruction from the user.
+                        if not replacing or not _requested_batch_change(self.state.goal, steps[0].arguments['smiles']):
+                            raise ValueError
                 if self.selection and revision == 1 and any(
                         s.arguments.get('smiles') != [self.selection['smiles']] and not (
                             s.tool_name == 'property_calculator' and s.key in self.observations)
@@ -362,7 +436,11 @@ class _GoalRun:
                     raise ValueError
             except ValueError:
                 self.feedback = 'Plan rejected: use plan_goal, catalog arguments and explicit user inputs.'
+                if self.candidate_records and revision == 1:
+                    self.feedback += (' To inspect waiting rows use one candidate_view step. For an explicit new batch '
+                                      'set replace_candidate_batch:true alongside steps using the new user inputs.')
             else:
+                self.candidate_records = {}
                 self.difference = difference
                 await self._advance(revision, steps)
         if self.answer is not None:
