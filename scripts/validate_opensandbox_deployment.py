@@ -622,30 +622,6 @@ def _shell_logical_commands(text: str) -> list[str]:
     return commands
 
 
-def _group_list_contains(value: str, group: str) -> bool:
-    return group in {item.strip() for item in value.split(",") if item.strip()}
-
-
-def _usermod_assigns_group(tokens: list[str], group: str) -> bool:
-    if "medchat" not in tokens:
-        return False
-    for index, token in enumerate(tokens):
-        value: str | None = None
-        if token in {"-G", "--groups"} and index + 1 < len(tokens):
-            value = tokens[index + 1]
-        elif token.startswith("--groups="):
-            value = token.partition("=")[2]
-        elif token.startswith("-") and not token.startswith("--") and "G" in token:
-            suffix = token.partition("G")[2]
-            if suffix:
-                value = suffix
-            elif index + 1 < len(tokens):
-                value = tokens[index + 1]
-        if value is not None and _group_list_contains(value, group):
-            return True
-    return False
-
-
 _SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _MEMBERSHIP_COMMANDS = {"usermod", "adduser", "addgroup", "gpasswd"}
 _COMMAND_WRAPPERS = {"env", "command", "sudo"}

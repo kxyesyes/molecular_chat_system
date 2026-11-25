@@ -286,21 +286,6 @@ def _resolve_safe_backup_state_path(
     return resolved
 
 
-def _is_safe_backup_state_path(value: object) -> bool:
-    repository_relative = (
-        isinstance(value, Path)
-        and value.is_absolute()
-        and PROJECT_ROOT in value.parents
-    )
-    return (
-        _resolve_safe_backup_state_path(
-            value,
-            repository_relative=repository_relative,
-        )
-        is not None
-    )
-
-
 def _read_limited_fd(file_descriptor: int) -> bytes:
     chunks: list[bytes] = []
     remaining = MAX_BACKUP_STATE_BYTES + 1

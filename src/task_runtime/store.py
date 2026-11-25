@@ -474,12 +474,6 @@ def _validate_code(value: Any, name: str) -> str:
     return value
 
 
-def _validate_optional_code(value: Any, name: str) -> str | None:
-    if value is None:
-        return None
-    return _validate_code(value, name)
-
-
 def _validate_phase(value: TaskPhase | str | None) -> str | None:
     if value is None:
         return None
