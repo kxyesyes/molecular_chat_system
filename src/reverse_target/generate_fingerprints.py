@@ -7,7 +7,6 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from rdkit import Chem
-from rdkit import DataStructs
 from rdkit.Chem import MACCSkeys, rdFingerprintGenerator
 from tqdm import tqdm
 import hashlib
@@ -19,62 +18,25 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.reverse_target.config import configure_console_output, get_reverse_target_data_dir
-
-
-def _bitvect_to_numpy_array(bitvect):
-    num_bits = bitvect.GetNumBits()
-    arr = np.zeros((num_bits,), dtype=np.uint8)
-    try:
-        DataStructs.ConvertToNumpyArray(bitvect, arr)
-        return arr
-    except (TypeError, ValueError):
-        return np.fromiter(
-            (1 if bitvect.GetBit(index) else 0 for index in range(num_bits)),
-            dtype=np.uint8,
-            count=num_bits,
-        )
+from src.reverse_target.fingerprints import bitvect_to_numpy_array as _bitvect_to_numpy_array
 
 
 def _process_single_fp(smiles):
     """用于多进程提取指纹的包装函数 (Top-level)"""
     try:
-        from rdkit import Chem
-        from rdkit.Chem import MACCSkeys, rdFingerprintGenerator
-        from rdkit import DataStructs
-        import numpy as np
-        
         mol = Chem.MolFromSmiles(smiles)
-        if mol is None: return None, None
+        if mol is None:
+            return None, None
         
         # Morgan (Radius 2, 2048 bits)
         fp_morgan = rdFingerprintGenerator.GetMorganGenerator(
             radius=2,
             fpSize=2048,
         ).GetFingerprint(mol)
-        arr_morgan = np.zeros((fp_morgan.GetNumBits(),), dtype=np.uint8)
-        try:
-            DataStructs.ConvertToNumpyArray(fp_morgan, arr_morgan)
-        except (TypeError, ValueError):
-            arr_morgan = np.fromiter(
-                (1 if fp_morgan.GetBit(index) else 0 for index in range(fp_morgan.GetNumBits())),
-                dtype=np.uint8,
-                count=fp_morgan.GetNumBits(),
-            )
         
         # MACCS (166 bits)
         fp_maccs = MACCSkeys.GenMACCSKeys(mol)
-        arr_maccs_full = np.zeros((fp_maccs.GetNumBits(),), dtype=np.uint8)
-        try:
-            DataStructs.ConvertToNumpyArray(fp_maccs, arr_maccs_full)
-        except (TypeError, ValueError):
-            arr_maccs_full = np.fromiter(
-                (1 if fp_maccs.GetBit(index) else 0 for index in range(fp_maccs.GetNumBits())),
-                dtype=np.uint8,
-                count=fp_maccs.GetNumBits(),
-            )
-        arr_maccs = arr_maccs_full[1:]
-        
-        return arr_morgan, arr_maccs
+        return _bitvect_to_numpy_array(fp_morgan), _bitvect_to_numpy_array(fp_maccs)[1:]
     except:
         return None, None
 
