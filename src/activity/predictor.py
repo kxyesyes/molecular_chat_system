@@ -144,10 +144,6 @@ class ActivityPredictor:
                 return p, None
         return None, None
 
-    def _find_checkpoint_path(self) -> Optional[Path]:
-        checkpoint, _metadata = self._find_checkpoint()
-        return checkpoint
-
     def _get_model_info_for_checkpoint(self, ckpt_path: Path) -> Optional[Dict[str, Any]]:
         try:
             from src.activity.trainer import get_model_registry

@@ -11,7 +11,6 @@ from scripts.run_agent_acceptance import (
     _test_external_model,
     _test_activity_inference,
     _run_executor_contract_probe,
-    _evaluate_activity_result,
     _evaluate_docking_result,
     _evaluate_generation_result,
     _resolve_real_dataset,
@@ -128,12 +127,13 @@ def test_activity_acceptance_probe_uses_canonical_family_prediction_service(monk
     assert calls == {"smiles": ["CCO", "CCN", "c1ccccc1"], "target": "PDE"}
 
 
-def test_activity_acceptance_probe_rejects_incomplete_model_provenance(monkeypatch):
+@pytest.mark.parametrize("field,invalid_value", [("model_id", None), ("demo_mode", True)])
+def test_activity_acceptance_probe_rejects_unverified_models(monkeypatch, field, invalid_value):
     def fake_predict_activity(smiles, *, target=None, model_request=None):
         rows = []
         for value in smiles:
             provenance = _complete_activity_provenance()
-            provenance["models"]["classification"].pop("model_id")
+            provenance["models"]["classification"][field] = invalid_value
             rows.append({
                 "smiles": value,
                 "requested_target": target,
@@ -1395,24 +1395,6 @@ def test_real_rag_case_initializes_the_owned_search_service_once(monkeypatch):
         assert result["status"] == "partial"
     assert initialized == [runner.tools["rag_search"].rag_system]
     assert isinstance(initialized[0], RAGSystem)
-
-
-def test_activity_check_rejects_simulated_demo_predictions() -> None:
-    summary = _evaluate_activity_result(
-        predictor_demo_mode=True,
-        model_path=None,
-        predictions=[
-            {
-                "smiles": "CCO",
-                "success": True,
-                "activity_score": 6.2,
-                "note": "Demo Mode (Simulated)",
-            }
-        ],
-    )
-
-    assert summary["status"] == "failed"
-    assert summary["real_model_used"] is False
 
 
 def test_docking_check_requires_actual_pose_and_binding_energy(tmp_path) -> None:

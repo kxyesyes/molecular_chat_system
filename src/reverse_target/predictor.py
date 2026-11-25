@@ -154,49 +154,11 @@ class ReverseTargetPredictor:
                           timeout_seconds=120, cancelled=None):
         if type(max_snapshot_bytes) is not int or max_snapshot_bytes <= 0:
             raise ValueError(INPUT_ERROR)
-        check = operation_check(timeout_seconds, cancelled)
-        with self._strict_lock:
-            if self._strict_loading or self._strict_active:
-                raise ReverseSourceUnavailable()
-            self._strict_epoch += 1
-            epoch = self._strict_epoch
-            self._strict_source = None
-            self._strict_loading = True
-        # Only the admitted owner enters this finally, including path failures.
         try:
-            check()
-            try:
-                paths = self._resolved_source_paths()
-            except Exception:
-                raise ReverseSourceUnavailable() from None
-            check()
-            candidate = load_owned_source(paths, max_snapshot_bytes, check,
-                                          self.compute_query_fingerprints)
-            with self._strict_lock:
-                check()
-                try:
-                    current_paths = self._resolved_source_paths()
-                except Exception:
-                    raise ReverseSourceUnavailable() from None
-                check()
-                # A callback can close or change configuration. Check again after
-                # it, then only read the clock before publication.
-                try:
-                    current_paths_after_check = self._resolved_source_paths()
-                except Exception:
-                    raise ReverseSourceUnavailable() from None
-                check.deadline()
-                if (self._strict_epoch != epoch or current_paths != paths
-                        or current_paths_after_check != paths):
-                    raise ReverseSourceUnavailable()
-                self._strict_source = candidate
-        except BaseException as error:
-            clear_failure_frames(error)
-            raise
+            self._load_strict_source(load_owned_source, max_snapshot_bytes,
+                                     operation_check(timeout_seconds, cancelled))
         finally:
-            candidate = check = cancelled = None
-            with self._strict_lock:
-                self._strict_loading = False
+            cancelled = None
 
     def close_strict(self):
         with self._strict_lock:
@@ -211,7 +173,19 @@ class ReverseTargetPredictor:
         if type(policy) is not CompactSourcePolicy or (progress is not None and not callable(progress)):
             raise ValueError(INPUT_ERROR)
         policy.validate()
-        check = acquisition_check(timeout_seconds, cancelled)
+        try:
+            self._load_strict_source(load_compact_source, policy, acquisition_check(timeout_seconds, cancelled),
+                                     progress=progress)
+        finally:
+            cancelled = progress = None
+
+    def _strict_source_paths(self):
+        try:
+            return self._resolved_source_paths()
+        except Exception:
+            raise ReverseSourceUnavailable() from None
+
+    def _load_strict_source(self, load, limit, check, **options):
         with self._strict_lock:
             if self._strict_loading or self._strict_active:
                 raise ReverseSourceUnavailable()
@@ -219,35 +193,29 @@ class ReverseTargetPredictor:
             epoch = self._strict_epoch
             self._strict_source = None
             self._strict_loading = True
+        # Only the admitted owner enters this finally, including path failures.
         try:
             check()
-            try:
-                paths = self._resolved_source_paths()
-            except Exception:
-                raise ReverseSourceUnavailable() from None
+            paths = self._strict_source_paths()
             check()
-            candidate = load_compact_source(paths, policy, check,
-                self.compute_query_fingerprints, progress=progress)
+            candidate = load(paths, limit, check, self.compute_query_fingerprints, **options)
             with self._strict_lock:
                 check()
-                try:
-                    current_paths = self._resolved_source_paths()
-                except Exception:
-                    raise ReverseSourceUnavailable() from None
+                current_paths = self._strict_source_paths()
                 check()
-                try:
-                    final_paths = self._resolved_source_paths()
-                except Exception:
-                    raise ReverseSourceUnavailable() from None
+                # A callback can close or change configuration. Check again after
+                # it, then only read the clock before publication.
+                current_paths_after_check = self._strict_source_paths()
                 check.deadline()
-                if self._strict_epoch != epoch or current_paths != paths or final_paths != paths:
+                if (self._strict_epoch != epoch or current_paths != paths
+                        or current_paths_after_check != paths):
                     raise ReverseSourceUnavailable()
                 self._strict_source = candidate
         except BaseException as error:
             clear_failure_frames(error)
             raise
         finally:
-            candidate = check = cancelled = progress = None
+            candidate = check = options = None
             with self._strict_lock:
                 self._strict_loading = False
 

@@ -1537,6 +1537,25 @@ class WebDecisionRuntime:
             turn.model_generation = generation
             yield
 
+    async def _literature_model_request(self, handler, turn, request, *inputs, timeout_seconds=45, max_tokens=1200):
+        try:
+            async with self._model_request(turn):
+                self._credit(turn)
+                if turn.cancel_event.is_set():
+                    raise asyncio.CancelledError()
+                model = self.application.model
+                response = await asyncio.wait_for(
+                    request(model, self.wire_mode, *inputs, timeout_seconds=timeout_seconds,
+                            max_tokens=min(max_tokens, handler._model_max_tokens(model)),
+                            input_budget={'max_chars': handler._input_limit(), 'history_max_chars': 0, 'history': []}),
+                    timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            response = None
+        self._credit(turn)
+        if turn.cancel_event.is_set():
+            raise asyncio.CancelledError()
+        return response
+
     async def _execute_segment(self, handler, sender, turn, *, allocation_sender=None):
         """The lease and all physical settlement stay inside the supervised child."""
         self._credit(turn)
@@ -1603,23 +1622,8 @@ class WebDecisionRuntime:
                     question = followup['research_question']
                     await self.application._refresh_llm_config_from_env()
                     self._credit(turn)
-                    search_query = None
-                    try:
-                        async with self._model_request(turn):
-                            self._credit(turn)
-                            if turn.cancel_event.is_set():
-                                raise asyncio.CancelledError()
-                            model = self.application.model
-                            search_query = await asyncio.wait_for(request_search_query(
-                                model, self.wire_mode, question, timeout_seconds=45,
-                                max_tokens=min(600, handler._model_max_tokens(model)),
-                                input_budget={'max_chars': handler._input_limit(), 'history_max_chars': 0, 'history': []}),
-                                timeout=45)
-                    except asyncio.TimeoutError:
-                        pass
-                    self._credit(turn)
-                    if turn.cancel_event.is_set():
-                        raise asyncio.CancelledError()
+                    search_query = await self._literature_model_request(
+                        handler, turn, request_search_query, question, max_tokens=600)
                     if search_query:
                         attempts = []
                         interpretations = []
@@ -1653,21 +1657,8 @@ class WebDecisionRuntime:
                             attempts.append({'search_query': candidate_query, 'hit_count': literature['hit_count'],
                                              'sources': deepcopy(sources), 'candidates': candidates})
                             if sources:
-                                try:
-                                    async with self._model_request(turn):
-                                        self._credit(turn)
-                                        if turn.cancel_event.is_set():
-                                            raise asyncio.CancelledError()
-                                        interpretation = await asyncio.wait_for(request_research_synthesis(
-                                            self.application.model, self.wire_mode, question, sources, timeout_seconds=45,
-                                            max_tokens=min(1200, handler._model_max_tokens(self.application.model)),
-                                            input_budget={'max_chars': handler._input_limit(),
-                                                          'history_max_chars': 0, 'history': []}), timeout=45)
-                                except asyncio.TimeoutError:
-                                    interpretation = None
-                                self._credit(turn)
-                                if turn.cancel_event.is_set():
-                                    raise asyncio.CancelledError()
+                                interpretation = await self._literature_model_request(
+                                    handler, turn, request_research_synthesis, question, sources)
                                 if interpretation and interpretation not in interpretations:
                                     interpretations.append(interpretation)
                         projection.entry['literature_research'] = {'session_id': envelope.session_id,
@@ -1738,7 +1729,8 @@ class WebDecisionRuntime:
                             if previous_fulltext and (pmcid != previous_fulltext['pmcid']
                                     or metadata != previous_fulltext['passages']):
                                 return {'status': 'source_changed', 'pmcid': pmcid}
-                            return {'status': 'available', 'pmcid': pmcid, 'passages': passages}
+                            return {'status': 'available', 'pmcid': pmcid, 'passages': passages,
+                                    'passage_metadata': metadata}
                         except RemoteSourceError as exc:
                             return {'status': 'retrieval_failed', 'error_code': exc.code}
                     fulltext = await settle_owned_call(retrieve_fulltext, worker_owner=turn.worker_owner)
@@ -1766,9 +1758,7 @@ class WebDecisionRuntime:
                         url = f'https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/'
                         projection.entry['literature_fulltext'] = {'session_id': envelope.session_id, 'pmid': pmid,
                             'pmcid': pmcid, 'source_question': source_question,
-                            'passages': [{'offset': item['offset'], 'section': item['section'],
-                                'heading': item['heading'], 'sha256': sha256(item['text'].encode('utf-8')).hexdigest()}
-                                for item in passages]}
+                            'passages': fulltext['passage_metadata']}
                         followup['content'] = f'已找到 [PMC 开放全文]({url})；未找到足以分析的正文段落。'
                         if passages:
                             method = (kinetic_method_evidence(passages) if previous_fulltext
@@ -1789,23 +1779,9 @@ class WebDecisionRuntime:
                             else:
                                 await self.application._refresh_llm_config_from_env()
                                 self._credit(turn)
-                                interpretation = None
-                                try:
-                                    async with self._model_request(turn):
-                                        self._credit(turn)
-                                        if turn.cancel_event.is_set():
-                                            raise asyncio.CancelledError()
-                                        model = self.application.model
-                                        interpretation = await asyncio.wait_for(request_fulltext_analysis(
-                                            model, self.wire_mode, question, pmcid, passages, timeout_seconds=55,
-                                            max_tokens=min(1200, handler._model_max_tokens(model)),
-                                            input_budget={'max_chars': handler._input_limit(), 'history_max_chars': 0, 'history': []}),
-                                            timeout=55)
-                                except asyncio.TimeoutError:
-                                    pass
-                                self._credit(turn)
-                                if turn.cancel_event.is_set():
-                                    raise asyncio.CancelledError()
+                                interpretation = await self._literature_model_request(
+                                    handler, turn, request_fulltext_analysis, question, pmcid, passages,
+                                    timeout_seconds=55)
                                 followup['content'] = interpretation or (f'已检索 [PMC 开放全文]({url}) 的部分正文；'
                                     '尚无经来源核对的结论，请查阅原文。')
                 if followup.get('research_lookup_pmid'):
@@ -1859,47 +1835,17 @@ class WebDecisionRuntime:
                     from src.literature.research import request_research_synthesis
                     await self.application._refresh_llm_config_from_env()
                     self._credit(turn)
-                    interpretation = None
-                    try:
-                        async with self._model_request(turn):
-                            self._credit(turn)
-                            if turn.cancel_event.is_set():
-                                raise asyncio.CancelledError()
-                            model = self.application.model
-                            interpretation = await asyncio.wait_for(request_research_synthesis(
-                                model, self.wire_mode, followup['source_research_question'],
-                                [followup['research_summary_source']], timeout_seconds=45,
-                                max_tokens=min(1200, handler._model_max_tokens(model)),
-                                input_budget={'max_chars': handler._input_limit(), 'history_max_chars': 0, 'history': []}),
-                                timeout=45)
-                    except asyncio.TimeoutError:
-                        pass
-                    self._credit(turn)
-                    if turn.cancel_event.is_set():
-                        raise asyncio.CancelledError()
+                    interpretation = await self._literature_model_request(
+                        handler, turn, request_research_synthesis, followup['source_research_question'],
+                        [followup['research_summary_source']])
                     if interpretation:
                         followup['content'] = followup['content'] + '\n\n' + interpretation
                 if followup.get('summary_source'):
                     from src.literature.summary_evidence import request_abstract_interpretation
                     await self.application._refresh_llm_config_from_env()
                     self._credit(turn)
-                    try:
-                        async with self._model_request(turn):
-                            self._credit(turn)
-                            if turn.cancel_event.is_set():
-                                raise asyncio.CancelledError()
-                            model = self.application.model
-                            interpretation = await asyncio.wait_for(
-                                request_abstract_interpretation(model, self.wire_mode,
-                                    followup['summary_source'], timeout_seconds=45,
-                                    max_tokens=min(1200, handler._model_max_tokens(model)),
-                                    input_budget={'max_chars': handler._input_limit(),
-                                                  'history_max_chars': 0, 'history': []}), timeout=45)
-                    except asyncio.TimeoutError:
-                        interpretation = None
-                    self._credit(turn)
-                    if turn.cancel_event.is_set():
-                        raise asyncio.CancelledError()
+                    interpretation = await self._literature_model_request(
+                        handler, turn, request_abstract_interpretation, followup['summary_source'])
                     if interpretation:
                         followup['content'] = followup['summary_heading'] + '\n\n' + interpretation
                     else:

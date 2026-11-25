@@ -471,17 +471,6 @@ class MolecularChatApp:
             DockingRequestPriorityMiddleware, foreground_io=self._foreground_io,
         )
 
-    async def _reject_unassembled_ordinary_websocket(self, websocket, *, handler=None):
-        """No ready/accepted/answer frames: this profile is assembly-only."""
-        await websocket.accept()
-        try:
-            await websocket.send_json({
-                'type': 'error', 'code': 'ordinary_semantic_not_assembled',
-                'message': 'Semantic chat admission and display gates are not assembled.',
-            })
-        finally:
-            await websocket.close(code=1013)
-
     def _build_ordinary_capability_base(self, config, model, model_generation, capability_generation):
         """Reviewed assembly facts only, never runtime readiness or authority."""
         from .ordinary_capabilities import ORIGINAL_FOUR, build_capability_snapshot

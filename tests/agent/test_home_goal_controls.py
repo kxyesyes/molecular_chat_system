@@ -1,10 +1,13 @@
 import asyncio
 import json
 
+import pytest
+
 from tests.agent.test_web_decision_runtime import ActualSocket, actual_app, cookie_for
 
 
-def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual_app):
+@pytest.mark.parametrize("display_row", [3, "CO"])
+def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual_app, display_row):
     async def scenario():
         batch = ["CCO", "CCN", "CO"]
         pending_goal = "只查我选中的分子的类药规则，先让我选择"
@@ -21,7 +24,7 @@ def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual
                                 arguments={"replace_candidate_batch": True, "steps": [
                                     dict(tool_name="property_calculator", arguments={"smiles": ["CO"]})]})
                 else:
-                    step = dict(tool_name="candidate_view", arguments={"field": "molecular_weight", "show": 3})
+                    step = dict(tool_name="candidate_view", arguments={"field": "molecular_weight", "show": display_row})
                 return dict(version="1", action="tool", tool_name="plan_goal",
                             purpose="读取所问行", arguments={"steps": [step]})
             replacing = goal == "先不选了，请用 CO 和 CCO 作为新的一批，重新计算分子量"

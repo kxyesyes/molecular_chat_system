@@ -17,12 +17,10 @@ from concurrent import futures
 from uuid import uuid4
 from collections.abc import Mapping
 from typing import Any
-from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException, Request
-
-from .route_compat import lazy_dependency
 from fastapi.responses import JSONResponse
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.system.redaction import sanitize_bounded, sanitize_sensitive_text
@@ -31,6 +29,8 @@ from src.system.molecular_input import BaseMolecularTool
 from src.system.molecular_input_parser import MolecularInputUnavailable, parse_molecular_smiles
 from src.web.process_isolation import IsolatedProcess, ProcessExecutionError
 from src.web.request_auth import require_browser_session
+
+from .route_compat import lazy_dependency
 
 
 logger = logging.getLogger(__name__)
@@ -114,32 +114,24 @@ class _StructureValidationTool:
 _STRUCTURE_VALIDATOR = _StructureValidationTool()
 
 
-def _env_getter(source: Any):
-    if callable(source):
-        return source
-    if source is not None and hasattr(source, "os"):
-        return source.os.getenv
-    return os.getenv
-
-
-def _positive_int_env(source: Any, name: str, default: int) -> int:
+def _positive_int_env(getenv, name: str, default: int) -> int:
     try:
-        value = int(_env_getter(source)(name, str(default)))
+        value = int(getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
     return value if value >= 1 else default
 
 
-def _positive_float_env(source: Any, name: str, default: float) -> float:
+def _positive_float_env(getenv, name: str, default: float) -> float:
     try:
-        value = float(_env_getter(source)(name, str(default)))
+        value = float(getenv(name, str(default)))
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) and value > 0 else default
 
 
 def build_admet_predictor() -> ADMETPredictor:
-    """Build the existing predictor; tests may replace this factory."""
+    """Construct the predictor inside the scientific worker."""
 
     return ADMETPredictor()
 
@@ -314,37 +306,15 @@ def _sanitize_row_diagnostics(output: dict[str, Any]) -> None:
 
 
 class _AdmetWorker:
-    """App-scoped worker with non-queueing admission and physical cleanup.
+    """Run admitted calculations in child processes with cancellation and hard deadlines."""
 
-    Production calculations run in a child process so request cancellation and
-    hard deadlines can terminate the scientific work itself.  ``isolate=False``
-    is intentionally available for deterministic unit fixtures that inject a
-    predictor into the parent interpreter.
-    """
-
-    def __init__(
-        self,
-        support: Any = None,
-        *,
-        env_getter=None,
-        executor_factory=None,
-        isolate: bool = True,
-        process_target=None,
-    ):
-        self._env_getter = env_getter or _env_getter(support)
-        self._executor_factory = executor_factory or (
-            getattr(support, "ThreadPoolExecutor", None) or futures.ThreadPoolExecutor
-            if support is not None
-            else futures.ThreadPoolExecutor
+    def __init__(self, *, env_getter=os.getenv, executor_factory=futures.ThreadPoolExecutor):
+        capacity = _positive_int_env(
+            env_getter, "MEDCHAT_ADMET_MAX_CONCURRENCY", _DEFAULT_MAX_CONCURRENCY
         )
-        self._isolate = bool(isolate)
-        self._process_target = process_target or _admet_child_job
-        self._capacity = _positive_int_env(
-            self._env_getter, "MEDCHAT_ADMET_MAX_CONCURRENCY", _DEFAULT_MAX_CONCURRENCY
-        )
-        self._admission = threading.BoundedSemaphore(self._capacity)
-        self._executor = self._executor_factory(
-            max_workers=self._capacity,
+        self._admission = threading.BoundedSemaphore(capacity)
+        self._executor = executor_factory(
+            max_workers=capacity,
             thread_name_prefix="medchat-admet",
         )
         self._lock = threading.Lock()
@@ -381,11 +351,8 @@ class _AdmetWorker:
             raise
 
     def _run(self, request: AdmetPredictRequest, job_id: str) -> Any:
-        if not self._isolate:
-            return _execute_admet_request(request.smiles, request.molecule_id)
-
         process = IsolatedProcess(
-            self._process_target,
+            _admet_child_job,
             args=(request.smiles, request.molecule_id),
         )
         with self._lock:
@@ -398,13 +365,6 @@ class _AdmetWorker:
             # startup.  Cancellation must be able to find and terminate a
             # process even when its start call is slow or stuck.
             process.start()
-        except Exception:
-            with self._lock:
-                self._active_processes.pop(job_id, None)
-                self._cancelled_jobs.discard(job_id)
-            process.close()
-            raise
-        try:
             envelope = process.wait()
             if not isinstance(envelope, dict):
                 raise ProcessExecutionError("ADMET child returned an invalid envelope")
@@ -456,20 +416,12 @@ class _AdmetWorker:
         self._executor.shutdown(wait=True, cancel_futures=True)
 
 
-def _default_support() -> Any:
-    """Return the legacy support shape without importing the route facade."""
-
-    return SimpleNamespace(os=os, ThreadPoolExecutor=futures.ThreadPoolExecutor)
-
-
 def setup_admet_routes(
     app: FastAPI,
     *,
     env_getter=None,
     executor_factory=None,
     _support=None,
-    _isolate: bool | None = None,
-    _process_target=None,
 ) -> None:
     """Register the single structured ADMET operation."""
 
@@ -477,34 +429,15 @@ def setup_admet_routes(
         return
 
     if env_getter is None:
-        env_getter = _env_getter(
-            lazy_dependency(
-                None,
-                _support,
-                "os",
-                label="ADMET environment",
-                default=os,
-            )()
-        )
+        environment = lazy_dependency(None, _support, "os", label="ADMET environment", default=os)()
+        env_getter = getattr(environment, "getenv", os.getenv)
     if executor_factory is None:
         executor_factory = lazy_dependency(
-            None,
-            _support,
-            "ThreadPoolExecutor",
-            label="ADMET executor",
-            default=futures.ThreadPoolExecutor,
-        )()
-        if executor_factory is None:
-            executor_factory = futures.ThreadPoolExecutor
+            None, _support, "ThreadPoolExecutor", label="ADMET executor", default=futures.ThreadPoolExecutor
+        )() or futures.ThreadPoolExecutor
     worker = getattr(app.state, "_admet_worker", None)
     if worker is None:
-        isolate = True if _isolate is None else _isolate
-        worker = _AdmetWorker(
-            env_getter=env_getter,
-            executor_factory=executor_factory,
-            isolate=isolate,
-            process_target=_process_target,
-        )
+        worker = _AdmetWorker(env_getter=env_getter, executor_factory=executor_factory)
         app.state._admet_worker = worker
 
         async def shutdown_admet_worker() -> None:

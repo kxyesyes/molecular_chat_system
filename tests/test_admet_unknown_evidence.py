@@ -5,15 +5,15 @@ import pytest
 from rdkit import Chem, rdBase
 from rdkit.Chem import Crippen, Descriptors, Lipinski, rdMolDescriptors
 
-from src.agent.tools import admet_predictor as module
-from src.agent.tools.admet_predictor import ADMETPredictor
+from src.admet import legacy as module
+from src.admet.predictor import ADMETPredictor
 
 
 @pytest.mark.parametrize("smiles", ["CCO", "CC(=O)Oc1ccccc1C(=O)O", "CCCCCCCCCCCCCCCC", "O"])
 def test_rdkit_values_formulas_counts_and_legacy_units_preserved(monkeypatch, smiles):
     monkeypatch.setattr(module, "ADME_PY_AVAILABLE", False)
     tool = ADMETPredictor()
-    props = tool._predict_admet_with_rdkit(smiles)
+    props = tool.predict_admet_with_adme_py(smiles)
     mol = Chem.MolFromSmiles(smiles)
     mw, logp, tpsa = Descriptors.MolWt(mol), Crippen.MolLogP(mol), Descriptors.TPSA(mol)
     rot, hbd, hba = Lipinski.NumRotatableBonds(mol), Lipinski.NumHDonors(mol), Lipinski.NumHAcceptors(mol)
@@ -61,51 +61,12 @@ def sparse():
     return {"prediction_method": "adme_py", "backend_version": "fixture-only", **{name: {} for name in SECTIONS}}
 
 
-def surfaces(tool, props):
-    return [tool.format_admet_result("CCO", props), tool._generate_comprehensive_assessment(props),
-            tool._generate_interpretation("CCO", props), tool._generate_brief_reasoning(props)]
-
-
-def legacy_execute(tool, query="CCO"):
-    """Explicit legacy fixture for evidence-format tests.
-
-    Production ``execute`` is intentionally ADMET-AI-only.  These tests still
-    exercise the historical adme_py diagnostic and rendering contract, so they
-    opt into that fixture explicitly instead of weakening the production path.
-    """
-    smiles = query if isinstance(query, str) else query.get("query", "CCO")
-    try:
-        props = tool.predict_admet_with_adme_py(smiles)
-    except Exception:
-        props = None
-    if isinstance(props, dict) and tool._has_observations(props):
-        return {
-            "success": True,
-            "data": [{"smiles": smiles, "admet": props}],
-            "formatted": tool.format_admet_result(smiles, props),
-            "reasoning": f"fixture legacy result; {tool._generate_brief_reasoning(props)}",
-            "message": "已返回已计算性质/规则估计；缺失项目未知。",
-        }
-    diagnostic = module._diagnostic_metadata(props or {}) if isinstance(props, dict) else {}
-    result = {
-        "success": False,
-        "data": None,
-        "formatted": "",
-        "message": "未形成评估；缺失项目未知。",
-        "reasoning": "No supported ADME fixture observation; 后端未返回可用观测，不能据此判断结构无效或分子安全。",
-        "quality": {},
-    }
-    if diagnostic:
-        result["quality"]["unassessed_admet"] = [diagnostic]
-    return result
-
-
 def line(report, name):
     return next(value for value in report.splitlines() if f"**{name}：**" in value)
 
 
 def test_rdkit_uncomputed_alerts_and_sa_identity():
-    props = ADMETPredictor()._predict_admet_with_rdkit("CCO")
+    props = module._predict_admet_with_rdkit("CCO")
     assert all(props["medicinal"][key] is None for key in ("pains", "brenk", "zinc"))
     assert props["medicinal"]["synthetic_accessibility_method"] == "rdkit_complexity_heuristic"
     assert props["medicinal"]["synthetic_accessibility"] == pytest.approx(1.12)
@@ -130,29 +91,25 @@ def test_bbb_never_implies_cns_safety_or_activity(value):
     props = sparse()
     if value is not MISSING:
         props["pharmacokinetics"]["blood_brain_barrier_permeant"] = value
-    texts = surfaces(ADMETPredictor(), props)
+    report = ADMETPredictor().format_admet_result("CCO", props)
     expected = "该方法估计可透过" if value is True else "该方法估计不易透过" if value is False else UNKNOWN
-    assert expected in line(texts[0], "血脑屏障透过性")
-    for text in texts:
-        for forbidden in ("CNS副作用风险较低", "不太可能产生CNS副作用", "可能具有CNS活性"):
-            assert forbidden not in text
-    assert "不能据此判断CNS活性或副作用风险" in texts[0]
+    assert expected in line(report, "血脑屏障透过性")
+    for forbidden in ("CNS副作用风险较低", "不太可能产生CNS副作用", "可能具有CNS活性"):
+        assert forbidden not in report
+    assert "不能据此判断CNS活性或副作用风险" in report
 
 
-@pytest.mark.parametrize("method", ["_format_ghose_results_cn", "_format_ghose_results", "_format_leadlikeness_cn", "_format_leadlikeness"])
-@pytest.mark.parametrize("value", [{}, None, "", "Unknown", [], {"MW": None}, {"MW": "within range"}, {"MW": "unrecognized"}])
-def test_incomplete_rules_never_default_to_pass_or_fail(method, value):
-    text = getattr(ADMETPredictor(), method)(value)
+@pytest.mark.parametrize("section,rule,label", [
+    ("druglikeness", "ghose", "Ghose规则"), ("medicinal", "leadlikeness", "先导化合物相似性"),
+])
+@pytest.mark.parametrize("value", [{}, None, "", "Unknown", [], {"MW": None},
+                                  {"MW": "within range"}, {"MW": "unrecognized"}])
+def test_incomplete_rules_never_default_to_pass_or_fail(section, rule, label, value):
+    props = sparse()
+    props[section][rule] = value
+    text = line(ADMETPredictor().format_admet_result("CCO", props), label)
     assert "未知" in text
     assert "通过" not in text and "符合" not in text
-
-
-@pytest.mark.parametrize("method", ["_format_ghose_results_cn", "_format_ghose_results", "_format_leadlikeness_cn", "_format_leadlikeness"])
-def test_partial_rule_failure_is_reported_without_complete_assessment(method):
-    text = getattr(ADMETPredictor(), method)({"MW": "outside range", "MR": None})
-    assert "MW" in text and "outside range" in text
-    assert "完整结论未知" in text
-    assert getattr(ADMETPredictor(), method)("Pass") == "通过"
 
 
 @pytest.mark.parametrize("label,translated", [
@@ -165,22 +122,21 @@ def test_partial_rule_failure_is_reported_without_complete_assessment(method):
 def test_whole_solubility_labels_not_substrings(label, translated):
     props = sparse()
     props["solubility"]["class_esol"] = label
-    texts = surfaces(ADMETPredictor(), props)
-    assert translated in line(texts[0], "溶解性等级")
+    report = ADMETPredictor().format_admet_result("CCO", props)
+    assert translated in line(report, "溶解性等级")
     if translated != "未知":
-        assert translated in texts[1] and translated in texts[2]
-    for text in texts:
-        assert "具有良好的水溶性" not in text
-        assert "优秀的水溶性" not in text
+        assert translated in report.split("### 综合评估")[1]
+    assert "具有良好的水溶性" not in report
+    assert "优秀的水溶性" not in report
 
 
 @pytest.mark.parametrize("section_value", [MISSING, None, {}, [], "N/A", 0])
 def test_empty_and_malformed_sections_do_not_claim_assessment(section_value):
     props = {name: deepcopy(section_value) for name in SECTIONS} if section_value is not MISSING else {}
     before = deepcopy(props)
-    texts = surfaces(ADMETPredictor(), props)
-    assert all(NO_ASSESSMENT in text for text in texts)
-    assert "未知" in line(texts[0], "脂溶性等级")
+    report = ADMETPredictor().format_admet_result("CCO", props)
+    assert NO_ASSESSMENT in report
+    assert "未知" in line(report, "脂溶性等级")
     assert props == before
 
 
@@ -223,11 +179,10 @@ def test_valid_zero_negative_logs_and_method_labels():
     for value in ("-2.000", "-4.000", "0.000", "-3.000", "adme_py", "fixture-only"):
         assert value in report
     assert "强亲水性" in report
-    rdkit = ADMETPredictor()._predict_admet_with_rdkit("CCO")
-    for text in surfaces(ADMETPredictor(), rdkit):
-        assert "RDKit-rule" in text
-        assert "非训练模型预测、非实验结果" in text
+    rdkit = module._predict_admet_with_rdkit("CCO")
     report = ADMETPredictor().format_admet_result("CCO", rdkit)
+    assert "RDKit-rule" in report
+    assert "非训练模型预测、非实验结果" in report
     assert "局部结构复杂度启发式" in report
     assert "非标准SA评分" in report
     assert "越低越容易合成" not in report
@@ -237,12 +192,12 @@ def test_valid_zero_negative_logs_and_method_labels():
 def test_unusable_sa_does_not_infer_synthetic_ease(value):
     props = sparse()
     props["medicinal"]["synthetic_accessibility"] = value
-    for text in surfaces(ADMETPredictor(), props):
-        assert "合成难度较低" not in text and "合成难度较高" not in text
-        assert NO_ASSESSMENT in text
+    report = ADMETPredictor().format_admet_result("CCO", props)
+    assert "合成难度较低" not in report and "合成难度较高" not in report
+    assert NO_ASSESSMENT in report
 
 
-def install_backend(monkeypatch, payload):
+def legacy_result(monkeypatch, payload):
     class FixtureADME:
         def __init__(self, smiles):
             assert smiles in ("CCO", "CCN")
@@ -251,7 +206,7 @@ def install_backend(monkeypatch, payload):
     monkeypatch.setattr(module, "ADME_PY_AVAILABLE", True)
     monkeypatch.setattr(module, "ADME", FixtureADME)
     monkeypatch.setattr(module, "ADME_PY_VERSION", "fixture-only")
-    monkeypatch.setattr(ADMETPredictor, "execute", legacy_execute)
+    return ADMETPredictor().predict_admet_with_adme_py("CCO")
 
 
 @pytest.mark.parametrize("section,leaf,value", [
@@ -259,97 +214,26 @@ def install_backend(monkeypatch, payload):
     ("pharmacokinetics", "blood_brain_barrier_permeant", False), ("medicinal", "pains", False),
 ])
 def test_partial_backend_retains_actual_leaf_without_imputing_missing(monkeypatch, section, leaf, value):
-    install_backend(monkeypatch, {section: {leaf: value}})
-    result = ADMETPredictor().execute("CCO")
-    assert result["success"] is True
-    props = result["data"][0]["admet"]
+    props = legacy_result(monkeypatch, {section: {leaf: value}})
     assert props["prediction_method"] == "adme_py" and props["backend_version"] == "fixture-only"
     assert props["physicochemical" if section == "physiochemical" else section] == {leaf: value}
-    assert "成功预测" not in result["message"] + result["reasoning"]
-    assert "缺失项目未知" in result["message"]
 
 
-@pytest.mark.parametrize("mode", ["empty", "unknown", "extension"])
-def test_metadata_only_failure_retains_diagnostics_without_inventing_row(monkeypatch, mode):
-    payload = {"source": "controlled-backend", "warnings": ["controlled warning"],
-               "error": {"code": "NO_ASSESSMENT", "message": "controlled unavailable reason"}}
-    if mode == "unknown":
-        payload["druglikeness"] = {"lipinski": "Unknown"}
-    elif mode == "extension":
-        payload["medicinal"] = {"future": {"score": "opaque"}}
-    install_backend(monkeypatch, payload)
-    tool = ADMETPredictor()
-    raw = tool.execute("CCO")
-    assert raw["success"] is False and raw["data"] is None and raw["formatted"] == ""
-    diagnostic = raw["quality"]["unassessed_admet"][0]
-    assert diagnostic["prediction_method"] == "adme_py"
-    assert diagnostic["backend_version"] == "fixture-only"
-    assert diagnostic["source"] == payload["source"]
-    assert diagnostic["error"] == payload["error"]
-    assert diagnostic["warnings"] == payload["warnings"]
-    assert "smiles" not in diagnostic and "admet" not in diagnostic
-    assert "未形成评估" in raw["message"]
-    from src.agent.tools.base_tool import execute_tool_compat
-    from src.agent.tooling.factory import build_tool_registry
-    compat = execute_tool_compat(tool, "CCO")
-    assert not compat.success and compat.data is None
-    assert compat.quality == raw["quality"]
-    registry = build_tool_registry([tool])
-    try:
-        result = registry.resolve(tool.name).execute("CCO")
-        assert not result.success and result.data is None
-        assert result.quality == raw["quality"]
-        assert result.error.details["raw_result"]["quality"] == raw["quality"]
-    finally:
-        registry.close()
-
-
-@pytest.mark.parametrize("assessed", [False, True], ids=["metadata-only", "pains-false"])
-@pytest.mark.parametrize("nested", [False, True], ids=["source", "provenance-source"])
-@pytest.mark.parametrize("entry", ["raw", "compat", "typed"])
 @pytest.mark.parametrize("source", [
     "https://example.org/adme/reference",
     "http://docs.example.org/adme/reference-v1.2/",
     "https://example.org",
 ])
-def test_public_source_url_survives_actual_backend(monkeypatch, assessed, nested, entry, source):
-    payload = {"provenance": {"source": source}} if nested else {"source": source}
-    payload.update(reason="controlled unavailable", warnings=["controlled warning"])
-    if assessed:
-        payload["medicinal"] = {"pains": False}
+def test_legacy_backend_keeps_public_source_and_diagnostics(monkeypatch, source):
+    payload = {"source": source, "provenance": {"source": source},
+               "reason": "controlled unavailable", "warnings": ["controlled warning"]}
     before = deepcopy(payload)
-    install_backend(monkeypatch, payload)
-    tool = ADMETPredictor()
-    from src.agent.tools.base_tool import execute_tool_compat
-    from src.agent.tooling.factory import build_tool_registry
-    registry = build_tool_registry([tool])
-    try:
-        result = (tool.execute("CCO") if entry == "raw" else
-                  execute_tool_compat(tool, "CCO") if entry == "compat" else
-                  registry.resolve(tool.name).execute("CCO"))
-        raw = result if entry == "raw" else {
-            "success": result.success, "data": result.data, "quality": result.quality}
-        assert raw["success"] is assessed
-        if assessed:
-            metadata = raw["data"][0]["admet"]
-            assert metadata["medicinal"] == {"pains": False}
-        else:
-            assert raw["data"] is None
-            metadata = raw["quality"]["unassessed_admet"][0]
-            assert "smiles" not in metadata and "admet" not in metadata
-        assert (metadata["provenance"]["source"] if nested else metadata["source"]) == source
-        assert metadata["prediction_method"] == "adme_py"
-        assert metadata["backend_version"] == "fixture-only"
-        assert metadata["reason"] == payload["reason"]
-        assert metadata["warnings"] == payload["warnings"]
-        assert payload == before
-    finally:
-        registry.close()
+    metadata = legacy_result(monkeypatch, payload)
+    for key in payload:
+        assert metadata[key] == payload[key]
+    assert payload == before
 
 
-@pytest.mark.parametrize("assessed", [False, True], ids=["metadata-only", "pains-false"])
-@pytest.mark.parametrize("nested", [False, True], ids=["source", "provenance-source"])
-@pytest.mark.parametrize("entry", ["raw", "compat", "typed"])
 @pytest.mark.parametrize("source", [
     "https://example.org/C:/private/backend.py",
     "https://example.org/adme/c:/Users/Example/backend.py",
@@ -361,49 +245,14 @@ def test_public_source_url_survives_actual_backend(monkeypatch, assessed, nested
     "https://example.org/adme/file://machine/share/backend.py",
 ], ids=["drive", "nested-drive", "file-drive", "file-posix", "forward-unc",
         "backslash-drive", "backslash-unc", "file-unc"])
-def test_embedded_machine_paths_are_not_restored(monkeypatch, assessed, nested, entry, source):
-    payload = {"provenance": {"source": source}} if nested else {"source": source}
-    payload.update(reason="controlled unavailable", warnings=["controlled warning"],
-                   error={"code": "NO_COVERAGE", "message": "controlled unavailable"})
-    if assessed:
-        payload["medicinal"] = {"pains": False}
-    before = deepcopy(payload)
-    install_backend(monkeypatch, payload)
-    from src.agent.tools.base_tool import execute_tool_compat
-    from src.agent.tooling.factory import build_tool_registry
-    tool = ADMETPredictor()
-    registry = build_tool_registry([tool])
-    try:
-        result = (tool.execute("CCO") if entry == "raw" else
-                  execute_tool_compat(tool, "CCO") if entry == "compat" else
-                  registry.resolve(tool.name).execute("CCO"))
-        raw = result if entry == "raw" else {
-            "success": result.success, "data": result.data, "quality": result.quality}
-        assert raw["success"] is assessed
-        if assessed:
-            metadata = raw["data"][0]["admet"]
-            assert metadata["medicinal"] == {"pains": False}
-        else:
-            assert raw["data"] is None
-            metadata = raw["quality"]["unassessed_admet"][0]
-            assert "smiles" not in metadata and "admet" not in metadata
-        retained = metadata["provenance"]["source"] if nested else metadata["source"]
-        assert retained != source
-        assert "backend.py" not in str(result)  # Includes typed failure snapshots.
-        expected = module.sanitize_bounded({"source": source})[0]
-        if not assessed:  # The existing no-assessment diagnostic crossing.
-            expected = module.sanitize_bounded(expected)[0]
-        assert retained == expected["source"]
-        assert metadata["prediction_method"] == "adme_py"
-        assert metadata["backend_version"] == "fixture-only"
-        for field in ("reason", "warnings", "error"):
-            assert metadata[field] == payload[field]
-        assert payload == before
-    finally:
-        registry.close()
+def test_embedded_machine_paths_are_not_restored(monkeypatch, source):
+    payload = {"source": source, "provenance": {"source": source}}
+    metadata = legacy_result(monkeypatch, payload)
+    assert metadata["source"] != source
+    assert metadata["provenance"]["source"] != source
+    assert "backend.py" not in str(metadata)
 
 
-@pytest.mark.parametrize("assessed", [False, True])
 @pytest.mark.parametrize("source", [
     "https://user:synthetic-password@example.org/adme/reference",
     "https://example.org/adme/reference?token=synthetic-token",
@@ -417,14 +266,8 @@ def test_embedded_machine_paths_are_not_restored(monkeypatch, assessed, nested, 
     "file:///private/backend.py", "/private/backend.py",
     "C:/private/backend.py", r"C:\private\backend.py", r"\\private\backend.py",
 ])
-def test_unsafe_diagnostic_sources_are_not_restored(monkeypatch, assessed, source):
-    payload = {"source": source, "provenance": {"source": source}}
-    if assessed:
-        payload["medicinal"] = {"pains": False}
-    install_backend(monkeypatch, payload)
-    result = ADMETPredictor().execute("CCO")
-    metadata = (result["data"][0]["admet"] if assessed else
-                result["quality"]["unassessed_admet"][0])
+def test_unsafe_diagnostic_sources_are_not_restored(monkeypatch, source):
+    metadata = legacy_result(monkeypatch, {"source": source, "provenance": {"source": source}})
     assert metadata["source"] != source
     assert metadata["provenance"]["source"] != source
 
@@ -462,11 +305,9 @@ def test_source_restoration_keeps_cycles_bounded_without_mutating_input(containe
 
 
 def test_empty_backend_without_diagnostics_does_not_invent_source_or_error(monkeypatch):
-    install_backend(monkeypatch, {})
-    result = ADMETPredictor().execute("CCO")
-    assert not result["success"] and result["data"] is None
-    assert result["quality"]["unassessed_admet"] == [{
-        "prediction_method": "adme_py", "backend_version": "fixture-only"}]
+    props = legacy_result(monkeypatch, {})
+    assert not ADMETPredictor._has_observations(props)
+    assert "error" not in props and "source" not in props
 
 
 def test_failure_metadata_keeps_safe_reason_without_private_payload(monkeypatch):
@@ -474,16 +315,14 @@ def test_failure_metadata_keeps_safe_reason_without_private_payload(monkeypatch)
                "provenance": {"source": "controlled fixture"},
                "error": {"code": "NO_COVERAGE", "message": "controlled unavailable",
                          "details": {"password": "synthetic-placeholder", "path": "/private/backend.py"}}}
-    install_backend(monkeypatch, payload)
-    result = ADMETPredictor().execute("CCO")
-    metadata = result["quality"]["unassessed_admet"][0]
+    metadata = legacy_result(monkeypatch, payload)
     assert metadata["reason"] == payload["reason"]
     assert metadata["failure_reason"] == payload["failure_reason"]
     assert metadata["provenance"] == payload["provenance"]
     assert metadata["error"]["code"] == "NO_COVERAGE"
     assert metadata["error"]["message"] == "controlled unavailable"
-    assert "synthetic-placeholder" not in str(result)
-    assert "/private/backend.py" not in str(result)
+    assert "synthetic-placeholder" not in str(metadata)
+    assert "/private/backend.py" not in str(metadata)
 
 
 @pytest.mark.parametrize("leaf,value,expected", [
@@ -504,12 +343,11 @@ def test_observation_presence_does_not_impute_or_recalculate(leaf, value, expect
 @pytest.mark.parametrize("rule", ["ghose", "leadlikeness"])
 def test_actual_partial_rule_details_are_not_a_completed_pass(monkeypatch, rule):
     section = "druglikeness" if rule == "ghose" else "medicinal"
-    install_backend(monkeypatch, {section: {rule: {"MW": "within range"}}})
-    result = ADMETPredictor().execute("CCO")
-    assert result["success"] is True  # Supplied detail exists, not a complete rule assessment.
-    assert result["data"][0]["admet"][section][rule] == {"MW": "within range"}
-    assert "完整结论未知" in result["formatted"] + result["reasoning"]
-    assert "通过" not in result["formatted"] + result["reasoning"]
+    props = legacy_result(monkeypatch, {section: {rule: {"MW": "within range"}}})
+    assert props[section][rule] == {"MW": "within range"}
+    report = ADMETPredictor().format_admet_result("CCO", props)
+    assert "完整结论未知" in report
+    assert "通过" not in report
 
 
 def test_sa_backend_method_missing_or_supplied_is_not_invented():
@@ -523,15 +361,10 @@ def test_sa_backend_method_missing_or_supplied_is_not_invented():
     assert props["medicinal"]["synthetic_accessibility"] == 2.125
 
 
-def test_backend_exception_and_unavailable_do_not_become_success(monkeypatch):
-    install_backend(monkeypatch, {})
+def test_explicit_legacy_backend_exception_does_not_return_estimates(monkeypatch):
     def unavailable(*args):
         raise RuntimeError("controlled backend unavailable")
+
+    monkeypatch.setattr(module, "ADME_PY_AVAILABLE", True)
     monkeypatch.setattr(module, "ADME", unavailable)
-    result = ADMETPredictor().execute("CCO")
-    assert not result["success"] and result["data"] is None
-    monkeypatch.setattr(module, "ADME_PY_AVAILABLE", False)
-    monkeypatch.setattr(module, "RDKIT_AVAILABLE", False)
-    result = ADMETPredictor().execute("CCO")
-    assert not result["success"] and result["data"] is None
-    assert "No supported ADME" in result["reasoning"]
+    assert ADMETPredictor().predict_admet_with_adme_py("CCO") is None

@@ -1,7 +1,7 @@
 """Input fidelity tests; RDKit rules are not trained ADMET predictions."""
 import pytest
 
-from src.agent.tools import admet_predictor as module
+from src.admet import predictor as module
 
 
 class RecordingBackend:
@@ -52,7 +52,7 @@ def recording_predictor(calls):
     return module.ADMETPredictor(backend=RecordingBackend(calls))
 
 
-def test_admet_receives_every_complete_input_not_just_known_ethanol(monkeypatch):
+def test_admet_receives_every_complete_input_not_just_known_ethanol():
     calls = []
     predictor = recording_predictor(calls)
     result = predictor.execute("CCO\nOCC\nCCN")
@@ -75,10 +75,9 @@ def test_admet_receives_every_complete_input_not_just_known_ethanol(monkeypatch)
     "Predict ADMET for CCO and CNSpenetration.CCN",
     "Predict ADMET for CCO and CNSpenetration[",
 ])
-def test_invalid_input_never_dispatches_valid_fragments(monkeypatch, query):
-    predictor = module.ADMETPredictor()
+def test_invalid_input_never_dispatches_valid_fragments(query):
     calls = []
-    monkeypatch.setattr(predictor, "predict_admet_with_adme_py", lambda value: calls.append(value))
+    predictor = recording_predictor(calls)
     result = predictor.execute(query)
     assert calls == []
     assert result["success"] is False and result["data"] is None
@@ -136,9 +135,8 @@ def test_parser_failure_is_unavailable_not_a_structure_diagnosis(monkeypatch):
         raise RuntimeError("private parser diagnostic")
 
     monkeypatch.setattr(module, "parse_molecular_smiles", unavailable)
-    predictor = module.ADMETPredictor()
     calls = []
-    monkeypatch.setattr(predictor, "predict_admet_with_adme_py", lambda value: calls.append(value))
+    predictor = recording_predictor(calls)
     result = predictor.execute("Predict ADMET for CCO")
     assert not result["success"] and result["data"] is None and calls == []
     assert "暂不可用" in result["message"]
@@ -155,7 +153,7 @@ def test_parser_failure_is_unavailable_not_a_structure_diagnosis(monkeypatch):
     ("SMILES: BBB\nSMILES: CNS", ["BBB", "CNS"]),
     ("BBB\nCNS\nCCO", ["BBB", "CNS", "CCO"]),
 ])
-def test_admet_prose_terms_do_not_add_molecules_but_explicit_fields_remain(monkeypatch, query, expected):
+def test_admet_prose_terms_do_not_add_molecules_but_explicit_fields_remain(query, expected):
     calls = []
     predictor = recording_predictor(calls)
     result = predictor.execute(query)
@@ -166,20 +164,18 @@ def test_admet_prose_terms_do_not_add_molecules_but_explicit_fields_remain(monke
 
 @pytest.mark.parametrize("suffix", [".!", "!?", ".!?"])
 @pytest.mark.parametrize("template", ["BBB permeability{}\nCCO", "Predict ADMET for CCO and BBBpermeability{}"])
-def test_domain_phrase_only_tolerates_one_sentence_punctuation(monkeypatch, suffix, template):
-    predictor = module.ADMETPredictor()
+def test_domain_phrase_only_tolerates_one_sentence_punctuation(suffix, template):
     calls = []
-    monkeypatch.setattr(predictor, "predict_admet_with_adme_py", lambda value: calls.append(value))
+    predictor = recording_predictor(calls)
     result = predictor.execute(template.format(suffix))
     assert calls == [] and not result["success"] and result["data"] is None
 
 
 @pytest.mark.parametrize("phrase", ["BBB permeability", "CNS penetration"])
 @pytest.mark.parametrize("suffix", [".CCN", "[", ".!?"])
-def test_spaced_prose_phrase_cannot_hide_a_bad_suffix(monkeypatch, phrase, suffix):
-    predictor = module.ADMETPredictor()
+def test_spaced_prose_phrase_cannot_hide_a_bad_suffix(phrase, suffix):
     calls = []
-    monkeypatch.setattr(predictor, "predict_admet_with_adme_py", lambda value: calls.append(value))
+    predictor = recording_predictor(calls)
     query = f"Predict ADMET for CCO and {phrase}{suffix}"
     result = predictor.execute(query)
     assert calls == [] and not result["success"] and result["data"] is None
@@ -202,10 +198,9 @@ def test_underlying_rdkit_value_error_is_not_a_public_input_error(monkeypatch):
 
 @pytest.mark.parametrize("phrase", ["BBB通透性", "BBB 渗透性", "CNS通透性", "CNS 渗透性"])
 @pytest.mark.parametrize("suffix", ["[", ".!?"])
-def test_chinese_prose_phrase_cannot_drop_adjacent_suffix(monkeypatch, phrase, suffix):
-    predictor = module.ADMETPredictor()
+def test_chinese_prose_phrase_cannot_drop_adjacent_suffix(phrase, suffix):
     calls = []
-    monkeypatch.setattr(predictor, "predict_admet_with_adme_py", lambda value: calls.append(value))
+    predictor = recording_predictor(calls)
     query = f"请预测 CCO 的 ADMET 和 {phrase}{suffix}"
     result = predictor.execute(query)
     assert calls == [] and not result["success"] and result["data"] is None

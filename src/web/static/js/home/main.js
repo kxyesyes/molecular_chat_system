@@ -1617,11 +1617,6 @@
     HomeChatRenderer.updateConnectionStatus(socketIsOpen ? "connected" : "disconnected");
   }
 
-  function toggleSidebar() {
-    const isClosing = elements.sidebarPanel.classList.contains("is-closing");
-    setSidebarVisible(isClosing);
-  }
-
   let sidebarCloseTimer;
   function setSidebarVisible(visible) {
     const sidebar = elements.sidebarPanel;
@@ -1949,58 +1944,6 @@
         connectWebSocket();
       }
     }
-  }
-
-  // 添加连接诊断函数
-  function diagnoseWebSocket() {
-    console.log("=== WebSocket 诊断信息 ===");
-    console.log("时间戳:", new Date().toISOString());
-    console.log("页面URL:", window.location.href);
-    const diagnosticProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    console.log("WebSocket URL:", `${diagnosticProtocol}//${window.location.host}/ws`);
-    console.log("重连尝试次数:", reconnectAttempts);
-    console.log("isConnected标志:", isConnected);
-    console.log("chatMode:", HomeState.chatMode);
-
-    if (ws) {
-      console.log("WebSocket对象存在");
-      console.log("WebSocket详细状态:", {
-        readyState: ws.readyState,
-        url: ws.url,
-        protocol: ws.protocol,
-        extensions: ws.extensions,
-        bufferedAmount: ws.bufferedAmount,
-      });
-
-      console.log("WebSocket状态说明:", {
-        CONNECTING: `${WebSocket.CONNECTING} (连接中)`,
-        OPEN: `${WebSocket.OPEN} (已连接)`,
-        CLOSING: `${WebSocket.CLOSING} (正在关闭)`,
-        CLOSED: `${WebSocket.CLOSED} (已关闭)`,
-        current: `${ws.readyState} (当前状态)`,
-      });
-
-      // 测试发送消息
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          sendTestMessage();
-          console.log("✅ 诊断测试消息发送成功");
-        } catch (error) {
-          console.error("❌ 诊断测试消息发送失败:", error);
-        }
-      }
-    } else {
-      console.log("❌ WebSocket对象不存在");
-    }
-
-    console.log("DOM元素状态:", {
-      input: !!elements.input,
-      sendBtn: !!elements.sendBtn,
-      chatContainer: !!elements.chatContainer,
-      connectionStatus: !!elements.connectionStatus,
-    });
-
-    console.log("=== 诊断结束 ===");
   }
 
   // 进入聊天模式
@@ -3065,95 +3008,6 @@
 
     // 添加到聊天容器
     elements.chatContainer.appendChild(messageWrapper);
-  }
-
-  // 渲染RAG检索到的分子结构（保留作为备用）
-  function renderRAGMoleculeStructure(smiles, canvas, container, scale, index) {
-    if (!window.SmilesDrawer) {
-      console.error("❌ SmilesDrawer库未加载");
-      container.innerHTML = `
-        <div style="color: #94a3b8; font-size: 12px; text-align: center;">
-          <div style="font-size: 20px; margin-bottom: 4px;">⚠️</div>
-          <div>无法加载可视化库</div>
-        </div>
-      `;
-      return;
-    }
-
-    setTimeout(() => {
-      try {
-        const drawerOptions = {
-          width: 350 * scale,
-          height: 200 * scale,
-          bondThickness: 1.0 * scale,
-          bondLength: 14 * scale,
-          shortBondLength: 0.85,
-          bondSpacing: 0.18 * 14 * scale,
-          atomVisualization: "default",
-          isomeric: true,
-          debug: false,
-          compactDrawing: false,
-          terminalCarbons: false,
-          explicitHydrogens: false,
-          overlapSensitivity: 0.42,
-          overlapResolutionIterations: 1,
-          themes: {
-            light: {
-              C: "#222222",
-              O: "#e11d48",
-              N: "#2563eb",
-              S: "#d97706",
-              P: "#ea580c",
-              F: "#059669",
-              Cl: "#16a34a",
-              Br: "#9a3412",
-              I: "#7c3aed",
-              BACKGROUND: "#ffffff",
-            },
-          },
-        };
-
-        const smilesDrawer = new SmilesDrawer.Drawer(drawerOptions);
-
-        SmilesDrawer.parse(
-          smiles,
-          (tree) => {
-            // 移除芳香性标记，使用 Kekulé 结构
-            if (tree && tree.vertices) {
-              tree.vertices.forEach((vertex) => {
-                if (vertex && vertex.value) {
-                  vertex.value.isAromatic = false;
-                }
-              });
-            }
-            if (tree && tree.edges) {
-              tree.edges.forEach((edge) => {
-                if (edge) {
-                  edge.isAromatic = false;
-                }
-              });
-            }
-
-            smilesDrawer.draw(tree, canvas, "light", false);
-            console.log(`✅ RAG分子 ${index + 1} 结构渲染成功`);
-          },
-          (err) => {
-            console.error(`❌ RAG分子 ${index + 1} 渲染失败:`, err);
-            container.innerHTML = `
-              <div style="color: #f59e0b; font-size: 12px; text-align: center; padding: 20px;">
-                <div style="font-size: 20px; margin-bottom: 4px;">⚠️</div>
-                <div>无法渲染该分子结构</div>
-              </div>
-            `;
-          }
-        );
-      } catch (error) {
-        console.error(`❌ RAG分子 ${index + 1} 渲染异常:`, error);
-        container.innerHTML = `
-          <div style="color: #ef4444; font-size: 12px; text-align: center;">渲染错误</div>
-        `;
-      }
-    }, index * 50); // 错开渲染时间
   }
 
   // 复制SMILES到剪贴板

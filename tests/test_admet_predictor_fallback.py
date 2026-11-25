@@ -1,6 +1,9 @@
+import subprocess
+import sys
+from pathlib import Path
 from unittest import mock
 
-from src.agent.tools import admet_predictor as admet_module
+from src.admet import legacy, predictor as admet_module
 from src.agent.tools.admet_predictor import ADMETPredictor
 
 
@@ -17,9 +20,10 @@ def test_missing_admet_ai_is_explicit_and_never_rdkit_fallback():
     assert "prediction_method" not in str(result)
 
 
-def test_legacy_rdkit_helper_remains_explicitly_non_model():
+def test_explicit_legacy_rules_remain_labelled_as_non_model(monkeypatch):
+    monkeypatch.setattr(legacy, "ADME_PY_AVAILABLE", False)
     predictor = ADMETPredictor(backend=None)
-    props = predictor._predict_admet_with_rdkit("CCO")
+    props = predictor.predict_admet_with_adme_py("CCO")
 
     assert props["prediction_method"] == "rdkit_rules"
     assert "physicochemical" in props
@@ -27,3 +31,21 @@ def test_legacy_rdkit_helper_remains_explicitly_non_model():
     assert "pharmacokinetics" in props
     assert "druglikeness" in props
     assert "非训练模型预测" in predictor.format_admet_result("CCO", props)
+
+
+def test_importing_model_predictor_does_not_probe_legacy_backend():
+    script = """
+import sys
+
+class LegacyImportProbe:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "adme_py":
+            raise AssertionError("loading the model predictor probed adme_py")
+        return None
+
+sys.meta_path.insert(0, LegacyImportProbe())
+from src.admet.predictor import ADMETPredictor
+"""
+    subprocess.run(
+        [sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[1], check=True
+    )
