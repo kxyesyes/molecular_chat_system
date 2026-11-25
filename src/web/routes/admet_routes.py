@@ -20,6 +20,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.system.redaction import sanitize_bounded, sanitize_sensitive_text
@@ -28,6 +29,8 @@ from src.system.molecular_input import BaseMolecularTool
 from src.system.molecular_input_parser import MolecularInputUnavailable, parse_molecular_smiles
 from src.web.process_isolation import IsolatedProcess, ProcessExecutionError
 from src.web.request_auth import require_browser_session
+
+from .route_compat import lazy_dependency
 
 
 logger = logging.getLogger(__name__)
@@ -426,9 +429,12 @@ def setup_admet_routes(
         return
 
     if env_getter is None:
-        env_getter = getattr(getattr(_support, "os", None), "getenv", os.getenv)
+        environment = lazy_dependency(None, _support, "os", label="ADMET environment", default=os)()
+        env_getter = getattr(environment, "getenv", os.getenv)
     if executor_factory is None:
-        executor_factory = getattr(_support, "ThreadPoolExecutor", None) or futures.ThreadPoolExecutor
+        executor_factory = lazy_dependency(
+            None, _support, "ThreadPoolExecutor", label="ADMET executor", default=futures.ThreadPoolExecutor
+        )() or futures.ThreadPoolExecutor
     worker = getattr(app.state, "_admet_worker", None)
     if worker is None:
         worker = _AdmetWorker(env_getter=env_getter, executor_factory=executor_factory)
