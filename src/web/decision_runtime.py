@@ -318,6 +318,7 @@ class _Sender:
         self.memory = []
         self.scientific_memory = []
         self.completed_goal = {}
+        self.pending_goal_candidate = None
         self.waiting = None
         self.close_attempted = False
         self.close_delivered = False
@@ -2243,6 +2244,7 @@ class WebDecisionRuntime:
         turn.started = True
         if self.full_web:
             sender.completed_goal = {}
+            sender.pending_goal_candidate = None
             turn.scientific_update = deepcopy(sender.scientific_memory[-1:])
             # Keep bounded socket-local records without letting an interrupted
             # or rejected intervening turn expose older evidence as "previous".
@@ -2353,6 +2355,9 @@ class WebDecisionRuntime:
                         capture_delivered = terminal_status == 'completed'
                         if capture_delivered and turn.goal is not None:
                             sender.completed_goal = turn.goal.completed_observations
+                        elif terminal_status == 'waiting_for_input' and turn.goal is not None and turn.goal.next_candidate_question:
+                            sender.completed_goal = turn.goal.completed_observations
+                            sender.pending_goal_candidate = turn.goal.next_candidate_question
                         if turn.history_update is not None:
                             sender.memory = turn.history_update.memory
                         if self.full_web and turn.scientific_update is not None:
@@ -2582,7 +2587,7 @@ class WebDecisionRuntime:
                 turn.expected_model_generation = expected_generation
                 if kind == 'goal_start':
                     from .goal_planning import GoalState
-                    turn.goal = GoalState(payload['message'], sender.completed_goal)
+                    turn.goal = GoalState(payload['message'], sender.completed_goal, sender.pending_goal_candidate)
                 await sender.send({'type': 'request_accepted', 'turn_id': turn.turn_id,
                                    'trace_id': turn.trace_id, **({'goal_revision': 1} if turn.goal else {})})
                 if self.closing:
@@ -2617,6 +2622,7 @@ class WebDecisionRuntime:
             sender.memory = []
             sender.scientific_memory.clear()
             sender.completed_goal = {}
+            sender.pending_goal_candidate = None
             sender.receiver_attached = False
             if controller is not None:
                 await controller.disconnect(sender)
@@ -2639,6 +2645,7 @@ class WebDecisionRuntime:
             sender.memory = []
             sender.scientific_memory.clear()
             sender.completed_goal = {}
+            sender.pending_goal_candidate = None
             controller = getattr(sender, '_chat_controller', None)
             if controller is not None:
                 await controller.disconnect(sender)

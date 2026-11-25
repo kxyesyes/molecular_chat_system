@@ -120,7 +120,8 @@ def test_goal_revision_during_real_worker_reuses_only_shared_verified_inputs():
     asyncio.run(scenario())
 
 
-def test_followup_comparison_uses_the_new_order_and_rejects_missing_rows():
+@pytest.mark.parametrize("wrapped_position", [False, True])
+def test_followup_comparison_uses_the_new_order_and_rejects_missing_rows(wrapped_position):
     async def scenario():
         tools = Tools()
         weights = {"CCO": 46.07, "CCN": 45.08}
@@ -144,7 +145,9 @@ def test_followup_comparison_uses_the_new_order_and_rejects_missing_rows():
             if n == 3:
                 return finish(record["id"])
             proposal = plan(("property_calculator", record["arguments"]))
-            proposal.arguments["mass_difference"] = {"subject": 3 if n == 1 else 2, "reference": "min"}
+            position = 3 if n == 1 else 2
+            proposal.arguments["mass_difference"] = {
+                "subject": {"position": position} if wrapped_position else position, "reference": "min"}
             if n == 2:
                 assert "rejected" in payload["feedback"]
             return proposal
