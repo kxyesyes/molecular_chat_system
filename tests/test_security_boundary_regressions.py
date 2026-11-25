@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -32,8 +31,7 @@ def test_docking_limits_reject_non_finite_manual_center():
 def test_completed_admet_future_does_not_leave_cancel_marker():
     from src.web.routes.admet_routes import _AdmetWorker
 
-    support = SimpleNamespace(os=os, ThreadPoolExecutor=__import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor)
-    worker = _AdmetWorker(support, isolate=False)
+    worker = _AdmetWorker()
 
     class CompletedFuture:
         _admet_job_id = "already-complete"

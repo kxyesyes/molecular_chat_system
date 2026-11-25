@@ -7,7 +7,7 @@ import pytest
 
 from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolProvenance, ToolResult, WorkflowArtifact
 from src.agent.tooling.factory import LegacyQueryInput, build_tool_registry
-from src.agent.tools import admet_predictor as admet_module
+from src.admet import legacy, predictor as admet_module
 from src.agent.tools.admet_predictor import ADMETPredictor
 from src.agent.tools.base_tool import execute_tool_compat
 from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
@@ -29,12 +29,13 @@ def analysis_rows(name, smiles=("CCO",)):
     optional adme_py is installed. Callers may add explicit fixture extensions.
     """
     producer = PRODUCERS[name]()
-    slot, calculate = {
-        "property_calculator": ("properties", "calculate_properties"),
-        "drug_likeness_assessment": ("assessment", "assess_drug_likeness"),
-        "admet_predictor": ("admet", "_predict_admet_with_rdkit"),
-    }[name]
-    rows = [{"smiles": value, slot: getattr(producer, calculate)(value)} for value in smiles]
+    if name == "admet_predictor":
+        slot, calculate = "admet", legacy._predict_admet_with_rdkit
+    elif name == "property_calculator":
+        slot, calculate = "properties", producer.calculate_properties
+    else:
+        slot, calculate = "assessment", producer.assess_drug_likeness
+    rows = [{"smiles": value, slot: calculate(value)} for value in smiles]
     assert all(row[slot] is not None for row in rows)
     return rows
 
@@ -42,10 +43,7 @@ def analysis_rows(name, smiles=("CCO",)):
 def producer_fixture_result(name, query="CCO"):
     """Use explicit in-memory fixtures; never make contract tests depend on model weights."""
     if name == "admet_predictor":
-        try:
-            rows = analysis_rows(name, (query,))
-        except Exception:
-            return PRODUCERS[name]().execute(query)
+        rows = analysis_rows(name, (query,))
         return {
             "query": query,
             "success": True,
@@ -148,8 +146,7 @@ class CountingTool:
 
 
 @pytest.fixture(params=list(PRODUCERS))
-def boundary(request, monkeypatch):
-    monkeypatch.setattr(admet_module, "ADME_PY_AVAILABLE", False)
+def boundary(request):
     name = request.param
     raw = producer_fixture_result(name)
     assert raw["success"], raw["message"]
@@ -311,8 +308,7 @@ BAD_LEAVES = [
 
 @pytest.mark.parametrize("name,path,value", BAD_LEAVES)
 @pytest.mark.parametrize("missing", [False, True])
-def test_known_leaves_required_and_strict(monkeypatch, name, path, value, missing):
-    monkeypatch.setattr(admet_module, "ADME_PY_AVAILABLE", False)
+def test_known_leaves_required_and_strict(name, path, value, missing):
     raw = producer_fixture_result(name)
     parent = raw["data"][0]
     *parts, leaf = path.split(".")
@@ -668,11 +664,10 @@ def test_redaction_itself_stays_in_worker_deadline_and_slot(boundary, monkeypatc
 @pytest.mark.parametrize("name,method", [
     ("property_calculator", "calculate_properties"),
     ("drug_likeness_assessment", "assess_drug_likeness"),
-    ("admet_predictor", "predict_admet_with_adme_py"),
+    ("admet_predictor", "_predict_batch_with_timeout"),
 ])
 @pytest.mark.parametrize("wrapped", [False, True])
 def test_registry_real_producers_never_compute_invalid_whole_input(monkeypatch, name, method, wrapped):
-    monkeypatch.setattr(admet_module, "ADME_PY_AVAILABLE", False)
     producer = PRODUCERS[name]()
     monkeypatch.setattr(producer, method, lambda *_: pytest.fail("invalid batch must not compute"))
     registry = build_tool_registry([producer])
@@ -690,7 +685,6 @@ def test_registry_real_producers_never_compute_invalid_whole_input(monkeypatch, 
 
 @pytest.mark.parametrize("failure", [False, True])
 def test_admet_domain_gate_reused_including_failure_rows(monkeypatch, failure):
-    monkeypatch.setattr(admet_module, "ADME_PY_AVAILABLE", False)
     raw = producer_fixture_result("admet_predictor")
     raw["success"] = not failure
     raw["status"] = "failed" if failure else "succeeded"

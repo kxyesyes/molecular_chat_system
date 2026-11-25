@@ -544,7 +544,7 @@ def test_target_validator_rejects_names_without_evidence():
 
 
 def test_adme_py_success_records_backend_method_and_package_version(monkeypatch):
-    from src.agent.tools import admet_predictor as admet_module
+    from src.admet import legacy as admet_module
 
     class FakeADME:
         def __init__(self, smiles):
