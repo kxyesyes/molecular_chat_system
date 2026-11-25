@@ -94,12 +94,18 @@ For 'it' after a selection, use the selected_position in the property observatio
 When candidate_batch is present, the user is still deciding. For a question about these displayed rows,
 submit plan_goal with a single candidate_view step, e.g. for the lightest use these exact arguments:
 {"steps":[{"tool_name":"candidate_view","arguments":{"field":"molecular_weight","show":"min"}}]}.
-Use min, max, all or a 1-based integer row (including when the user names a SMILES) and the requested
+Use min, max, all, a 1-based integer row, or the exact SMILES of a unique displayed row, and the requested
 field molecular_weight, logp, tpsa or qed. Python renders the verified
 values and keeps the question open. Never select a row or run checks just because it answers a question.
 If the user replaces a waiting batch, submit plan_goal with "replace_candidate_batch":true alongside
 "steps", starting with the property_calculator batch in the new user's exact order. Only mark replacement
 when the user requests a new batch. Inspecting a named row never replaces the batch."""
+
+
+def _candidate_position(value, rows):
+    if value in rows:
+        return rows.index(value) + 1 if rows.count(value) == 1 else 0
+    return displayed_row_position(value, count=len(rows))
 
 
 def _requested_batch_change(text, smiles):
@@ -224,9 +230,7 @@ class _GoalRun:
         if key in self.observations:
             rows = self.observations[key]['arguments']['smiles']
             value = reply.removeprefix('我选').strip()
-            position = displayed_row_position(value, count=len(rows))
-            if value in rows:
-                position = rows.index(value) + 1 if rows.count(value) == 1 else 0
+            position = _candidate_position(value, rows)
             if position is not None:
                 if 1 <= position <= len(rows):
                     self.selection = dict(goal=goal, position=position, smiles=rows[position-1])
@@ -246,7 +250,10 @@ class _GoalRun:
             raise ValueError
         field, show = view['field'], view['show']
         key, goal = self.state.pending_candidate
-        rows = self.candidate_records[key]['facts']
+        batch = self.candidate_records[key]
+        rows = batch['facts']
+        if show in batch['arguments']['smiles']:
+            show = _candidate_position(show, batch['arguments']['smiles'])
         single = type(show) is int and 1 <= show <= len(rows)
         if not isinstance(field, str) or field not in labels or (not single and show not in ('min', 'max', 'all')):
             raise ValueError
