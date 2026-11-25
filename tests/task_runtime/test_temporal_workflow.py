@@ -519,7 +519,12 @@ def test_docking_activity_resists_second_cancel_until_sync_cleanup_finishes():
     asyncio.run(scenario())
 
 
-def test_activity_uses_injected_managed_process_runner(tmp_path):
+@pytest.mark.parametrize("valid_pose", [True, False], ids=["success", "invalid-artifact"])
+def test_activity_process_and_thread_report_same_outcome(tmp_path, valid_pose):
+    raw_result = _success_result()
+    if not valid_pose:
+        raw_result["artifacts"] = []
+
     class FakeProcessRunner:
         def __init__(self) -> None:
             self.calls = []
@@ -528,11 +533,11 @@ def test_activity_uses_injected_managed_process_runner(tmp_path):
             self.calls.append((payload, attempt))
             progress_callback(TaskPhase.VINA_RUNNING.value, 0.6)
             await asyncio.sleep(0.02)
-            return _success_result()
+            return raw_result
 
     async def scenario() -> None:
         process_runner = FakeProcessRunner()
-        docking = _FakeDockingExecution(_success_result())
+        docking = _FakeDockingExecution(raw_result)
         activities = TemporalDockingActivities(
             TaskStore(tmp_path / "tasks.sqlite"),
             docking,
@@ -551,13 +556,32 @@ def test_activity_uses_injected_managed_process_runner(tmp_path):
             heartbeat_interval=0.005,
         )
 
-        assert result["status"] == TaskStatus.SUCCEEDED.value
         assert process_runner.calls == [
             ({"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR}, 2)
         ]
         assert docking.calls == []
-        assert heartbeats[-1]["phase"] == TaskPhase.ARTIFACT_COMMIT.value
-        assert heartbeats[-1]["progress"] == 1.0
+
+        thread_heartbeats = []
+        thread_result = await _run_docking_in_test_thread(
+            docking,
+            {"task_id": TASK_ID, "manifest_locator": MANIFEST_LOCATOR},
+            attempt=2,
+            heartbeat=thread_heartbeats.append,
+            heartbeat_interval=0.005,
+        )
+        assert thread_result == result
+        if valid_pose:
+            assert result["status"] == TaskStatus.SUCCEEDED.value
+            assert result["result"]["pose_count"] == 2
+            expected_final = (TaskPhase.ARTIFACT_COMMIT.value, 1.0)
+        else:
+            assert result["status"] == TaskStatus.FAILED.value
+            assert result["error_code"] == TaskErrorCode.DOCKING_ARTIFACT_INVALID.value
+            expected_final = (TaskPhase.VINA_RUNNING.value, 0.6)
+        for updates in (heartbeats, thread_heartbeats):
+            assert (updates[-1]["phase"], updates[-1]["progress"]) == expected_final
+            if not valid_pose:
+                assert all(update["progress"] < 1.0 for update in updates)
 
     asyncio.run(scenario())
 

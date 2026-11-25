@@ -373,6 +373,26 @@ def _safe_execution_contract(value: Any) -> dict[str, str] | None:
     }
 
 
+async def _wait_for_docking_result(
+    work: asyncio.Task[dict[str, Any]],
+    progress: _ProgressSlot,
+    *,
+    task_id: str,
+    attempt: int,
+    heartbeat: Callable[[dict[str, Any]], None],
+    heartbeat_interval: float,
+    heartbeat_projection: Callable[[dict[str, Any]], Any] | None,
+) -> dict[str, Any]:
+    while not work.done():
+        await progress.flush_heartbeat(attempt, heartbeat, heartbeat_projection)
+        await asyncio.sleep(float(heartbeat_interval))
+    outcome = _summarize_docking_result(await work, task_id=task_id, attempt=attempt)
+    if outcome.get("status") == TaskStatus.SUCCEEDED.value:
+        progress.update(TaskPhase.ARTIFACT_COMMIT.value, 1.0)
+    await progress.flush_heartbeat(attempt, heartbeat, heartbeat_projection)
+    return outcome
+
+
 async def _run_docking_in_test_thread(
     docking_execution: DockingExecution,
     payload: dict[str, Any],
@@ -404,19 +424,15 @@ async def _run_docking_in_test_thread(
     )
 
     try:
-        while not work.done():
-            await progress.flush_heartbeat(attempt, heartbeat, heartbeat_projection)
-            await asyncio.sleep(float(heartbeat_interval))
-        raw_result = await work
-        outcome = _summarize_docking_result(
-            raw_result,
+        return await _wait_for_docking_result(
+            work,
+            progress,
             task_id=task_id,
             attempt=attempt,
+            heartbeat=heartbeat,
+            heartbeat_interval=heartbeat_interval,
+            heartbeat_projection=heartbeat_projection,
         )
-        if outcome.get("status") == TaskStatus.SUCCEEDED.value:
-            progress.update(TaskPhase.ARTIFACT_COMMIT.value, 1.0)
-        await progress.flush_heartbeat(attempt, heartbeat, heartbeat_projection)
-        return outcome
     except asyncio.CancelledError:
         cancel_event.set()
         while not work.done():
@@ -460,19 +476,15 @@ async def _run_docking_in_process(
     )
 
     try:
-        while not work.done():
-            await progress.flush_heartbeat(attempt, heartbeat, heartbeat_projection)
-            await asyncio.sleep(float(heartbeat_interval))
-        raw_result = await work
-        outcome = _summarize_docking_result(
-            raw_result,
+        return await _wait_for_docking_result(
+            work,
+            progress,
             task_id=task_id,
             attempt=attempt,
+            heartbeat=heartbeat,
+            heartbeat_interval=heartbeat_interval,
+            heartbeat_projection=heartbeat_projection,
         )
-        if outcome.get("status") == TaskStatus.SUCCEEDED.value:
-            progress.update(TaskPhase.ARTIFACT_COMMIT.value, 1.0)
-        await progress.flush_heartbeat(attempt, heartbeat, heartbeat_projection)
-        return outcome
     except asyncio.CancelledError:
         work.cancel()
         while not work.done():
