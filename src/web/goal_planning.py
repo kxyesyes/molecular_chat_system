@@ -88,7 +88,13 @@ plan drug_likeness_assessment only for its exact SMILES. No new property check i
 If the user asks to choose a candidate before proceeding, submit clarify with missing_fields ["candidate"]
 immediately. Do not guess or run any checks. A candidate_selection in the request is the user's verified
 reply to that clarification: perform its original goal for that SMILES now; do not ask again.
-For 'it' after a selection, use the selected_position in the property observation, in original row order."""
+For 'it' after a selection, use the selected_position in the property observation, in original row order.
+When candidate_batch is present, the user is still deciding. For a question about these displayed rows,
+submit plan_goal with a single candidate_view step, e.g. for the lightest use these exact arguments:
+{"steps":[{"tool_name":"candidate_view","arguments":{"field":"molecular_weight","show":"min"}}]}.
+Use min, max or all and the requested field molecular_weight, logp, tpsa or qed. Python renders the verified
+values and keeps the question open. Never select a row or run checks just because it answers a question.
+For a new goal with explicit inputs, submit the normal steps for that new goal."""
 
 
 def _bind_plan(decision, tools, user_texts, max_steps):
@@ -181,16 +187,18 @@ class _GoalRun:
         self.stop_notice = ''
         self.answer = None
         self.selection = None
+        self.candidate_records = {}
         if state.pending_candidate:
             self._resolve_candidate(*state.pending_candidate)
 
-    def _ask_candidate(self, key, goal, records):
+    def _ask_candidate(self, key, goal, records, summary=''):
         rows = records[key]['arguments']['smiles']
         self.state.completed_observations = records
         self.state.next_candidate_question = (key, goal)
         self.state.sealed = True
         choices = '、'.join(f'{i}. {s}' for i, s in enumerate(rows, 1))
-        self.answer = {'status': 'waiting_for_input', 'text': f'请选择候选（{choices}）。请回复序号或 SMILES。'}
+        prompt = f'请选择候选（{choices}）。请回复序号或 SMILES。'
+        self.answer = {'status': 'waiting_for_input', 'text': '\n\n'.join(filter(None, (summary, prompt)))}
         return {'content': json.dumps({'status': 'waiting_for_input'}), 'terminate': True}
 
     def _resolve_candidate(self, key, goal):
@@ -212,9 +220,33 @@ class _GoalRun:
                 else:
                     self._ask_candidate(key, goal, self.observations)
                 return
-        # A different request supersedes this question and its candidate list.
-        self.observations.clear()
+            # The planner may inspect the displayed batch. A new goal can bind
+            # scientific steps only to its own inputs, never to these rows.
+            self.candidate_records = self.observations
+        self.observations = {}
         self.previous_inputs.clear()
+
+    def _view_candidates(self, view):
+        labels = {'molecular_weight': '分子量', 'logp': 'logP', 'tpsa': 'TPSA', 'qed': 'QED'}
+        if not isinstance(view, dict) or set(view) != {'field', 'show'}:
+            raise ValueError
+        field, show = view['field'], view['show']
+        if not isinstance(field, str) or field not in labels or show not in ('min', 'max', 'all'):
+            raise ValueError
+        key, goal = self.state.pending_candidate
+        rows = self.candidate_records[key]['facts']
+        extreme = None
+        if show != 'all':
+            extreme = (min if show == 'min' else max)(row[field] for row in rows)
+        lines = []
+        for i, row in enumerate(rows, 1):
+            if extreme is None or row[field] == extreme:
+                unit = row['units'].get(field, '')
+                value = f'{row[field]} {unit}'.rstrip()
+                lines.append(f"第 {i} 个 {row['smiles']}（{labels[field]} {value}）")
+        heading = {'min': '最低', 'max': '最高', 'all': ''}[show]
+        summary = (f'{labels[field]}{heading}的是' if heading else '') + '、'.join(lines) + '。'
+        return self._ask_candidate(key, goal, self.candidate_records, summary)
 
     def _check_cancel(self):
         if self.cancelled():
@@ -285,6 +317,9 @@ class _GoalRun:
             observations=list(self.observations.values()), feedback=self.feedback)
         if self.selection and self.proposal_revision == 1:
             request['candidate_selection'] = self.selection
+        if self.candidate_records and self.proposal_revision == 1:
+            key, _ = self.state.pending_candidate
+            request['candidate_batch'] = self.candidate_records[key]['facts']
         messages = [*payload['messages'], {'role': 'user', 'content':
             json.dumps(request, ensure_ascii=False, separators=(',', ':'))}]
         timeout = min(self.deadline - time.monotonic(), 60)
@@ -331,6 +366,8 @@ class _GoalRun:
         elif isinstance(decision, ClarifyDecision):
             fields = set(decision.missing_fields)
             if 'candidate' in fields:
+                if self.candidate_records and revision == 1:
+                    return self._ask_candidate(*self.state.pending_candidate, self.candidate_records)
                 # Only carry verified rows belonging to the current plan or its delivered predecessor.
                 keys = [s.key for s in self._current_steps()] or [
                     k for k, r in self.observations.items() if r['revision'] == 0]
@@ -354,6 +391,11 @@ class _GoalRun:
             self.feedback = 'Finish rejected: replan missing checks; cite exactly the current matching receipts.'
         else:
             try:
+                if self.candidate_records and revision == 1 and decision.tool_name == 'plan_goal':
+                    match decision.arguments:
+                        case {'steps': [{'tool_name': 'candidate_view', 'arguments': view, **step_extra}],
+                              **extra} if not (step_extra or extra):
+                            return self._view_candidates(view)
                 steps, difference = _bind_plan(decision, self.tools, self.binding_inputs, self.tool_budget)
                 if self.selection and revision == 1 and any(
                         s.arguments.get('smiles') != [self.selection['smiles']] and not (
@@ -363,6 +405,7 @@ class _GoalRun:
             except ValueError:
                 self.feedback = 'Plan rejected: use plan_goal, catalog arguments and explicit user inputs.'
             else:
+                self.candidate_records = {}
                 self.difference = difference
                 await self._advance(revision, steps)
         if self.answer is not None:

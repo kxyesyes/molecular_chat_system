@@ -13,6 +13,14 @@ def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual
             goal = current["goal"]
             observations = current["observations"]
             selection = current.get("candidate_selection")
+            if goal in ("哪个最轻", "把 logP 再列一遍"):
+                assert [row["smiles"] for row in current["candidate_batch"]] == batch
+                assert not selection
+                view = {"field": "molecular_weight", "show": "min"} if goal == "哪个最轻" else {"field": "logp", "show": "all"}
+                if not current["feedback"]:
+                    view["value"] = 99999  # Only verified values can be displayed.
+                return dict(version="1", action="tool", tool_name="plan_goal", purpose="查看已有结果",
+                            arguments={"steps": [{"tool_name": "candidate_view", "arguments": view}]})
             if goal == pending_goal or goal == "第二个" and not selection:
                 return dict(version="1", action="clarify", question="哪一个？", missing_fields=["candidate"])
             if selection:
@@ -37,12 +45,19 @@ def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual
                 if frame.get("phase") == "running":
                     calls.append(frame["tool"])
                 if frame["type"] == "complete":
+                    if message == "哪个最轻":
+                        assert "第 3 个 CO" in frame["content"] and "32.04 Da" in frame["content"]
+                    if message == "把 logP 再列一遍":
+                        positions = [frame["content"].index(f"第 {i} 个 {s}（logP") for i, s in enumerate(batch, 1)]
+                        assert positions == sorted(positions)
                     return frame["status"], calls
         async with actual_app(ordinary_policy=None, respond=respond) as bundle:
             async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as ws:
                 await ws.ready()
                 assert await ask(ws, "比较 CCO、CCN、CO") == ("completed", ["property_calculator"])
                 assert await ask(ws, pending_goal) == ("waiting_for_input", [])
+                assert await ask(ws, "哪个最轻") == ("waiting_for_input", [])
+                assert await ask(ws, "把 logP 再列一遍") == ("waiting_for_input", [])
                 async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as other:
                     await other.ready()
                     assert await ask(other, "第二个") == ("not_calculated", [])
@@ -51,6 +66,7 @@ def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual
                 assert await ask(ws, pending_goal) == ("waiting_for_input", [])
                 assert await ask(ws, "CCN") == ("completed", [])
                 assert await ask(ws, pending_goal) == ("waiting_for_input", [])
+                assert await ask(ws, "哪个最轻") == ("waiting_for_input", [])
                 assert await ask(ws, "换批比较 CO 和 CCO") == ("completed", ["property_calculator"])
                 assert await ask(ws, pending_goal) == ("waiting_for_input", [])
                 assert await ask(ws, "取消") == ("cancelled", [])

@@ -115,15 +115,19 @@ async function candidateQuestion({frames, waitFor, submit, page}) {
     console.log(JSON.stringify({test:"candidate_question", trace:done.trace_id, answer:done.content}));
   }
   const choose = "只给我选的那个分子查类药规则，先让我选择候选。";
+  const lightest = /第 3 个 CO[^\n]*32\.04 Da/;
   await ask("按顺序比较 CCO、CCN、CO 的分子量", "completed", ["property_calculator"], /CCO：分子量 46\.07/);
   await ask(choose, "waiting_for_input", [], /1\. CCO、2\. CCN、3\. CO/);
+  await ask("哪个最轻", "waiting_for_input", [], lightest);
   await exercise(page.context().browser(), emptySession);
   await ask("第二个", "completed", ["drug_likeness_assessment"], /CCN：Lipinski/);
   await ask("它比最重的轻多少", "completed", [], /CCN.*比 CCO.*轻 0\.99 Da/);
   await ask(choose, "waiting_for_input", [], /2\. CCN/);
+  await ask("选之前，先告诉我这批哪个最轻？", "waiting_for_input", [], lightest);
   await ask("换一批，按顺序比较 CO 和 CCO 的分子量", "completed", ["property_calculator"], /CO：分子量 32\.04/);
   await ask("这批第二个比最轻的重多少", "completed", [], /CCO.*比 CO.*重 14\.03 Da/);
   await ask(choose, "waiting_for_input", [], /1\. CO、2\. CCO/);
+  await ask("哪个最轻", "waiting_for_input", [], /第 1 个 CO[^\n]*32\.04 Da/);
   await ask("取消", "cancelled", [], /已取消/);
   await ask("第二个", "not_calculated", [], /请补充/);
 }
