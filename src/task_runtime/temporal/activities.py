@@ -102,11 +102,12 @@ def _has_strict_terminal_provenance(payload: dict[str, Any]) -> bool:
 
 @dataclass
 class _ProgressSlot:
-    """A bounded latest-value slot shared with one synchronous worker thread."""
+    """Keep the latest progress for one activity's heartbeats."""
 
     _phase: str = TaskPhase.ENVIRONMENT_CHECK.value
     _progress: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _started_at: float = field(default_factory=time.monotonic, init=False, repr=False, compare=False)
 
     def update(self, phase: Any, progress: Any) -> None:
         if not isinstance(phase, str) or phase not in _CONTROLLED_PHASES:
@@ -127,6 +128,26 @@ class _ProgressSlot:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {"phase": self._phase, "progress": self._progress}
+
+    async def flush_heartbeat(
+        self,
+        attempt: int,
+        heartbeat: Callable[[dict[str, Any]], None],
+        heartbeat_projection: Callable[[dict[str, Any]], Any] | None,
+    ) -> None:
+        payload = {
+            **self.snapshot(),
+            "attempt": attempt,
+            "elapsed_time": max(0.0, time.monotonic() - self._started_at),
+        }
+        heartbeat(payload)
+        if heartbeat_projection is not None:
+            try:
+                projected = heartbeat_projection(dict(payload))
+                if inspect.isawaitable(projected):
+                    await projected
+            except Exception:
+                pass
 
 
 def _validate_docking_payload(payload: Any) -> tuple[str, str]:
@@ -370,7 +391,6 @@ async def _run_docking_in_test_thread(
         raise ValueError("invalid heartbeat interval")
     cancel_event = threading.Event()
     progress = _ProgressSlot()
-    started_at = time.monotonic()
 
     work = asyncio.create_task(
         asyncio.to_thread(
@@ -383,24 +403,9 @@ async def _run_docking_in_test_thread(
         )
     )
 
-    async def flush_heartbeat() -> None:
-        heartbeat_payload = {
-            **progress.snapshot(),
-            "attempt": attempt,
-            "elapsed_time": max(0.0, time.monotonic() - started_at),
-        }
-        heartbeat(heartbeat_payload)
-        if heartbeat_projection is not None:
-            try:
-                projected = heartbeat_projection(dict(heartbeat_payload))
-                if inspect.isawaitable(projected):
-                    await projected
-            except Exception:
-                pass
-
     try:
         while not work.done():
-            await flush_heartbeat()
+            await progress.flush_heartbeat(attempt, heartbeat, heartbeat_projection)
             await asyncio.sleep(float(heartbeat_interval))
         raw_result = await work
         outcome = _summarize_docking_result(
@@ -410,7 +415,7 @@ async def _run_docking_in_test_thread(
         )
         if outcome.get("status") == TaskStatus.SUCCEEDED.value:
             progress.update(TaskPhase.ARTIFACT_COMMIT.value, 1.0)
-        await flush_heartbeat()
+        await progress.flush_heartbeat(attempt, heartbeat, heartbeat_projection)
         return outcome
     except asyncio.CancelledError:
         cancel_event.set()
@@ -446,7 +451,6 @@ async def _run_docking_in_process(
     if not isinstance(heartbeat_interval, (int, float)) or heartbeat_interval <= 0:
         raise ValueError("invalid heartbeat interval")
     progress = _ProgressSlot()
-    started_at = time.monotonic()
     work = asyncio.create_task(
         process_runner.run(
             payload,
@@ -455,24 +459,9 @@ async def _run_docking_in_process(
         )
     )
 
-    async def flush_heartbeat() -> None:
-        heartbeat_payload = {
-            **progress.snapshot(),
-            "attempt": attempt,
-            "elapsed_time": max(0.0, time.monotonic() - started_at),
-        }
-        heartbeat(heartbeat_payload)
-        if heartbeat_projection is not None:
-            try:
-                projected = heartbeat_projection(dict(heartbeat_payload))
-                if inspect.isawaitable(projected):
-                    await projected
-            except Exception:
-                pass
-
     try:
         while not work.done():
-            await flush_heartbeat()
+            await progress.flush_heartbeat(attempt, heartbeat, heartbeat_projection)
             await asyncio.sleep(float(heartbeat_interval))
         raw_result = await work
         outcome = _summarize_docking_result(
@@ -482,7 +471,7 @@ async def _run_docking_in_process(
         )
         if outcome.get("status") == TaskStatus.SUCCEEDED.value:
             progress.update(TaskPhase.ARTIFACT_COMMIT.value, 1.0)
-        await flush_heartbeat()
+        await progress.flush_heartbeat(attempt, heartbeat, heartbeat_projection)
         return outcome
     except asyncio.CancelledError:
         work.cancel()
