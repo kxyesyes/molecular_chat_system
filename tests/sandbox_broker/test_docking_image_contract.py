@@ -1140,7 +1140,7 @@ m._INVOCATION_BASELINE_CHILDREN = m._linux_children()
 expected = "tool_timeout" if sys.argv[3] == "timeout" else "tool_failed"
 deadline = time.monotonic() + (0.5 if sys.argv[3] == "timeout" else 3.0)
 cleanup_deadline = deadline + 0.75
-accepted = False
+observed = "success"
 try:
     m._run_tool(
         [sys.executable, "-c", sys.argv[4], sys.argv[5]],
@@ -1149,7 +1149,7 @@ try:
         cleanup_deadline,
     )
 except m.DockingFailure as failure:
-    accepted = failure.error_code == expected
+    observed = failure.error_code
 pids = json.loads(Path(sys.argv[5]).read_text(encoding="utf-8"))
 remaining = [pid for pid in pids if Path(f"/proc/{pid}").exists()]
 if remaining:
@@ -1167,9 +1167,11 @@ if remaining:
         if child == 0:
             time.sleep(0.01)
     remaining = [pid for pid in pids if Path(f"/proc/{pid}").exists()]
-if not accepted:
+if observed != expected:
+    print(f"expected {expected}, got {observed}", file=sys.stderr)
     raise SystemExit(20)
 if remaining:
+    print(f"processes still present after cleanup: {remaining}", file=sys.stderr)
     raise SystemExit(21)
 """
     compile(helper_code, "<linux-process-tree-probe>", "exec")
@@ -1185,12 +1187,15 @@ if remaining:
             str(pid_file),
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         start_new_session=True,
     )
     pids: list[int] = []
     try:
-        assert helper.wait(timeout=8) == 0
+        _, stderr = helper.communicate(timeout=8)
+        assert helper.returncode == 0, (
+            f"{mode} probe exited {helper.returncode}: {stderr.decode(errors='replace').strip()}"
+        )
         pids = json.loads(pid_file.read_text(encoding="utf-8"))
         assert all(not Path(f"/proc/{pid}").exists() for pid in pids)
         return pids
@@ -1205,6 +1210,13 @@ if remaining:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_process_tree_probe_reports_helper_startup_error(tmp_path, monkeypatch):
+    missing_runner = tmp_path / "missing_runner.py"
+    monkeypatch.setattr(sys.modules[__name__], "RUNNER", missing_runner)
+    with pytest.raises(AssertionError, match="FileNotFoundError"):
+        _linux_process_tree_probe(tmp_path, "timeout")
 
 
 @pytest.mark.skipif(
