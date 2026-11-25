@@ -2141,22 +2141,6 @@ def _atomic_publish_coordinate(
     return "moved" if moved else "transient_error"
 
 
-def _atomic_restore_coordinate(
-    cache_root: Path,
-    published: Path,
-    temporary: Path,
-    published_parts: tuple[str, ...],
-    temporary_parts: tuple[str, ...],
-) -> bool:
-    if os.name == "nt":
-        return _move_windows_verified(
-            cache_root, published, temporary, replace_existing=True
-        )
-    return _replace_posix_verified(
-        cache_root, published_parts, temporary_parts, replace_existing=True
-    )
-
-
 def _atomic_move_to_quarantine(
     cache_root: Path,
     source_path: Path,

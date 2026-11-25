@@ -539,12 +539,6 @@ def _apply_transform(point: np.ndarray, rotation: np.ndarray, hit_center: np.nda
     return (point - hit_center) @ rotation + query_center
 
 
-def _rmsd(query_points: np.ndarray, hit_points: np.ndarray) -> float:
-    if len(query_points) == 0:
-        return float("inf")
-    return float(np.sqrt(np.mean(np.sum((query_points - hit_points) ** 2, axis=1))))
-
-
 def _feature_distance_cutoff(family: str, fallback: float) -> float:
     return max(float(fallback), FEATURE_DISTANCE_CUTOFFS.get(family, float(fallback)))
 
