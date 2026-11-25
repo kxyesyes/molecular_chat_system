@@ -1179,37 +1179,36 @@ class _VinaPoseStreamValidator:
 
 
 def _input_hash(inputs: VerifiedDockingInputs) -> str:
-    identity = {
-        "ligand": {
-            "mode": inputs.ligand_mode,
-            "sha256": inputs.ligand_sha256,
-            "size": inputs.ligand_size,
-        },
-        "receptor": {
-            "sha256": inputs.receptor_sha256,
-            "size": inputs.receptor_size,
-        },
-    }
-    encoded = json.dumps(
-        identity,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("ascii")
-    return hashlib.sha256(encoded).hexdigest()
+    return _docking_input_digest(
+        ligand_mode=inputs.ligand_mode,
+        ligand_sha256=inputs.ligand_sha256,
+        ligand_size=inputs.ligand_size,
+        receptor_sha256=inputs.receptor_sha256,
+        receptor_size=inputs.receptor_size,
+    )
 
 
 def _manifest_input_hash(manifest: Mapping[str, Any]) -> str:
+    return _docking_input_digest(
+        ligand_mode=manifest["ligand_mode"],
+        ligand_sha256=manifest["ligand"]["sha256"],
+        ligand_size=manifest["ligand"]["size"],
+        receptor_sha256=manifest["receptor"]["sha256"],
+        receptor_size=manifest["receptor"]["size"],
+    )
+
+
+def _docking_input_digest(
+    *,
+    ligand_mode: str,
+    ligand_sha256: str,
+    ligand_size: int,
+    receptor_sha256: str,
+    receptor_size: int,
+) -> str:
     identity = {
-        "ligand": {
-            "mode": manifest["ligand_mode"],
-            "sha256": manifest["ligand"]["sha256"],
-            "size": manifest["ligand"]["size"],
-        },
-        "receptor": {
-            "sha256": manifest["receptor"]["sha256"],
-            "size": manifest["receptor"]["size"],
-        },
+        "ligand": {"mode": ligand_mode, "sha256": ligand_sha256, "size": ligand_size},
+        "receptor": {"sha256": receptor_sha256, "size": receptor_size},
     }
     encoded = json.dumps(
         identity,

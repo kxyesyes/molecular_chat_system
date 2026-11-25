@@ -654,10 +654,20 @@ def test_reuse_rejects_manifest_provenance_matching_staged_smiles(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("smiles", "expected_input_hash"),
+    [
+        (False, "0e7f6d47fad06e0ca625047ffbcdbc0d966592f3c37ebe9ddac2181710ec38aa"),
+        (True, "5f7a8fe1a8a60c379b14aaf12553a4bf08e731dd461fa214cf1740e78f39939f"),
+    ],
+    ids=["file", "smiles"],
+)
 def test_verified_completion_is_committed_and_reused_without_second_call(
     tmp_path: Path,
+    smiles: bool,
+    expected_input_hash: str,
 ) -> None:
-    manifest = _stage(tmp_path)
+    manifest = _stage(tmp_path, smiles=smiles)
     calls: list[dict[str, Any]] = []
     runner = DockingExecution(tmp_path, raw_executor=_executor(tmp_path, calls))
 
@@ -673,7 +683,7 @@ def test_verified_completion_is_committed_and_reused_without_second_call(
     completion = json.loads(_completion(tmp_path).read_text(encoding="utf-8"))
     assert completion["schema"] == "DockingCompletionManifest@1"
     assert completion["task_id"] == "task-1"
-    assert completion["input_hash"]
+    assert completion["input_hash"] == expected_input_hash
     assert completion["config_hash"]
     assert completion["tool_version"] == "vina-test-1"
     assert completion["pose"]["path"] == "artifacts/docking_pose.pdbqt"
