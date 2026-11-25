@@ -7,7 +7,17 @@ import pytest
 
 from src.agent.contracts.decision import FinishDecision, ToolDecision
 from src.agent.decision_transport import DecisionResponse
-from src.web.goal_planning import GoalState, run_goal
+from src.web.goal_planning import GoalState, _requested_batch_change, run_goal
+
+
+@pytest.mark.parametrize("query,rows,expected", [
+    ("换批之前，先告诉我 CO 的分子量是多少？", ["CO"], False),
+    ("先别选，CO 的分子量是多少？", ["CO"], False),
+    ("把候选换成 CO 和 CCO，重新计算分子量", ["CO", "CCO"], True),
+    ("换一批，按顺序比较 CO 和 CCO 的分子量", ["CO", "CCO"], True),
+])
+def test_overlapping_batch_requires_an_affirmative_command(query, rows, expected):
+    assert _requested_batch_change(query, rows) is expected
 
 
 PROPERTY = ("property_calculator", {"smiles": ["CCO"]})

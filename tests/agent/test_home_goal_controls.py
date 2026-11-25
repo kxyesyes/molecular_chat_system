@@ -13,10 +13,22 @@ def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual
             goal = current["goal"]
             observations = current["observations"]
             selection = current.get("candidate_selection")
-            if goal in ("哪个最轻", "把 logP 再列一遍"):
+            if goal == "换一批 CCCC、CCCCC，先让我选":
+                return dict(version="1", action="clarify", question="要哪个？", missing_fields=["candidate"])
+            if goal == "先别选，CO 的分子量是多少？":
+                if not current["feedback"]:
+                    return dict(version="1", action="tool", tool_name="plan_goal", purpose="错误地重建批次",
+                                arguments={"replace_candidate_batch": True, "steps": [
+                                    dict(tool_name="property_calculator", arguments={"smiles": ["CO"]})]})
+                else:
+                    step = dict(tool_name="candidate_view", arguments={"field": "molecular_weight", "show": 3})
+                return dict(version="1", action="tool", tool_name="plan_goal",
+                            purpose="读取所问行", arguments={"steps": [step]})
+            replacing = goal == "先不选了，请用 CO 和 CCO 作为新的一批，重新计算分子量"
+            if goal in ("哪个最轻", "重新比较一下这批，哪个最轻？", "把 logP 再列一遍"):
                 assert [row["smiles"] for row in current["candidate_batch"]] == batch
                 assert not selection
-                view = {"field": "molecular_weight", "show": "min"} if goal == "哪个最轻" else {"field": "logp", "show": "all"}
+                view = {"field": "logp", "show": "all"} if "logP" in goal else {"field": "molecular_weight", "show": "min"}
                 if not current["feedback"]:
                     view["value"] = 99999  # Only verified values can be displayed.
                 return dict(version="1", action="tool", tool_name="plan_goal", purpose="查看已有结果",
@@ -29,14 +41,16 @@ def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual
                 if goal == "第二个" and not current["plan_revision"] and not current["feedback"]:
                     inputs = ["CO"]  # A stale model proposal must not dispatch for the third row.
             else:
-                tool, inputs = "property_calculator", batch if goal != "换批比较 CO 和 CCO" else ["CO", "CCO"]
-                if goal == "换批比较 CO 和 CCO" and not current["plan_revision"]:
+                tool, inputs = "property_calculator", ["CO", "CCO"] if replacing else batch
+                if replacing and not current["plan_revision"]:
                     assert not observations and not selection
             if current["plan_revision"]:
                 return dict(version="1", action="finish", response_kind="scientific", text="完成",
                             evidence_ids=[r["id"] for r in observations if r["arguments"]["smiles"] == inputs])
-            return dict(version="1", action="tool", tool_name="plan_goal", purpose="执行请求",
-                        arguments={"steps":[dict(tool_name=tool, arguments={"smiles": inputs})]})
+            args = {"steps":[dict(tool_name=tool, arguments={"smiles": inputs})]}
+            if replacing:
+                args["replace_candidate_batch"] = True
+            return dict(version="1", action="tool", tool_name="plan_goal", purpose="执行请求", arguments=args)
         async def ask(ws, message):
             await ws.send(dict(type="goal_start", message=message, enable_tools=True))
             calls = []
@@ -45,7 +59,7 @@ def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual
                 if frame.get("phase") == "running":
                     calls.append(frame["tool"])
                 if frame["type"] == "complete":
-                    if message == "哪个最轻":
+                    if message in ("哪个最轻", "先别选，CO 的分子量是多少？"):
                         assert "第 3 个 CO" in frame["content"] and "32.04 Da" in frame["content"]
                     if message == "把 logP 再列一遍":
                         positions = [frame["content"].index(f"第 {i} 个 {s}（logP") for i, s in enumerate(batch, 1)]
@@ -57,7 +71,9 @@ def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual
                 assert await ask(ws, "比较 CCO、CCN、CO") == ("completed", ["property_calculator"])
                 assert await ask(ws, pending_goal) == ("waiting_for_input", [])
                 assert await ask(ws, "哪个最轻") == ("waiting_for_input", [])
+                assert await ask(ws, "先别选，CO 的分子量是多少？") == ("waiting_for_input", [])
                 assert await ask(ws, "把 logP 再列一遍") == ("waiting_for_input", [])
+                assert await ask(ws, "重新比较一下这批，哪个最轻？") == ("waiting_for_input", [])
                 async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as other:
                     await other.ready()
                     assert await ask(other, "第二个") == ("not_calculated", [])
@@ -67,9 +83,13 @@ def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual
                 assert await ask(ws, "CCN") == ("completed", [])
                 assert await ask(ws, pending_goal) == ("waiting_for_input", [])
                 assert await ask(ws, "哪个最轻") == ("waiting_for_input", [])
-                assert await ask(ws, "换批比较 CO 和 CCO") == ("completed", ["property_calculator"])
+                assert await ask(ws, "先不选了，请用 CO 和 CCO 作为新的一批，重新计算分子量") == ("completed", ["property_calculator"])
                 assert await ask(ws, pending_goal) == ("waiting_for_input", [])
                 assert await ask(ws, "取消") == ("cancelled", [])
+                assert await ask(ws, "第二个") == ("not_calculated", [])
+                assert await ask(ws, "比较 CCO、CCN、CO") == ("completed", ["property_calculator"])
+                assert await ask(ws, pending_goal) == ("waiting_for_input", [])
+                assert await ask(ws, "换一批 CCCC、CCCCC，先让我选") == ("not_calculated", [])
                 assert await ask(ws, "第二个") == ("not_calculated", [])
     asyncio.run(scenario())
 

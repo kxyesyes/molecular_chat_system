@@ -2,6 +2,7 @@
 import asyncio
 from decimal import Decimal
 import json
+import re
 from threading import Lock
 import time
 from uuid import uuid4
@@ -92,9 +93,20 @@ For 'it' after a selection, use the selected_position in the property observatio
 When candidate_batch is present, the user is still deciding. For a question about these displayed rows,
 submit plan_goal with a single candidate_view step, e.g. for the lightest use these exact arguments:
 {"steps":[{"tool_name":"candidate_view","arguments":{"field":"molecular_weight","show":"min"}}]}.
-Use min, max or all and the requested field molecular_weight, logp, tpsa or qed. Python renders the verified
+Use min, max, all or a 1-based integer row (including when the user names a SMILES) and the requested
+field molecular_weight, logp, tpsa or qed. Python renders the verified
 values and keeps the question open. Never select a row or run checks just because it answers a question.
-For a new goal with explicit inputs, submit the normal steps for that new goal."""
+If the user replaces a waiting batch, submit plan_goal with "replace_candidate_batch":true alongside
+"steps", starting with the property_calculator batch in the new user's exact order. Only mark replacement
+when the user requests a new batch. Inspecting a named row never replaces the batch."""
+
+
+def _requested_batch_change(text, smiles):
+    """Require a direct replacement command before re-running an overlapping batch."""
+    rows = r'\s*(?:、|和|与|以及|,)\s*'.join(re.escape(row) for row in smiles)
+    command = (rf'(?:换一?批|(?:换一?批(?:比较)?|(?:把)?候选换成|改为比较)\s*{rows}|'
+               rf'用\s*{rows}\s*作为新(?:的)?一?批(?:次)?|(?:start|use) (?:a )?new batch)')
+    return bool(re.search(rf'(?:^|[，,。；;！？!?\n])\s*(?:请|现在|先)?\s*{command}\s*(?:$|[，,。；;！!\n])', text, re.I))
 
 
 def _bind_plan(decision, tools, user_texts, max_steps):
@@ -231,20 +243,21 @@ class _GoalRun:
         if not isinstance(view, dict) or set(view) != {'field', 'show'}:
             raise ValueError
         field, show = view['field'], view['show']
-        if not isinstance(field, str) or field not in labels or show not in ('min', 'max', 'all'):
-            raise ValueError
         key, goal = self.state.pending_candidate
         rows = self.candidate_records[key]['facts']
+        single = type(show) is int and 1 <= show <= len(rows)
+        if not isinstance(field, str) or field not in labels or (not single and show not in ('min', 'max', 'all')):
+            raise ValueError
         extreme = None
-        if show != 'all':
+        if show in ('min', 'max'):
             extreme = (min if show == 'min' else max)(row[field] for row in rows)
         lines = []
         for i, row in enumerate(rows, 1):
-            if extreme is None or row[field] == extreme:
+            if (not single or i == show) and (extreme is None or row[field] == extreme):
                 unit = row['units'].get(field, '')
                 value = f'{row[field]} {unit}'.rstrip()
                 lines.append(f"第 {i} 个 {row['smiles']}（{labels[field]} {value}）")
-        heading = {'min': '最低', 'max': '最高', 'all': ''}[show]
+        heading = {'min': '最低', 'max': '最高'}.get(show, '')
         summary = (f'{labels[field]}{heading}的是' if heading else '') + '、'.join(lines) + '。'
         return self._ask_candidate(key, goal, self.candidate_records, summary)
 
@@ -366,8 +379,6 @@ class _GoalRun:
         elif isinstance(decision, ClarifyDecision):
             fields = set(decision.missing_fields)
             if 'candidate' in fields:
-                if self.candidate_records and revision == 1:
-                    return self._ask_candidate(*self.state.pending_candidate, self.candidate_records)
                 # Only carry verified rows belonging to the current plan or its delivered predecessor.
                 keys = [s.key for s in self._current_steps()] or [
                     k for k, r in self.observations.items() if r['revision'] == 0]
@@ -396,7 +407,23 @@ class _GoalRun:
                         case {'steps': [{'tool_name': 'candidate_view', 'arguments': view, **step_extra}],
                               **extra} if not (step_extra or extra):
                             return self._view_candidates(view)
+                waiting = self.candidate_records and revision == 1
+                replacing = waiting and decision.arguments.get('replace_candidate_batch') is True
+                if replacing:
+                    args = dict(decision.arguments)
+                    del args['replace_candidate_batch']
+                    decision = decision.model_copy(update={'arguments': args})
                 steps, difference = _bind_plan(decision, self.tools, self.binding_inputs, self.tool_budget)
+                if replacing and steps[0].tool_name != 'property_calculator':
+                    raise ValueError
+                if waiting:
+                    key, _ = self.state.pending_candidate
+                    waiting_rows = self.candidate_records[key]['arguments']['smiles']
+                    if any('smiles' in s.arguments and set(s.arguments['smiles']).issubset(waiting_rows) for s in steps):
+                        # Mentioning displayed structures authorizes viewing them. Re-running those
+                        # rows as a new batch also requires an affirmative instruction from the user.
+                        if not replacing or not _requested_batch_change(self.state.goal, steps[0].arguments['smiles']):
+                            raise ValueError
                 if self.selection and revision == 1 and any(
                         s.arguments.get('smiles') != [self.selection['smiles']] and not (
                             s.tool_name == 'property_calculator' and s.key in self.observations)
@@ -404,6 +431,9 @@ class _GoalRun:
                     raise ValueError
             except ValueError:
                 self.feedback = 'Plan rejected: use plan_goal, catalog arguments and explicit user inputs.'
+                if self.candidate_records and revision == 1:
+                    self.feedback += (' To inspect waiting rows use one candidate_view step. For an explicit new batch '
+                                      'set replace_candidate_batch:true alongside steps using the new user inputs.')
             else:
                 self.candidate_records = {}
                 self.difference = difference

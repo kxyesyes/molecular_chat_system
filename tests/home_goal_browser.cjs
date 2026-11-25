@@ -119,6 +119,7 @@ async function candidateQuestion({frames, waitFor, submit, page}) {
   await ask("按顺序比较 CCO、CCN、CO 的分子量", "completed", ["property_calculator"], /CCO：分子量 46\.07/);
   await ask(choose, "waiting_for_input", [], /1\. CCO、2\. CCN、3\. CO/);
   await ask("哪个最轻", "waiting_for_input", [], lightest);
+  await ask("先别选，CO 的分子量是多少？", "waiting_for_input", [], lightest);
   await exercise(page.context().browser(), emptySession);
   await ask("第二个", "completed", ["drug_likeness_assessment"], /CCN：Lipinski/);
   await ask("它比最重的轻多少", "completed", [], /CCN.*比 CCO.*轻 0\.99 Da/);
