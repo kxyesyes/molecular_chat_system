@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-import inspect
 from typing import Any
 
+from src.system.tool_adapter import call_with_cancel_event
 from src.agent.contracts import AgentErrorCode, AgentResult, ObservationStatus, ToolResult
 from src.agent.specialists import AgentTask
 from src.agent.tooling import TOOL_AGENT_OWNERS, RetryPolicy
@@ -87,8 +87,8 @@ class SpecialistDispatch:
             metadata=deepcopy(step.metadata),
         )
         try:
-            response = self._execute_specialist(
-                specialist, task, self.registry, cancel_event,
+            response = call_with_cancel_event(
+                specialist.execute_task, task, self.registry, cancel_event=cancel_event,
             )
             if len(response.tool_results) != 1:
                 return ToolResult.error_result(step.tool_name, AgentErrorCode.INVALID_OUTPUT,
@@ -118,32 +118,6 @@ class SpecialistDispatch:
             },
             status=ObservationStatus.CANCELLED,
         )
-
-    @staticmethod
-    def _execute_specialist(specialist, task, registry, cancel_event):
-        if cancel_event is None:
-            return specialist.execute_task(task, registry)
-        try:
-            signature = inspect.signature(specialist.execute_task)
-        except (TypeError, ValueError):
-            signature = None
-        parameter = signature.parameters.get("cancel_event") if signature else None
-        accepts_cancel = bool(
-            parameter is not None
-            and parameter.kind in (
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                inspect.Parameter.KEYWORD_ONLY,
-            )
-            or signature is not None and any(
-                item.kind is inspect.Parameter.VAR_KEYWORD
-                for item in signature.parameters.values()
-            )
-        )
-        if accepts_cancel:
-            return specialist.execute_task(
-                task, registry, cancel_event=cancel_event,
-            )
-        return specialist.execute_task(task, registry)
 
     @staticmethod
     def decorate_result(result: AgentResult, context, reused_steps) -> None:

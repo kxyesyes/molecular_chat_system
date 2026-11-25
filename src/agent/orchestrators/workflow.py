@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -10,6 +9,7 @@ from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from src.system.tool_adapter import call_with_cancel_event
 from src.agent.contracts import (
     AgentContext,
     AgentErrorCode,
@@ -155,8 +155,8 @@ class WorkflowOrchestrator:
         cancel_event: Any | None = None,
     ) -> ToolResult:
         if self.step_dispatch is not None:
-            result = self._call_step_dispatch(
-                self.step_dispatch, tool, input_data, step, cancel_event,
+            result = call_with_cancel_event(
+                self.step_dispatch, tool, input_data, step, cancel_event=cancel_event,
             )
             if not isinstance(result, ToolResult):
                 result = ToolResult.error_result(
@@ -218,38 +218,6 @@ class WorkflowOrchestrator:
     @staticmethod
     def _is_cancelled(cancel_event: Any | None) -> bool:
         return bool(cancel_event is not None and cancel_event.is_set())
-
-    @staticmethod
-    def _call_step_dispatch(dispatch, tool, input_data, step, cancel_event):
-        """Call both legacy and cancellation-aware delegated dispatch hooks."""
-        if cancel_event is None:
-            return dispatch(tool, input_data, step)
-        try:
-            signature = inspect.signature(dispatch)
-        except (TypeError, ValueError):
-            signature = None
-        accepts_cancel = bool(
-            signature is not None
-            and (
-                (
-                    signature.parameters.get("cancel_event") is not None
-                    and signature.parameters["cancel_event"].kind
-                    in (
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        inspect.Parameter.KEYWORD_ONLY,
-                    )
-                )
-                or any(
-                    parameter.kind is inspect.Parameter.VAR_KEYWORD
-                    for parameter in signature.parameters.values()
-                )
-            )
-        )
-        if accepts_cancel:
-            return dispatch(
-                tool, input_data, step, cancel_event=cancel_event,
-            )
-        return dispatch(tool, input_data, step)
 
     @staticmethod
     def _cancelled_result(step: WorkflowStep, *, running: bool) -> ToolResult:

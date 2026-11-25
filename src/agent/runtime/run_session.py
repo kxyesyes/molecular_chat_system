@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import inspect
 import json
 import re
 import sqlite3
@@ -13,6 +12,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
+from src.system.tool_adapter import call_with_cancel_event
 from src.agent.contracts import (
     AgentContext,
     AgentErrorCode,
@@ -1287,42 +1287,13 @@ class WorkflowRunSession:
             return
         self._tool_attempt_count += 1
         journal.tool_attempted = True
-        if self.cancel_event is None or not self._call_accepts_cancel_event(
-            self.orchestrator._execute_step
-        ):
-            # Preserve subclasses that implement the historical three-argument
-            # dispatch hook; cancellation is opt-in per session.
-            journal.result = self.orchestrator._execute_step(
-                tool, journal.input_data, step,
-            )
-        else:
-            journal.result = self.orchestrator._execute_step(
-                tool, journal.input_data, step,
-                cancel_event=self.cancel_event,
-            )
+        journal.result = call_with_cancel_event(
+            self.orchestrator._execute_step, tool, journal.input_data, step, cancel_event=self.cancel_event,
+        )
 
     def _cancel_requested(self) -> bool:
         return allocation_cancelled() or bool(
             self.cancel_event is not None and self.cancel_event.is_set()
-        )
-
-    @staticmethod
-    def _call_accepts_cancel_event(callable_obj) -> bool:
-        try:
-            signature = inspect.signature(callable_obj)
-        except (TypeError, ValueError):
-            return False
-        parameter = signature.parameters.get("cancel_event")
-        return bool(
-            parameter is not None
-            and parameter.kind in (
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                inspect.Parameter.KEYWORD_ONLY,
-            )
-            or any(
-                item.kind is inspect.Parameter.VAR_KEYWORD
-                for item in signature.parameters.values()
-            )
         )
 
     def _cancelled_web_step_publication(self, journal) -> bool:

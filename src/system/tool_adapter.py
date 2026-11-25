@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
+
+
+def call_with_cancel_event(callback, /, *args, cancel_event=None, **kwargs):
+    """Forward cancellation to participating hooks. Invoke the callback exactly once."""
+    if cancel_event is not None:
+        try:
+            parameters = inspect.signature(callback).parameters.values()
+        except (TypeError, ValueError):
+            parameters = ()
+        keyword_kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD or (p.name == "cancel_event" and p.kind in keyword_kinds)
+               for p in parameters):
+            kwargs["cancel_event"] = cancel_event
+    return callback(*args, **kwargs)
 
 
 def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
@@ -55,37 +70,7 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
     start = time.perf_counter()
 
     try:
-        cancel_event = kwargs.pop("cancel_event", None)
-        if cancel_event is not None:
-            import inspect
-
-            try:
-                signature = inspect.signature(tool.execute)
-            except (TypeError, ValueError):
-                signature = None
-            cancel_parameter = (
-                signature.parameters.get("cancel_event")
-                if signature is not None else None
-            )
-            accepts_cancel = bool(
-                signature is not None
-                and (
-                    (
-                        cancel_parameter is not None
-                        and cancel_parameter.kind in (
-                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                            inspect.Parameter.KEYWORD_ONLY,
-                        )
-                    )
-                    or any(
-                        parameter.kind is inspect.Parameter.VAR_KEYWORD
-                        for parameter in signature.parameters.values()
-                    )
-                )
-            )
-            if accepts_cancel:
-                kwargs["cancel_event"] = cancel_event
-        raw_result = tool.execute(query, **kwargs)
+        raw_result = call_with_cancel_event(tool.execute, query, **kwargs)
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
         if isinstance(raw_result, ToolResult):
