@@ -547,6 +547,13 @@ class WebTurnProjection:
             self._retain_activity_selection()
         return {'content': view['final_answer'], 'status': view['status']}
 
+    def _prior_candidate_rows(self):
+        record = self.history[-1].get('candidate_evidence') if self.history else None
+        if not isinstance(record, dict) or record.get('session_id') != self.session_id:
+            return {}, []
+        rows = record.get('candidates')
+        return record, rows if isinstance(rows, list) else []
+
     def followup(self, *, enable_tools, enable_rag=False, resolve_selection=None, activity_history=None):
         if self.mixed_activity_discussion:
             return None
@@ -1088,10 +1095,8 @@ class WebTurnProjection:
                 if not (isinstance(prior_query, str) and re.search(r'\bhERG\b', prior_query, re.I)
                         and re.search(r'\bDILI\b', prior_query, re.I)):
                     return {'content': '请明确实验目标和需要比较的预测指标，再确定优先顺序。', 'status': 'partial'}
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (not self.session_id or not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or not isinstance(rows, list) or len(rows) < 2
+            evidence, rows = self._prior_candidate_rows()
+            if (not self.session_id or len(rows) < 2
                     or any(not isinstance(row, dict) or not isinstance(row.get('canonical_smiles'), str)
                            or not any(isinstance(source, dict) and source.get('tool_name') == 'admet_predictor'
                                       and source.get('evidence_id') for source in row.get('sources', []))
@@ -1154,17 +1159,15 @@ class WebTurnProjection:
             r'\s*(?:请)?比较依据和不确定性[，,]\s*不要把预测当作实验结果[。.!！?？]?\s*',
             self.query, re.I)
         if priority_question:
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
+            evidence, rows = self._prior_candidate_rows()
             from src.agent.candidate_evidence_followup import _canonical
             from src.agent.contracts.target_request import analyze_target_request
             from src.target_identifiers import canonical_target_identifier
-            prior_target = analyze_target_request(evidence.get('query', '') if isinstance(evidence, dict) else '')
+            prior_target = analyze_target_request(evidence.get('query', ''))
             target_matches = (not prior_target.needs_clarification
                               and canonical_target_identifier(priority_question.group('target')) == prior_target.targets[0])
-            if (not self.session_id or not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or evidence.get('generation_scope_verified') is not True or not target_matches
-                    or not isinstance(rows, list) or not rows
+            if (not self.session_id or evidence.get('generation_scope_verified') is not True or not target_matches
+                    or not rows
                     or any(not isinstance(row, dict) or not isinstance(row.get('properties'), dict)
                            or not isinstance(row.get('canonical_smiles'), str)
                            or not any(source.get('tool_name') == 'property_calculator' and source.get('evidence_id')
@@ -1221,10 +1224,8 @@ class WebTurnProjection:
             r'(?:\s*(?P<dili>[+-]?(?:\d+(?:\.\d+)?|\.\d+)))?\s*分别代表什么[？?]\s*'
             r'(?:能否将它们|这些能)当作实验值或人体发生肝损伤的概率(?:吗)?[？?。]?\s*', self.query.strip(), re.I)
         if endpoint_explanation:
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (not self.session_id or not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict)
+            evidence, rows = self._prior_candidate_rows()
+            if (not self.session_id or len(rows) != 1 or not isinstance(rows[0], dict)
                     or not any(source.get('tool_name') == 'admet_predictor' and source.get('evidence_id')
                                for source in rows[0].get('sources', []) if isinstance(source, dict))):
                 return {'content': '无法核对上一轮唯一分子的 ADMET 预测记录；未重新预测。', 'status': 'not_calculated'}
@@ -1260,10 +1261,8 @@ class WebTurnProjection:
             r'\s*分别是多少[？?](?:\s*哪些指标缺失[？?])?'
             r'(?:\s*(?:不要|无需|不用)重新预测[。.!！]?)?\s*', self.query, re.I)
         if endpoint_question:
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (not self.session_id or not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict)
+            evidence, rows = self._prior_candidate_rows()
+            if (not self.session_id or len(rows) != 1 or not isinstance(rows[0], dict)
                     or not isinstance(rows[0].get('canonical_smiles'), str)
                     or not any(isinstance(source, dict) and source.get('tool_name') == 'admet_predictor'
                                and source.get('evidence_id') for source in rows[0].get('sources', []))):
@@ -1297,10 +1296,8 @@ class WebTurnProjection:
             r'(?:在)?(?:后续)?优化中(?:应|应该)?优先关注哪些性质[？?]'
             r'\s*(?:请)?说明依据和还需要哪些实验数据[。.!！?？]?', self.query.strip())
         if optimization_followup:
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or not isinstance(rows, list) or len(rows) != 1
+            evidence, rows = self._prior_candidate_rows()
+            if (len(rows) != 1
                     or not isinstance(rows[0], dict)
                     or not isinstance(rows[0].get('canonical_smiles'), str)
                     or not isinstance(rows[0].get('properties'), dict)
@@ -1335,14 +1332,12 @@ class WebTurnProjection:
             return {'content': '无法确认上一轮筛选结果，请先按明确条件筛选候选。', 'status': 'not_calculated'}
         if filter_request or filter_followup or explicit_filter:
             from src.agent.property_constraints import requested_property_bounds, check_property_bounds
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
+            evidence, rows = self._prior_candidate_rows()
             bounds, unknown = requested_property_bounds(
-                self.query if explicit_filter else evidence.get('query', '') if isinstance(evidence, dict) else '')
+                self.query if explicit_filter else evidence.get('query', ''))
             bounds = [bound for bound in bounds if bound['metric'] in {'molecular_weight', 'logp'}]
-            if (not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or evidence.get('generation_scope_verified') is not True
-                    or not isinstance(rows, list) or not rows or (explicit_filter and len(rows) != 2) or unknown
+            if (evidence.get('generation_scope_verified') is not True
+                    or not rows or (explicit_filter and len(rows) != 2) or unknown
                     or {bound['metric'] for bound in bounds} != {'molecular_weight', 'logp'}
                     or any(not isinstance(row, dict) or not isinstance(row.get('canonical_smiles'), str)
                            or not any(source.get('tool_name') == 'property_calculator' and source.get('evidence_id')
@@ -1443,10 +1438,8 @@ class WebTurnProjection:
             r'(?:它们|这两个分子|这些分子)的\s*log\s*d\s*(?:呢|是多少)[？?。]?',
             self.query.strip(), re.I)
         if enable_tools and (batch_logd_question or batch_logd_value):
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (isinstance(evidence, dict) and evidence.get('session_id') == self.session_id
-                    and isinstance(rows, list) and rows
+            evidence, rows = self._prior_candidate_rows()
+            if (rows
                     and all(isinstance(row, dict) and isinstance(row.get('canonical_smiles'), str)
                             and type(row.get('properties', {}).get('logp')) in (int, float)
                             and math.isfinite(row['properties']['logp'])
@@ -1464,10 +1457,8 @@ class WebTurnProjection:
             return {'content': '无法确认上一轮的 logP 记录；请提供结构并重新计算。',
                     'status': 'not_calculated'}
         if enable_tools and logd_question:
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (isinstance(evidence, dict) and evidence.get('session_id') == self.session_id
-                    and isinstance(rows, list) and len(rows) == 1
+            evidence, rows = self._prior_candidate_rows()
+            if (len(rows) == 1
                     and isinstance(rows[0].get('canonical_smiles'), str)
                     and type(rows[0].get('properties', {}).get('logp')) in (int, float)
                     and math.isfinite(rows[0]['properties']['logp'])
@@ -1500,10 +1491,8 @@ class WebTurnProjection:
             r'根据(?:刚才|上一轮)的性质[，,]\s*哪(?:一)?个(?:分子|候选)更适合继续优化[？?]'
             r'\s*还需要哪些证据[？?。]?', self.query.strip())
         if choice:
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or not isinstance(rows, list) or len(rows) != 2
+            evidence, rows = self._prior_candidate_rows()
+            if (len(rows) != 2
                     or any(not isinstance(row, dict) or not isinstance(row.get('canonical_smiles'), str)
                            or not isinstance(row.get('properties'), dict)
                            or any(type(row['properties'].get(key)) not in (int, float)
@@ -1577,9 +1566,8 @@ class WebTurnProjection:
             r'\s*(?:(?:能否|能不能|请)?说明(?:该|这个)?(?:结果|预测)(?:的)?(?:局限|限制|不确定性)[？?。]?)?',
             self.query.strip(), re.I)
         if bbb_explanation:
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if isinstance(evidence, dict) and evidence.get('session_id') == self.session_id and isinstance(rows, list) and len(rows) == 1:
+            evidence, rows = self._prior_candidate_rows()
+            if len(rows) == 1:
                 row = rows[0]
                 endpoint = row.get('admet', {}).get('endpoints', {}).get('BBB_Martins')
                 if (isinstance(row.get('canonical_smiles'), str) and isinstance(endpoint, dict)
@@ -1601,9 +1589,8 @@ class WebTurnProjection:
             r'能(?:否|不能|直接)?(?:直接)?当作口服生物利用度百分比吗[？?。]?',
             self.query.strip(), re.I)
         if bioavailability_question:
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if isinstance(evidence, dict) and evidence.get('session_id') == self.session_id and isinstance(rows, list) and len(rows) == 1:
+            evidence, rows = self._prior_candidate_rows()
+            if len(rows) == 1:
                 row = rows[0]
                 endpoint = row.get('admet', {}).get('endpoints', {}).get('Bioavailability_Ma')
                 if (isinstance(endpoint, dict) and endpoint.get('task_type') == 'classification'
@@ -1623,10 +1610,8 @@ class WebTurnProjection:
             r'(?:还)?需要哪些(?:实验(?:来)?验证|数据(?:才能)?判断)[？?。]?|'
             r'这些数值能保证(?:这个|该)分子口服吸收好吗[？?]\s*为什么[？?。]?)', self.query.strip())
         if oral_followup:
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or not isinstance(rows, list) or len(rows) != 1
+            evidence, rows = self._prior_candidate_rows()
+            if (len(rows) != 1
                     or not isinstance(rows[0].get('canonical_smiles'), str)
                     or not isinstance(rows[0].get('properties'), dict)
                     or not any(source.get('tool_name') == 'property_calculator' and source.get('evidence_id')
@@ -1658,10 +1643,8 @@ class WebTurnProjection:
                            '分子量': ('molecular_weight', '分子量', '.2f', ' Da')}
             metrics = list(dict.fromkeys(metric_info[name.casefold()] for name in
                 re.findall(r'LogP|TPSA|分子量|MW', property_values.group('metrics'), re.I)))
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or not isinstance(rows, list) or len(rows) != 1
+            evidence, rows = self._prior_candidate_rows()
+            if (len(rows) != 1
                     or not isinstance(rows[0].get('canonical_smiles'), str)
                     or not isinstance(rows[0].get('properties'), dict)
                     or not all(type(rows[0]['properties'].get(key)) in (int, float)
@@ -1688,10 +1671,8 @@ class WebTurnProjection:
         if comparison or candidate_lipophilicity:
             is_logp = bool(candidate_lipophilicity) or re.sub(r'\s+', '', comparison.group('metric')).casefold() in ('logp', '亲脂性')
             key, label, unit = ('logp', 'LogP', '') if is_logp else ('molecular_weight', '分子量', ' Da')
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or not isinstance(rows, list) or len(rows) != 2
+            evidence, rows = self._prior_candidate_rows()
+            if (len(rows) != 2
                     or any(not isinstance(row, dict) or not isinstance(row.get('canonical_smiles'), str)
                            or not isinstance(row.get('properties'), dict)
                            or type(row['properties'].get(key)) not in (int, float)
@@ -1735,10 +1716,8 @@ class WebTurnProjection:
             r'(?:哪一个|哪个)(?:的)?\s*hERG\s*(?:的)?预测值(?:更|较)(?P<direction>高|低)[？?。]?',
             self.query.strip(), re.I)
         if herg_comparison or herg_order:
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or not isinstance(rows, list) or len(rows) != 2
+            evidence, rows = self._prior_candidate_rows()
+            if (len(rows) != 2
                     or any(not isinstance(row.get('canonical_smiles'), str)
                            or not any(source.get('tool_name') == 'admet_predictor' and source.get('evidence_id')
                                       for source in row.get('sources', []))
@@ -1931,10 +1910,8 @@ class WebTurnProjection:
             r'(?:该|这个)分子(?:对人体|在人体中)安全吗[？?。]?', self.query.strip(), re.I)
         if endpoint_safety_question:
             names = re.findall(r'[A-Za-z][A-Za-z0-9_-]{0,99}', endpoint_safety_question.group('names'))
-            evidence = self.history[-1].get('candidate_evidence') if self.history else None
-            rows = evidence.get('candidates') if isinstance(evidence, dict) else None
-            if (not isinstance(evidence, dict) or evidence.get('session_id') != self.session_id
-                    or not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict)
+            evidence, rows = self._prior_candidate_rows()
+            if (len(rows) != 1 or not isinstance(rows[0], dict)
                     or not isinstance(rows[0].get('canonical_smiles'), str)
                     or not any(source.get('tool_name') == 'admet_predictor' and source.get('evidence_id')
                                for source in rows[0].get('sources', []))):

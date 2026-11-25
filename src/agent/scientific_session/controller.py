@@ -1008,90 +1008,45 @@ class ScientificSession:
                     state.waiting_for_input = False
                     state.answer = '本次回复未通过安全校验，未发布未经验证的内容。'
                     raise DecisionBoundaryError(exc.code) from None
-            if (not binding and restored is None and request_kind == 'scientific'
-                    and isinstance(decision, ToolDecision)
-                    and decision.tool_name in MOLECULAR_INPUT_TOOLS
-                    and not has_explicit_molecule(context.query)
-                    and effective_molecule(context) is None):
-                # A model proposal cannot authorize a molecular tool without a
-                # current user structure or an already selected molecule. Turn
-                # the unsafe proposal into a deterministic clarification before
-                # Pi can dispatch it; the original proposal is not executed or
-                # retained as a failed scientific observation.
-                decision = ClarifyDecision(
-                    version='1', action='clarify',
-                    question=scientific_clarification(context.query, required_tools),
-                    missing_fields=['SMILES'],
-                )
-            if (not binding) and request_kind == 'scientific':
+            if not binding and request_kind == 'scientific':
                 completed_tools = {result.tool_name for result in active_results(session) if usable(result)}
-                pending_molecular = sorted(
-                    (set(required_tools) - completed_tools) & set(adapters) & MOLECULAR_INPUT_TOOLS)
-                if pending_molecular:
-                    pending_tool = pending_molecular[0]
-                    if not has_explicit_molecule(context.query) and effective_molecule(context) is None:
-                        # A non-tool proposal cannot satisfy a molecular
-                        # obligation without a current structure. Keep the
-                        # deterministic clarification path above for all such
-                        # proposals, including model attempts to finish early.
-                        if not isinstance(decision, ToolDecision):
-                            decision = ClarifyDecision(
-                                version='1', action='clarify',
-                                question=scientific_clarification(context.query, required_tools),
-                                missing_fields=['SMILES'],
-                            )
-                    elif (not binding and restored is not None
-                          and clarified_query is not None
-                          and isinstance(decision, ClarifyDecision)
-                          and not any(result.tool_name == pending_tool for result in session.results)
-                          and not has_valid_molecular_input(restored['input_queries'][-1], required_tools)
-                          and has_valid_molecular_input(context.query, required_tools)):
-                        # Some local models repeat the clarification even after
-                        # the user supplies a valid molecule. The continuation
-                        # is already bound to this pending request, so replan
-                        # the same authorized molecular tool deterministically;
-                        # malformed or missing input stays on clarification.
-                        # A new clarification after an attempted tool or an
-                        # already valid input does not authorize another run.
-                        decision = ToolDecision(
-                            version='1', action='tool', tool_name=pending_tool,
-                            arguments={'input_ref': 'user'},
-                            purpose='use the molecule supplied in the clarification',
+                pending = (required_tools - completed_tools) & adapters.keys()
+                pending_molecular = min(pending & MOLECULAR_INPUT_TOOLS, default=None)
+                fresh_molecular_call = (restored is None and isinstance(decision, ToolDecision)
+                                        and decision.tool_name in MOLECULAR_INPUT_TOOLS)
+                if ((fresh_molecular_call or pending_molecular is not None)
+                        and not has_explicit_molecule(context.query) and effective_molecule(context) is None):
+                    # A fresh molecular proposal or an early finish cannot
+                    # substitute for a current structure or a selected molecule.
+                    if fresh_molecular_call or not isinstance(decision, ToolDecision):
+                        decision = ClarifyDecision(
+                            version='1', action='clarify',
+                            question=scientific_clarification(context.query, required_tools),
+                            missing_fields=['SMILES'],
                         )
-                    elif (not binding and state.protocol_repairs == 0
-                          and all(result.success for result in session.results)
-                          and isinstance(decision, FinishDecision)
-                          and pending_tool != 'activity_predictor'):
-                        # Do not accept an unsupported scientific finish or an
-                        # unnecessary clarification when a complete current
-                        # molecular input and a required pure molecular tool
-                        # are already available. The server chooses only the
-                        # required authorized tool; the tool supplies evidence.
+                elif (pending_molecular is not None and restored is not None and clarified_query is not None
+                      and isinstance(decision, ClarifyDecision)
+                      and not any(result.tool_name == pending_molecular for result in session.results)
+                      and not has_valid_molecular_input(restored['input_queries'][-1], required_tools)
+                      and has_valid_molecular_input(context.query, required_tools)):
+                    # The user supplied the missing structure for this pending
+                    # tool. A previous attempt cannot be retried by clarification.
+                    decision = ToolDecision(
+                        version='1', action='tool', tool_name=pending_molecular,
+                        arguments={'input_ref': 'user'},
+                        purpose='use the molecule supplied in the clarification',
+                    )
+                elif isinstance(decision, FinishDecision) and state.protocol_repairs == 0:
+                    # Molecular obligations take precedence. A model finish
+                    # never supplies authority for an optional activity review.
+                    pending_tool = pending_molecular or min(pending - {'activity_predictor'}, default=None)
+                    if pending_tool is not None and pending_tool != 'activity_predictor' and all(
+                            result.success for result in session.results):
                         decision = ToolDecision(
                             version='1', action='tool', tool_name=pending_tool,
                             arguments={'input_ref': 'user'},
-                            purpose='satisfy the pending molecular requirement',
-                        )
-                else:
-                    # Compound workflows can have a required non-molecular
-                    # step (for example ADMET) after the property tool. A
-                    # model finish is not permission to skip that compiled
-                    # obligation; continue the authorized sequence while
-                    # leaving optional activity review model-driven.
-                    pending_required = sorted(
-                        (set(required_tools) - completed_tools) & set(adapters)
-                    )
-                    pending_tool = next(
-                        (name for name in pending_required if name != 'activity_predictor'),
-                        None,
-                    )
-                    if (pending_tool is not None and state.protocol_repairs == 0
-                            and all(result.success for result in session.results)
-                            and isinstance(decision, FinishDecision)):
-                        decision = ToolDecision(
-                            version='1', action='tool', tool_name=pending_tool,
-                            arguments={'input_ref': 'user'},
-                            purpose='satisfy the pending workflow requirement',
+                            purpose=('satisfy the pending molecular requirement' if pending_molecular
+                                     else 'satisfy the pending workflow requirement'),
                         )
             supplied_target = (binding and policy.is_web and restored is not None
                                and isinstance(decision, (ClarifyDecision, FinishDecision))

@@ -60,6 +60,10 @@ ChatHandler → WebDecisionRuntime → PiAgentRuntime → 官方 Pi（runtime/pi
 
 ### 已接入 Registry 的类型契约
 
+工作流步骤、专家回调和旧工具统一由 `call_with_cancel_event` 传递取消信号。可接收该关键字的回调获得原事件，旧签名仍只调用一次。见 [tool_adapter.py](../src/system/tool_adapter.py)。
+
+ADMET 的 Web 预测在隔离子进程中运行模型。显式调用历史规则的 `predict_admet_with_adme_py` 按需加载兼容实现，已有预测记录仍由预测器读取和格式化。见 [predictor.py](../src/admet/predictor.py) 和 [legacy.py](../src/admet/legacy.py)。
+
 [build_tool_registry](../src/agent/tooling/factory.py) 按规范工具名选择以下专用 `LegacyPythonToolAdapter` 子类；没有为它们建立第二个执行器或结果规范化循环。
 
 | 规范工具名与实现 | 输入和结果边界 |
