@@ -103,9 +103,38 @@ async function emptySession({frames, waitFor, submit, page}) {
   console.log(JSON.stringify({test:"empty_session", trace:done.trace_id, answer:done.content}));
 }
 
+async function candidateQuestion({frames, waitFor, submit, page}) {
+  async function ask(question, status, expectedTools, expectedText) {
+    frames.length = 0;
+    await submit(question, "发送消息");
+    const done = await waitFor(f => f.type === "complete");
+    assert.equal(done.status, status, done.content);
+    assert.deepEqual(frames.filter(f => f.phase === "running").map(f => f.tool), expectedTools);
+    assert.match(done.content, expectedText);
+    await page.getByText(expectedText).last().waitFor();
+    console.log(JSON.stringify({test:"candidate_question", trace:done.trace_id, answer:done.content}));
+  }
+  const choose = "只给我选的那个分子查类药规则，先让我选择候选。";
+  await ask("按顺序比较 CCO、CCN、CO 的分子量", "completed", ["property_calculator"], /CCO：分子量 46\.07/);
+  await ask(choose, "waiting_for_input", [], /1\. CCO、2\. CCN、3\. CO/);
+  await exercise(page.context().browser(), emptySession);
+  await ask("第二个", "completed", ["drug_likeness_assessment"], /CCN：Lipinski/);
+  await ask("它比最重的轻多少", "completed", [], /CCN.*比 CCO.*轻 0\.99 Da/);
+  await ask(choose, "waiting_for_input", [], /2\. CCN/);
+  await ask("换一批，按顺序比较 CO 和 CCO 的分子量", "completed", ["property_calculator"], /CO：分子量 32\.04/);
+  await ask("这批第二个比最轻的重多少", "completed", [], /CCO.*比 CO.*重 14\.03 Da/);
+  await ask(choose, "waiting_for_input", [], /1\. CO、2\. CCO/);
+  await ask("取消", "cancelled", [], /已取消/);
+  await ask("第二个", "not_calculated", [], /请补充/);
+}
+
 (async () => {
   const browser = await chromium.launch({channel:"chrome"});
   try {
+    if (process.argv.includes("--clarification")) {
+      await exercise(browser, candidateQuestion);
+      return;
+    }
     if (!process.argv.includes("--followups")) {
       await exercise(browser, steering);
       await exercise(browser, context => condition(context, "CCN", true));
@@ -113,6 +142,7 @@ async function emptySession({frames, waitFor, submit, page}) {
     }
     await exercise(browser, finishedFollowups);
     await exercise(browser, emptySession);
+    await exercise(browser, candidateQuestion);
   } finally {
     await browser.close();
   }

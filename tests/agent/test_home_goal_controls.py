@@ -4,6 +4,60 @@ import json
 from tests.agent.test_web_decision_runtime import ActualSocket, actual_app, cookie_for
 
 
+def test_candidate_question_is_consumed_only_by_a_selection_on_its_socket(actual_app):
+    async def scenario():
+        batch = ["CCO", "CCN", "CO"]
+        pending_goal = "只查我选中的分子的类药规则，先让我选择"
+        async def respond(payload):
+            current = json.loads(payload["messages"][-1]["content"])
+            goal = current["goal"]
+            observations = current["observations"]
+            selection = current.get("candidate_selection")
+            if goal == pending_goal or goal == "第二个" and not selection:
+                return dict(version="1", action="clarify", question="哪一个？", missing_fields=["candidate"])
+            if selection:
+                assert selection == dict(goal=pending_goal, position=2, smiles="CCN")
+                tool, inputs = "drug_likeness_assessment", ["CCN"]
+                if goal == "第二个" and not current["plan_revision"] and not current["feedback"]:
+                    inputs = ["CO"]  # A stale model proposal must not dispatch for the third row.
+            else:
+                tool, inputs = "property_calculator", batch if goal != "换批比较 CO 和 CCO" else ["CO", "CCO"]
+                if goal == "换批比较 CO 和 CCO" and not current["plan_revision"]:
+                    assert not observations and not selection
+            if current["plan_revision"]:
+                return dict(version="1", action="finish", response_kind="scientific", text="完成",
+                            evidence_ids=[r["id"] for r in observations if r["arguments"]["smiles"] == inputs])
+            return dict(version="1", action="tool", tool_name="plan_goal", purpose="执行请求",
+                        arguments={"steps":[dict(tool_name=tool, arguments={"smiles": inputs})]})
+        async def ask(ws, message):
+            await ws.send(dict(type="goal_start", message=message, enable_tools=True))
+            calls = []
+            while True:
+                frame = await ws.receive()
+                if frame.get("phase") == "running":
+                    calls.append(frame["tool"])
+                if frame["type"] == "complete":
+                    return frame["status"], calls
+        async with actual_app(ordinary_policy=None, respond=respond) as bundle:
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as ws:
+                await ws.ready()
+                assert await ask(ws, "比较 CCO、CCN、CO") == ("completed", ["property_calculator"])
+                assert await ask(ws, pending_goal) == ("waiting_for_input", [])
+                async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as other:
+                    await other.ready()
+                    assert await ask(other, "第二个") == ("not_calculated", [])
+                assert await ask(ws, "第四个") == ("waiting_for_input", [])
+                assert await ask(ws, "第二个") == ("completed", ["drug_likeness_assessment"])
+                assert await ask(ws, pending_goal) == ("waiting_for_input", [])
+                assert await ask(ws, "CCN") == ("completed", [])
+                assert await ask(ws, pending_goal) == ("waiting_for_input", [])
+                assert await ask(ws, "换批比较 CO 和 CCO") == ("completed", ["property_calculator"])
+                assert await ask(ws, pending_goal) == ("waiting_for_input", [])
+                assert await ask(ws, "取消") == ("cancelled", [])
+                assert await ask(ws, "第二个") == ("not_calculated", [])
+    asyncio.run(scenario())
+
+
 def test_finished_goal_followups_use_only_delivered_socket_evidence(actual_app):
     from src.agent.evidence import EvidenceLedger
 

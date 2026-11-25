@@ -7,6 +7,7 @@ import time
 from uuid import uuid4
 
 from src.agent.contracts.decision import ClarifyDecision, FinishDecision, ToolDecision
+from src.agent.contracts.displayed_row import displayed_row_position
 from src.agent.pi_runtime.bridge import PiRuntimeBridge
 from src.agent.pi_runtime.provider import ModelProviderAdapter, decision_tool_call, tool_definitions
 from src.agent.runtime.allocation import AllocationStopped, begin_tool_dispatch
@@ -16,7 +17,7 @@ from .result_summary import TOOL_LABELS
 
 class GoalState:
     """One active turn. Revisions are applied on its WebSocket's event loop."""
-    def __init__(self, goal, previous=None):
+    def __init__(self, goal, previous=None, pending_candidate=None):
         self._texts = [goal]
         self._dispatch_lock = Lock()
         self.sealed = False
@@ -24,6 +25,8 @@ class GoalState:
         self.model_requests = 0
         self.previous = previous or {}
         self.completed_observations = {}
+        self.pending_candidate = pending_candidate
+        self.next_candidate_question = None
 
     @property
     def goal(self):
@@ -81,7 +84,11 @@ SMILES in their original order. In the same plan_goal arguments include a "mass_
 with "subject" and "reference" selectors taken from the question: each is a 1-based row number,
 "min" (the lightest), or "max" (the heaviest).
 The server computes the difference from the verified rows. When asked for rules on a selected candidate,
-plan drug_likeness_assessment only for its exact SMILES. No new property check is required."""
+plan drug_likeness_assessment only for its exact SMILES. No new property check is required.
+If the user asks to choose a candidate before proceeding, submit clarify with missing_fields ["candidate"]
+immediately. Do not guess or run any checks. A candidate_selection in the request is the user's verified
+reply to that clarification: perform its original goal for that SMILES now; do not ask again.
+For 'it' after a selection, use the selected_position in the property observation, in original row order."""
 
 
 def _bind_plan(decision, tools, user_texts, max_steps):
@@ -101,9 +108,12 @@ def _bind_plan(decision, tools, user_texts, max_steps):
     difference = decision.arguments.get('mass_difference')
     if 'mass_difference' in decision.arguments:
         batches = [step for step in steps if step.tool_name == 'property_calculator']
-        if (len(batches) != 1 or type(difference) is not dict or set(difference) != {'subject', 'reference'}
-                or not all((type(value) is int and 1 <= value <= len(batches[0].arguments['smiles']))
-                           or value in ('min', 'max') for value in difference.values())):
+        if len(batches) != 1 or type(difference) is not dict or set(difference) != {'subject', 'reference'}:
+            raise ValueError
+        difference = {k: v['position'] if type(v) is dict and set(v) == {'position'} and type(v['position']) is int
+                      else v for k, v in difference.items()}
+        if not all((type(value) is int and 1 <= value <= len(batches[0].arguments['smiles']))
+                   or value in ('min', 'max') for value in difference.values()):
             raise ValueError
     return steps, difference
 
@@ -170,6 +180,41 @@ class _GoalRun:
         self.expected_call = None
         self.stop_notice = ''
         self.answer = None
+        self.selection = None
+        if state.pending_candidate:
+            self._resolve_candidate(*state.pending_candidate)
+
+    def _ask_candidate(self, key, goal, records):
+        rows = records[key]['arguments']['smiles']
+        self.state.completed_observations = records
+        self.state.next_candidate_question = (key, goal)
+        self.state.sealed = True
+        choices = '、'.join(f'{i}. {s}' for i, s in enumerate(rows, 1))
+        self.answer = {'status': 'waiting_for_input', 'text': f'请选择候选（{choices}）。请回复序号或 SMILES。'}
+        return {'content': json.dumps({'status': 'waiting_for_input'}), 'terminate': True}
+
+    def _resolve_candidate(self, key, goal):
+        reply = self.state.goal.strip()
+        if reply.rstrip('。.!！').casefold() in ('取消', '取消选择', '取消这次选择', 'cancel'):
+            self.state.sealed = True
+            self.answer = {'status': 'cancelled', 'text': '已取消本次候选选择。'}
+            return
+        if key in self.observations:
+            rows = self.observations[key]['arguments']['smiles']
+            value = reply.removeprefix('我选').strip()
+            position = displayed_row_position(value, count=len(rows))
+            if value in rows:
+                position = rows.index(value) + 1 if rows.count(value) == 1 else 0
+            if position is not None:
+                if 1 <= position <= len(rows):
+                    self.selection = dict(goal=goal, position=position, smiles=rows[position-1])
+                    self.observations[key]['selected_position'] = position
+                else:
+                    self._ask_candidate(key, goal, self.observations)
+                return
+        # A different request supersedes this question and its candidate list.
+        self.observations.clear()
+        self.previous_inputs.clear()
 
     def _check_cancel(self):
         if self.cancelled():
@@ -238,6 +283,8 @@ class _GoalRun:
             catalog=self.tools.catalog, plan_revision=self.plan_revision,
             plan=[dict(tool_name=s.tool_name, arguments=s.arguments) for s in self.steps],
             observations=list(self.observations.values()), feedback=self.feedback)
+        if self.selection and self.proposal_revision == 1:
+            request['candidate_selection'] = self.selection
         messages = [*payload['messages'], {'role': 'user', 'content':
             json.dumps(request, ensure_ascii=False, separators=(',', ':'))}]
         timeout = min(self.deadline - time.monotonic(), 60)
@@ -283,6 +330,15 @@ class _GoalRun:
             return self._stop(self.stop_notice)
         elif isinstance(decision, ClarifyDecision):
             fields = set(decision.missing_fields)
+            if 'candidate' in fields:
+                # Only carry verified rows belonging to the current plan or its delivered predecessor.
+                keys = [s.key for s in self._current_steps()] or [
+                    k for k, r in self.observations.items() if r['revision'] == 0]
+                records = {k: self.observations[k] for k in keys if self.observations.get(k, {}).get('ok')}
+                batches = [k for k, r in records.items() if r['tool_name'] == 'property_calculator']
+                if len(batches) == 1:
+                    goal = self.selection['goal'] if self.selection and revision == 1 else self.state.goal
+                    return self._ask_candidate(batches[0], goal, records)
             if 'smiles' in fields:
                 notice = '请补充要分析的分子 SMILES。'
             elif 'uniprot_id' in fields:
@@ -299,6 +355,11 @@ class _GoalRun:
         else:
             try:
                 steps, difference = _bind_plan(decision, self.tools, self.binding_inputs, self.tool_budget)
+                if self.selection and revision == 1 and any(
+                        s.arguments.get('smiles') != [self.selection['smiles']] and not (
+                            s.tool_name == 'property_calculator' and s.key in self.observations)
+                        for s in steps):
+                    raise ValueError
             except ValueError:
                 self.feedback = 'Plan rejected: use plan_goal, catalog arguments and explicit user inputs.'
             else:
@@ -376,6 +437,8 @@ async def run_goal(state, *, model, mode, tools, progress, cancelled, input_limi
         deadline = time.monotonic() + 300
     run = _GoalRun(state, model, mode, tools, progress, cancelled, input_limit,
                    max_model_requests, max_tool_attempts, worker_owner, deadline)
+    if run.answer is not None:
+        return run.answer
     await PiRuntimeBridge().run({'model': {'id': 'medchat-controlled', 'contextWindow': 128000, 'maxTokens': 900},
         'systemPrompt': _INSTRUCTION, 'prompt': state.goal, 'maxModelCalls': max_model_requests,
         'tools': tool_definitions(['plan_goal', 'refresh_goal'])},
