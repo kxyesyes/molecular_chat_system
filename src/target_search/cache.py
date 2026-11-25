@@ -268,21 +268,6 @@ class TargetCacheRepository:
                     evidence.generation_id,
                     _validate_cache_relative_path(previous_path).name,
                 ).as_posix()
-                cursor = conn.execute(
-                    """
-                    UPDATE target_remote_cache
-                    SET cleanup_pending = 1, cleanup_quarantine_path = ?
-                    WHERE cache_key = ? AND generation_id = ?
-                        AND cleanup_pending = 0
-                    """,
-                    (
-                        previous_quarantine_path,
-                        cache_key,
-                        previous_generation_id,
-                    ),
-                )
-                if cursor.rowcount != 1:
-                    raise RuntimeError("coordinate generation changed during reservation")
             now_text = retrieved_at.isoformat()
             conn.execute(
                 """
@@ -329,11 +314,25 @@ class TargetCacheRepository:
         self, intent_id: str
     ) -> Optional[CachedEvidence]:
         intent = self._load_publication_intent(intent_id)
-        if intent is None or not self._prepare_previous_generation_locked(intent):
-            return None
-        intent = self._load_publication_intent(intent_id)
         if intent is None:
             return None
+        activated = False
+        try:
+            if not self._install_coordinate_locked(intent):
+                return None
+            self._mark_publication_installed(intent_id)
+            if not self._prepare_previous_generation_locked(intent):
+                return None
+            evidence = self._activate_publication_intent(intent_id)
+            activated = True
+            return evidence
+        finally:
+            if not activated and intent["previous_generation_id"] is not None:
+                # Keep the intent for recovery, but make its prior generation
+                # readable if this attempt (or an older writer) quarantined it.
+                self._rollback_publication_locked(intent, discard_intent=False)
+
+    def _install_coordinate_locked(self, intent: dict[str, Any]) -> bool:
         cache_root = get_cache_dir(self.project_root)
         staged = cache_root.joinpath(*intent["staged_relative"].parts)
         final = cache_root.joinpath(*intent["final_relative"].parts)
@@ -356,7 +355,7 @@ class TargetCacheRepository:
                 cache_root, intent["final_relative"].parts[:-1]
             )
             if destination_state != "ready":
-                return None
+                return False
             publish_state = _atomic_publish_coordinate(
                 cache_root,
                 staged,
@@ -365,13 +364,10 @@ class TargetCacheRepository:
                 intent["final_relative"].parts,
             )
             if publish_state != "moved":
-                return None
+                return False
             staged_state = "missing"
             final_state = "regular"
-        if staged_state != "missing" or final_state != "regular":
-            return None
-        self._mark_publication_installed(intent_id)
-        return self._activate_publication_intent(intent_id)
+        return staged_state == "missing" and final_state == "regular"
 
     def _load_publication_intent(self, intent_id: str) -> Optional[dict[str, Any]]:
         conn = get_connection(self.project_root)
@@ -454,6 +450,16 @@ class TargetCacheRepository:
         except (KeyError, TypeError, ValueError):
             return None
 
+    def _matches_previous_generation(
+        self, active: Optional[dict[str, Any]], intent: dict[str, Any]
+    ) -> bool:
+        evidence = self._validated_evidence(active)
+        return (
+            evidence is not None and evidence.record_type == "coordinate_file"
+            and evidence.generation_id == intent["previous_generation_id"]
+            and evidence.payload["path"] == intent["previous_relative"].as_posix()
+        )
+
     def _prepare_previous_generation_locked(self, intent: dict[str, Any]) -> bool:
         previous_generation_id = intent["previous_generation_id"]
         conn = get_connection(self.project_root)
@@ -462,24 +468,28 @@ class TargetCacheRepository:
                 "SELECT * FROM target_remote_cache WHERE cache_key = ?",
                 (intent["cache_key"],),
             ).fetchone()
+            if previous_generation_id is None:
+                return active is None
+            if not self._matches_previous_generation(active, intent):
+                return False
+            quarantine_path = intent["previous_quarantine_relative"].as_posix()
+            if active["cleanup_pending"] == 0:
+                with conn:
+                    marked = conn.execute(
+                        "UPDATE target_remote_cache SET cleanup_pending = 1, "
+                        "cleanup_quarantine_path = ? WHERE cache_key = ? "
+                        "AND generation_id = ? AND cleanup_pending = 0",
+                        (quarantine_path, intent["cache_key"], previous_generation_id),
+                    )
+                    if marked.rowcount != 1:
+                        return False
+            elif (
+                active["cleanup_pending"] != 1
+                or active["cleanup_quarantine_path"] != quarantine_path
+            ):
+                return False
         finally:
             conn.close()
-        if previous_generation_id is None:
-            return active is None
-        active_evidence = self._validated_evidence(active)
-        if (
-            active is None
-            or active_evidence is None
-            or active_evidence.record_type != "coordinate_file"
-            or active["generation_id"] != previous_generation_id
-            or active["record_type"] != "coordinate_file"
-            or active["cleanup_pending"] != 1
-            or active["cleanup_quarantine_path"]
-            != intent["previous_quarantine_relative"].as_posix()
-            or active_evidence.payload["path"]
-            != intent["previous_relative"].as_posix()
-        ):
-            return False
         cache_root = get_cache_dir(self.project_root)
         source = cache_root.joinpath(*intent["previous_relative"].parts)
         quarantine = cache_root.joinpath(
@@ -747,7 +757,7 @@ class TargetCacheRepository:
                 cache_root, final, intent["final_relative"].parts
             )
             if staged_state == "missing" and final_state == "missing":
-                self._abort_publication_intent_locked(intent)
+                self._rollback_publication_locked(intent, discard_intent=True)
                 continue
             if (
                 (staged_state == "regular" and final_state == "missing")
@@ -916,8 +926,28 @@ class TargetCacheRepository:
         finally:
             conn.close()
 
-    def _abort_publication_intent_locked(self, intent: dict[str, Any]) -> None:
+    def _rollback_publication_locked(
+        self, intent: dict[str, Any], *, discard_intent: bool
+    ) -> None:
         previous_generation_id = intent["previous_generation_id"]
+        if previous_generation_id is not None:
+            conn = get_connection(self.project_root)
+            try:
+                active = conn.execute(
+                    "SELECT * FROM target_remote_cache WHERE cache_key = ?",
+                    (intent["cache_key"],),
+                ).fetchone()
+            finally:
+                conn.close()
+            if not self._matches_previous_generation(active, intent):
+                return
+            if not active["cleanup_pending"]:
+                # A failed install did not touch the previous generation.
+                if not discard_intent:
+                    return
+                previous_generation_id = None
+            elif active["cleanup_quarantine_path"] != intent["previous_quarantine_relative"].as_posix():
+                return
         if previous_generation_id is not None:
             cache_root = get_cache_dir(self.project_root)
             source = cache_root.joinpath(*intent["previous_relative"].parts)
@@ -963,11 +993,11 @@ class TargetCacheRepository:
                 if cursor.rowcount != 1:
                     conn.rollback()
                     return
-            conn.execute(
-                "DELETE FROM target_coordinate_publication_intents "
-                "WHERE intent_id = ?",
-                (intent["intent_id"],),
-            )
+            if discard_intent:
+                conn.execute(
+                    "DELETE FROM target_coordinate_publication_intents WHERE intent_id = ?",
+                    (intent["intent_id"],),
+                )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1753,6 +1783,11 @@ def _due_active_rows(
             FROM target_remote_cache
             WHERE next_retry_epoch <= ?
                 AND (cleanup_pending = 1 OR expires_epoch <= ?)
+                AND NOT EXISTS (
+                    SELECT 1 FROM target_coordinate_publication_intents AS intent
+                    WHERE intent.cache_key = target_remote_cache.cache_key
+                      AND intent.previous_generation_id = target_remote_cache.generation_id
+                )
             ORDER BY cleanup_pending DESC, expires_epoch, cache_key
             LIMIT ?
             """,
