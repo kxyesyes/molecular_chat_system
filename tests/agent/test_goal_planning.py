@@ -85,6 +85,31 @@ class Tools:
         return {"ok": True, "message": "verified " + step.tool_name, "facts": {"value": 46.07}}
 
 
+@pytest.mark.parametrize("repeat_error", [False, True])
+def test_repair_malformed_native_plan_before_dispatch(repeat_error):
+    from src.agent.contracts import AgentErrorCode, AgentExecutionError
+
+    class Provider:
+        calls = 0
+
+        async def decide(self, messages, **kwargs):
+            self.calls += 1
+            request = json.loads(messages[-1]["content"])
+            if self.calls > 1 and not repeat_error:
+                if self.calls == 2:
+                    assert "invalid_decision_json" in request["feedback"]
+                    return DecisionResponse(plan(PROPERTY), None, "p1", {})
+                return DecisionResponse(finish(request["observations"][0]["id"]), None, "p2", {})
+            return DecisionResponse(None, AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, "invalid plan",
+                {"reason": "invalid_decision_json"}), None, {"mode": "native", "native_response_shape": {
+                    "call_count": 1, "content_present": False, "function_name_valid": True, "call_id_valid": True}})
+
+    model, tools = Provider(), Tools()
+    result = asyncio.run(run(GoalState("inspect CCO"), model, tools))
+    assert (result["status"], len(tools.calls), model.calls) == (
+        ("not_calculated", 0, 2) if repeat_error else ("completed", 1, 3))
+
+
 async def run(state, model, tools, progress=None, **budget):
     async def quiet(*args):
         pass

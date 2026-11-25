@@ -13,6 +13,7 @@ from src.agent.pi_runtime.bridge import PiRuntimeBridge
 from src.agent.pi_runtime.provider import ModelProviderAdapter, decision_tool_call, tool_definitions
 from src.agent.runtime.allocation import AllocationStopped, begin_tool_dispatch
 from src.agent.scientific_session.decision_execution import settle_owned_call
+from src.agent.scientific_session.decision_policy import schema_correction
 from .result_summary import TOOL_LABELS
 
 
@@ -198,6 +199,7 @@ class _GoalRun:
         self.expected_call = None
         self.stop_notice = ''
         self.answer = None
+        self.repair_used = False
         self.selection = None
         self.candidate_records = {}
         if state.pending_candidate:
@@ -351,11 +353,14 @@ class _GoalRun:
             else:
                 if response.success:
                     self.decision = response.decision
+                elif not self.repair_used and (correction := schema_correction(response)):
+                    self.repair_used = True
+                    self.feedback = correction
                 else:
                     self.stop_notice = '模型没有返回可用的计划。'
         self._check_cancel()
         proposal = self.decision
-        if (self.proposal_revision != self.state.revision or self.stop_notice
+        if (self.proposal_revision != self.state.revision or proposal is None or self.stop_notice
                 or isinstance(proposal, ToolDecision) and proposal.tool_name != 'plan_goal'):
             # This non-scientific callback acknowledges stale/invalid proposals
             # without sending an unregistered or stale tool call to the Pi host.
@@ -400,7 +405,7 @@ class _GoalRun:
             if steps and len(ids) == len(self.steps) and set(ids) == set(decision.evidence_ids):
                 return self._stop(completed=True)
             self.feedback = 'Finish rejected: replan missing checks; cite exactly the current matching receipts.'
-        else:
+        elif isinstance(decision, ToolDecision):
             try:
                 if self.candidate_records and revision == 1 and decision.tool_name == 'plan_goal':
                     match decision.arguments:
