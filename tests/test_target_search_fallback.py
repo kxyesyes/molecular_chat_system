@@ -811,6 +811,69 @@ def test_coordinate_publication_never_replaces_an_untracked_destination(
     assert repository.get("coordinate:occupied", allow_stale=True) is None
 
 
+@pytest.mark.parametrize("failure", ["install", "activate"])
+def test_failed_coordinate_replacement_keeps_previous_readable_until_recovery(
+    project_root, clock, monkeypatch, failure
+):
+    from src.target_search import cache
+    from src.target_search.database import get_cache_dir
+
+    repo = cache.TargetCacheRepository(project_root, clock)
+    key = "coordinate:replacement"
+    old = _publish_coordinate(repo, project_root, key, "old.cif", content="old")
+    root = get_cache_dir(project_root)
+
+    with monkeypatch.context() as patch:
+        if failure == "install":
+            def fail_install(*args):
+                assert repo.get(key) == old
+                return "transient_error"
+
+            patch.setattr(cache, "_atomic_publish_coordinate", fail_install)
+        else:
+            def fail_activation(intent_id):
+                raise OSError("activation failed")
+
+            patch.setattr(repo, "_activate_publication_intent", fail_activation)
+        with pytest.raises(OSError):
+            _publish_coordinate(repo, project_root, key, "new.cif", content="new")
+        assert repo.get(key) == old
+        assert (root / old.payload["path"]).read_bytes() == b"old"
+
+    recovered = cache.TargetCacheRepository(project_root, clock).get(key)
+    assert recovered.generation_id != old.generation_id
+    assert (root / recovered.payload["path"]).read_bytes() == b"new"
+
+
+def test_abandoned_replacement_releases_key_without_retiring_old_coordinate(
+    project_root, clock, monkeypatch
+):
+    from src.target_search import cache
+    from src.target_search.database import get_cache_dir
+
+    repo = cache.TargetCacheRepository(project_root, clock)
+    key = "coordinate:retry"
+    old = _publish_coordinate(repo, project_root, key, "old.cif", content="old")
+    root = get_cache_dir(project_root)
+    staged = root / ".incoming/replacement"
+    staged.write_bytes(b"abandoned")
+    with monkeypatch.context() as patch:
+        patch.setattr(cache, "_atomic_publish_coordinate", lambda *args: "transient_error")
+        with pytest.raises(OSError):
+            repo.publish_coordinate(key, "RCSB_PDB", key, staged_path=".incoming/replacement",
+                                    coordinate_suffix=".cif")
+        clock.value = old.expires_at + timedelta(seconds=1)
+        repo.cleanup_expired()
+        assert repo.get(key) is None
+        assert repo.get(key, allow_stale=True).generation_id == old.generation_id
+    staged.unlink()
+    reopened = cache.TargetCacheRepository(project_root, clock)
+    assert reopened.get(key, allow_stale=True).generation_id == old.generation_id
+    assert (root / old.payload["path"]).read_bytes() == b"old"
+    new = _publish_coordinate(reopened, project_root, key, "retry.cif", content="retry")
+    assert reopened.get(key) == new
+
+
 def test_same_key_coordinate_republish_retires_old_generation_without_orphan(
     project_root, clock
 ):
