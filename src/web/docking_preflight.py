@@ -11,7 +11,10 @@ from src.system.model_lifecycle import finish_on_cancel
 
 
 _PDB = re.compile(r"(?<![A-Za-z0-9])([1-9][A-Za-z0-9]{3})(?![A-Za-z0-9])")
-_TOKEN = re.compile(r"[A-Za-z0-9@+\-\[\]()=#\\/%.*:$]+")
+# Read whole list entries, including misspelled or malformed structures.
+_TOKEN = re.compile(r"(?:(?=[!-~])[^,;])+")
+_JOIN = re.compile(r"\s*(?:、|，|,|以及|和|\band\b)\s*", re.I)
+_SEPARATOR = re.compile(_JOIN.pattern + r"|\s+", re.I)
 _SMILES = re.compile(r"(?:\[[^\[\]]+\]|Br|Cl|[BCNOPSFIHbcnops0-9@+\-()=#\\/%.*:$])+")
 _DOMAIN = re.compile(r"配体|受体|对接|预检|dock|ligand|preflight|receptor|PDB", re.I)
 _STAGES = {
@@ -50,9 +53,30 @@ def read_turn(query, owner, previous, max_ligands):
     if len(query) > 16384 or contains_secret_material(query):
         return None
     pdbs = set(match.upper() for match in _PDB.findall(query))
-    tokens = [token.rstrip(".") for token in _TOKEN.findall(query)]
-    inputs = tuple(t for t in tokens if _SMILES.fullmatch(t) and re.search("[A-Za-z]", t)
-                   and t.upper() not in pdbs)
+    tokens = [token for token in _TOKEN.finditer(query) if token[0].casefold() != "and"]
+    structures = [i for i, token in enumerate(tokens)
+                  if _SMILES.fullmatch(token[0].rstrip(".")) and re.search("[A-Za-z]", token[0])
+                  and token[0].upper() not in pdbs]
+    inputs = ()
+    if structures and (_DOMAIN.search(query) or pdbs):
+        first, last = structures[0], structures[-1]
+        # Include neighbouring list entries, even when their
+        # spelling would prevent them from being recognized as structures.
+        while (first and tokens[first - 1][0].upper() not in pdbs
+               and _JOIN.fullmatch(query[tokens[first - 1].end():tokens[first].start()])):
+            first -= 1
+        while (last + 1 < len(tokens) and tokens[last + 1][0].upper() not in pdbs
+               and _JOIN.fullmatch(query[tokens[last].end():tokens[last + 1].start()])):
+            last += 1
+        start, end = tokens[first].start(), tokens[last].end()
+        if query[:start].rstrip().endswith("、") or query[end:].lstrip().startswith("、"):
+            raise ValueError("清单中有无法识别的配体，请核对后重新提交完整清单。")
+        if last > first:
+            entries = _SEPARATOR.split(query[start:end].rstrip("."))
+            for ordinal, entry in enumerate(entries, 1):
+                if not _SMILES.fullmatch(entry):
+                    raise ValueError(f"第 {ordinal} 项不是完整的 SMILES，请核对后重新提交清单。")
+            inputs = tuple(entries)
     if len(inputs) >= 2 and (_DOMAIN.search(query) or pdbs):
         if len(inputs) > max_ligands:
             raise ValueError(f"本次最多可预检 {max_ligands} 个配体。")

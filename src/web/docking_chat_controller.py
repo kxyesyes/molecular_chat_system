@@ -192,7 +192,9 @@ class DockingChatController:
                         batch = dict(pdb_id=parsed[0], ligands=parsed[1])
                 except ValueError as exc:
                     clarification = str(exc)
-            if (not batch and clarification is None and self._live(sender)
+            single = (not batch and clarification is None and
+                      assess_docking_request_text(query, enabled=True, enable_tools=True)['assessed'])
+            if (not single and not batch and clarification is None and self._live(sender)
                     and not payload.get('reference') and not payload.get('selection')
                     and getattr(self.runtime.application, 'model', None) is not None):
                 from .docking_preflight import read_turn
@@ -205,7 +207,7 @@ class DockingChatController:
                     clarification = str(exc)
             if (not preflight and not batch and clarification is None and (payload.get('reference') is not None
                     or payload.get('selection') is not None
-                    or not assess_docking_request_text(query, enabled=True, enable_tools=True)['assessed'])):
+                    or not single)):
                 return False
         if not self._live(sender):
             return True

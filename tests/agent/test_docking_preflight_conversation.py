@@ -1,11 +1,46 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from src.system.model_lifecycle import ModelRequestGate
 from tests.agent.test_docking_chat_controller import controller, frames, settle
 from tests.agent.test_docking_control_feedback import runtime_sender
 from tests.agent.test_docking_view_delivery import socket_for
 from tests.agent.test_web_docking_coordinator import Rig
+
+
+@pytest.mark.parametrize("items,ordinal", [
+    ("bad_smiles、CCO、CCN", 1), ("CCO、bad_smiles、CCN", 2), ("CCO、CCN、bad_smiles", 3),
+])
+def test_preflight_rejects_incomplete_ligand_list(items, ordinal):
+    from src.web.docking_preflight import read_turn
+
+    with pytest.raises(ValueError, match=f"第 {ordinal} 项"):
+        read_turn(f"PDB 6SAM，配体 {items}，全部都要通过预检。", "owner", None, 100)
+
+
+def test_explicit_single_docking_replaces_previous_preflight(tmp_path, monkeypatch):
+    from src.web.docking_preflight import read_turn
+
+    async def run():
+        query = "用配体 CCC 与 PDB 6SAM 进行分子对接。"
+        rig = Rig(tmp_path)
+        runtime, sender = runtime_sender(socket_for())
+        sender._ligand_preflight = read_turn("PDB 6SAM，配体 CCO、CCN，先预检。",
+            sender.websocket.scope["agent_session_id"], None, 100)
+        runtime.application.model = object()
+        received = []
+        async with rig.client() as client:
+            c = controller(runtime, rig.coordinator(client), enabled=True)
+            async def begin(sender, attachment, text, history, structure, **kwargs):
+                received.append((text, kwargs))
+            monkeypatch.setattr(c, "_begin", begin)
+            assert await c.handle(sender, {"message": query})
+            await settle(runtime)
+            assert received == [(query, {})]
+            assert sender._ligand_preflight is None
+    asyncio.run(run())
 
 
 def test_unavailable_model_never_starts_a_preparation(tmp_path):
