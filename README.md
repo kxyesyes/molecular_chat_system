@@ -55,6 +55,8 @@ Python/Node 依赖、npm manifest/锁文件，并按该版本执行 `npm ci`，�
 
 单 worker 部署默认启用首页聊天对接。配置本地对接工具链后，可在首页发起请求，核对输入并确认运行。使用多个 Web worker 时请设置 `MEDCHAT_CHAT_DOCKING_ENABLED=0`。详见[部署说明](deployment/README.md)。
 
+在首页检索并确认实验结构后，可以说“把 CCO 和 CCN 分别与 PDB 6SAM 对接”，也可以从同一组已确认的候选卡片中点名“把候选 3 和 1 都与刚才的受体对接”。选择链与参考残基，核对盒参数和完整配体清单后，一次确认即可运行整批。结果保留原编号和请求顺序，每个成功配体都可单独下载构象。
+
 ### 主模型接入与一次保存
 
 首页默认使用 DeepSeek 官方 OpenAI 兼容接口 `https://api.deepseek.com/chat/completions`、

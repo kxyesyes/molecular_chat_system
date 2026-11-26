@@ -170,6 +170,22 @@ def test_existing_task_is_not_treated_as_a_waiting_draft(rig):
     assert snapshot(rig) == before
 
 
+def test_batch_parent_only_releases_the_draft_with_its_exact_binding(rig):
+    digest = 'a' * 64
+    with connection(rig.store.db_path) as conn:
+        conn.execute("""INSERT INTO tasks(task_id,task_type,owner_session_id,status,created_at,updated_at)
+            VALUES ('task-1','home_docking_batch','owner-1','running','test','test')""")
+        conn.execute("""INSERT INTO home_docking_batches VALUES('task-1','1ABC','generation',
+            json_object('binding_digest',?))""", (digest,))
+    before = snapshot(rig)
+    for invalid in (None, 'b' * 64):
+        reject(lambda: close(rig, batch_binding_digest=invalid), 'consent_not_waiting')
+    assert snapshot(rig) == before
+    assert close(rig, batch_binding_digest=digest)
+    after = snapshot(rig)
+    assert after['tasks'] == before['tasks'] and after['docking_consents'][0]['state'] == 'REVOKED'
+
+
 @pytest.mark.parametrize("field", ["preparation_id", "owner_session_id", "task_id",
                                    "trace_id", "origin_turn_id", "refinement_revision"])
 def test_stored_identity_must_match_columns_and_expected_context(rig, field):

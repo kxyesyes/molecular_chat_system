@@ -77,7 +77,7 @@ class Element {
   closest(selector) {return this.matches(selector) ? this : this.parentNode?.closest(selector) || null;}
 }
 
-function loadHome({request, fetchDetails, format = String, storedPointer = null, storedWaiting = null,
+function loadHome({request, fetchDetails, dockingFetch, format = String, storedPointer = null, storedWaiting = null,
                    advancedConfig = {ragCount: 3, temperature: 0.7, molCount: 1}} = {}) {
   const body = new Element("body"); body.root = true;
   const composer = body.appendChild(new Element("div")); composer.className = "chat-composer";
@@ -106,9 +106,9 @@ function loadHome({request, fetchDetails, format = String, storedPointer = null,
   const renderer = {getCurrentTime: () => "12:00", updateConnectionStatus() {}, showNotification() {}};
   const window = {location: {host: "example.invalid", protocol: "http:"}, addEventListener() {},
     sessionStorage: {
-      getItem: key => key === "medchat.decision.waiting.v1" ? storage.get(key) || null : stored,
-      setItem: (key, value) => {if (key === "medchat.decision.waiting.v1") storage.set(key, value); else stored = value;},
-      removeItem: key => {if (key === "medchat.decision.waiting.v1") storage.delete(key); else stored = null;},
+      getItem: key => key.startsWith("medchat.decision.") || key.startsWith("medchat.docking.") ? storage.get(key) || null : stored,
+      setItem: (key, value) => {if (key.startsWith("medchat.decision.") || key.startsWith("medchat.docking.")) storage.set(key, value); else stored = value;},
+      removeItem: key => {if (key.startsWith("medchat.decision.") || key.startsWith("medchat.docking.")) storage.delete(key); else stored = null;},
     },
     HomeChatRenderer: renderer, WebSocket: Socket,
     HomeResultDetails: {
@@ -123,11 +123,13 @@ function loadHome({request, fetchDetails, format = String, storedPointer = null,
     HomeChatRenderer: renderer, HomeFormatters: {formatContent: (s, options) => {formatCalls.push(options); return format(s);}},
     HomeAdvancedOptions: {getConfig: () => ({...advancedConfig})},
     setTimeout: (fn, ms) => {timers.set(++timer, {fn, ms}); return timer;}, clearTimeout: id => timers.delete(id),
-    fetch: async (url, options) => {requests.push([url, JSON.parse(options.body)]);
+    fetch: async (url, options) => {
+      if (dockingFetch && url.startsWith("/api/agent/docking/")) return dockingFetch(url, options);
+      requests.push([url, JSON.parse(options.body)]);
       return {ok: true, json: async () => vm.runInContext("JSON.parse", context)(JSON.stringify({success: true,
         data: request ? await request(url, JSON.parse(options.body)) : {confirmed: true}}))};},
   });
-  for (const file of ["state.js", "chat_renderer.js", "config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js", "docking_consent.js"]) {
+  for (const file of ["state.js", "chat_renderer.js", "config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js", "docking_batch.js", "docking_consent.js"]) {
     vm.runInContext(fs.readFileSync(path.join(home, file), "utf8"), context, {filename: file});
   }
   context.HomeChatRenderer = window.HomeChatRenderer = Object.assign(window.HomeChatRenderer, renderer);
@@ -254,6 +256,23 @@ async function run() {
     assert(!h.render.elements.sendBtn.disabled && h.input.value === "刚编辑的目标");
     assert.equal(h.chat.querySelectorAll(".user-message").length, 1);
     assert(notices.some(msg => msg.includes("目标修改未生效")));
+  });
+  await test("reload restores an ordered batch in the chat using only its owner-scoped GET", async () => {
+    const reads = [];
+    const h = loadHome({dockingFetch: async (url, options) => {
+      reads.push([url, options.method, options.credentials]);
+      return {ok: true, json: async () => ({task_id: trace, status: "partial", pdb_id: "6SAM",
+        rows: [{ordinal: 3, smiles: "CCO", status: "completed", best_energy: -3.1, total_poses: 2,
+          download_path: `/api/agent/docking/tasks/${trace}/batch-poses/3`},
+        {ordinal: 1, smiles: "CCN", status: "failed", error: "配体转换失败"}]})};
+    }});
+    h.storage.set("medchat.docking.batch.task.v1", trace);
+    h.ready("pi", true); await tick();
+    assert.deepEqual(reads, [[`/api/agent/docking/tasks/${trace}/batch-status`, "GET", "same-origin"]]);
+    assert.equal(h.chat.style.display, "");
+    assert(h.chat.textContent.includes("部分完成") && h.chat.textContent.includes("配体转换失败"));
+    assert(h.chat.textContent.indexOf("候选 3") < h.chat.textContent.indexOf("候选 1"));
+    assert(!h.button("确认并运行批量对接") && !h.button("取消批量对接"));
   });
   await test("a delivered target stays readable and the next draft waits for its own handoff", () => {
     const h = loadHome(); h.ready("pi", true); start(h);
@@ -1356,7 +1375,7 @@ async function run() {
     const scripts = [...template.matchAll(/<script\s+src="([^"]*\/home\/(?:main|scientific_references)\.js[^"]*)"/g)].map(m => m[1]);
     assert.deepEqual(scripts, [
       "/static/js/home/scientific_references.js?v=20261124-selection-confirmation",
-      "/static/js/home/main.js?v=20261124-goal-steering",
+      "/static/js/home/main.js?v=20261126-batch",
     ]);
   });
   await test("WebSocket transport follows the page protocol", () => {

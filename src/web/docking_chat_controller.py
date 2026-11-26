@@ -5,6 +5,7 @@ attachment is private conversation bookkeeping, not a transferable capability.
 The default remains disabled until trusted application assembly enables it.
 """
 import asyncio
+import hashlib
 from copy import deepcopy
 from dataclasses import dataclass
 import json
@@ -84,6 +85,8 @@ class DockingChatController:
                     len(sequence) if type(sequence) is list else -1, pointer is not None)
         if not self._live(sender) or sender.websocket.scope.get('agent_session_id') != owner:
             return False
+        if pointer is not None and pointer != getattr(sender, '_docking_structure', None):
+            sender._ligand_preflight = None
         sender._docking_structure = pointer
         return pointer is not None
 
@@ -105,7 +108,8 @@ class DockingChatController:
         return task
 
     async def _error(self, sender, code, *, rejected=False, settled_attachment=None,
-                     message=None, source_unavailable=False, preflight_unavailable=False):
+                     message=None, source_unavailable=False, preflight_unavailable=False,
+                     batch_clarification=False):
         owner = sender.websocket.scope.get('agent_session_id')
         def capture():
             if (not self._live(sender, settled_attachment)
@@ -119,6 +123,8 @@ class DockingChatController:
                 event['docking_preflight_unavailable'] = True
             if rejected:
                 event['docking_request_rejected'] = True
+            if batch_clarification:
+                event['docking_batch_clarification'] = True
             if settled_attachment is not None:
                 # This is a correlated failure receipt, not a scientific
                 # result. Generic watch errors never carry a release marker;
@@ -135,8 +141,8 @@ class DockingChatController:
     def _launch(self, sender, attachment, operation):
         async def drive():
             try:
-                await operation
-                if self._live(sender, attachment):
+                replied = await operation
+                if replied is not True and self._live(sender, attachment):
                     await self._show(sender, attachment)
             except asyncio.CancelledError:
                 await self._close(attachment)
@@ -161,6 +167,7 @@ class DockingChatController:
         if not self.enabled or type(payload) is not dict:
             return False
         kind = payload.get('type', 'chat')
+        batch, clarification, preflight = None, None, None
         control = kind in {'docking_watch', 'docking_refine'} if type(kind) is str else False
         if control:
             try:
@@ -168,11 +175,40 @@ class DockingChatController:
             except DockingControlError:
                 await self._error(sender, 'invalid_docking_control')
                 return True
-        elif (kind != 'chat' or payload.get('reference') is not None
-                or payload.get('selection') is not None
-                or not assess_docking_request_text(payload.get('message'),
-                    enabled=True, enable_tools=payload.get('enable_tools', True))['assessed']):
-            return False
+        else:
+            query = payload.get('message')
+            if kind != 'chat' or not isinstance(query, str) or payload.get('enable_tools', True) is not True:
+                return False
+            if self._live(sender) and ('对接' in query or 'dock' in query.lower()):
+                from .docking_batch_request import parse_batch_request
+                from src.system.env import get_int_env
+                try:
+                    parsed = await asyncio.to_thread(parse_batch_request, query,
+                        reference=payload.get('reference'), references=self.runtime.references,
+                        session_id=sender.websocket.scope['agent_session_id'],
+                        structure_context=getattr(sender, '_docking_structure', None),
+                        max_ligands=get_int_env('MEDCHAT_DOCKING_MAX_BATCH_LIGANDS', 100))
+                    if parsed:
+                        batch = dict(pdb_id=parsed[0], ligands=parsed[1])
+                except ValueError as exc:
+                    clarification = str(exc)
+            single = (not batch and clarification is None and
+                      assess_docking_request_text(query, enabled=True, enable_tools=True)['assessed'])
+            if (not single and not batch and clarification is None and self._live(sender)
+                    and not payload.get('reference') and not payload.get('selection')
+                    and getattr(self.runtime.application, 'model', None) is not None):
+                from .docking_preflight import read_turn
+                from src.system.env import get_int_env
+                try:
+                    preflight = read_turn(query, sender.websocket.scope['agent_session_id'],
+                        getattr(sender, '_ligand_preflight', None),
+                        get_int_env('MEDCHAT_DOCKING_MAX_BATCH_LIGANDS', 100))
+                except ValueError as exc:
+                    clarification = str(exc)
+            if (not preflight and not batch and clarification is None and (payload.get('reference') is not None
+                    or payload.get('selection') is not None
+                    or not single)):
+                return False
         if not self._live(sender):
             return True
         attachment = getattr(sender, '_chat_docking', None)
@@ -251,6 +287,10 @@ class DockingChatController:
             return True
         # Detach the caller's bounded plain history before the first await. The
         # coordinator remains the sole owner of the actual source snapshot.
+        if clarification is not None:
+            await self._error(sender, 'docking_unavailable', rejected=True,
+                              batch_clarification=True, message=clarification)
+            return True
         history = [] if history is None else history
         if (type(history) is not list or len(history) > 32
                 or any(type(item) is not dict or set(item) != {'role', 'content'}
@@ -261,6 +301,16 @@ class DockingChatController:
             return True
         history = [dict(item) for item in history]
         query = payload['message']
+        if preflight:
+            from .docking_preflight import choose_policy
+            refresh = getattr(self.runtime.application, '_refresh_llm_config_from_env', None)
+            if refresh:
+                await refresh()
+            policy = await choose_policy(self.runtime.application, query, preflight)
+            if policy == 'other':
+                return False
+            if not self._live(sender) or sender.websocket.scope['agent_session_id'] != owner:
+                return True
         structure = deepcopy(getattr(sender, '_docking_structure', None))
         attachment = _Attachment(owner, uuid4().hex, uuid4().hex)
         sender._chat_docking = attachment
@@ -275,24 +325,77 @@ class DockingChatController:
                                'trace_id': attachment.root_id}, ensure_ascii=False, allow_nan=False)
         await sender.send_text(None, capture=accepted, on_sent=mark_delivered)
         if delivered and self._live(sender, attachment):
-            self._launch(sender, attachment, self._begin(sender, attachment, query, history, structure))
+            sender._ligand_preflight = preflight
+            operation = (self._preflight(sender, attachment, query, history, structure, preflight, policy)
+                         if preflight else self._begin(sender, attachment, query, history, structure,
+                             **({'batch': batch} if batch else {})))
+            self._launch(sender, attachment, operation)
         return True
 
-    async def _begin(self, sender, attachment, query, history, structure):
+    async def _preflight(self, sender, attachment, query, history, structure, preflight, policy):
+        from .docking_preflight import check_ligands
+
+        def live():
+            return self._live(sender, attachment) and sender._ligand_preflight is preflight
+
+        if not live():
+            return True
+        text = None
+        if policy == 'clarify':
+            text = '请说明要预检哪些配体、解释哪项结果，或是否允许跳过未通过的配体。'
+        elif policy == 'unavailable':
+            text = '未能确认本次请求的意思，请重试。本次没有启动对接。'
+        elif policy in {'explain', 'compare_history'} and not preflight.rows:
+            text = '当前会话还没有这批配体的预检记录。可以先检查这批配体。'
+        else:
+            if not preflight.rows:
+                await check_ligands(preflight, live)
+            if not live():
+                return True
+            passed = [(i, result) for i, _, result in preflight.rows if result['ok']]
+            may_prepare = (policy == 'use_passed' or
+                           policy == 'require_all' and len(passed) == len(preflight.rows))
+            if passed and may_prepare and preflight.pdb:
+                batch = dict(pdb_id=preflight.pdb, ligands=[
+                    dict(ordinal=i, smiles=r['canonical_smiles']) for i, r in passed])
+                await self._begin(sender, attachment, query, history, structure, batch=batch,
+                                  prepared={i: r for i, r in passed}, skipped=preflight.skipped())
+                return False
+            text = preflight.report()
+            if policy == 'compare_history':
+                text += '\n当前记录只能说明本批的检查结果，缺少可核对的上次制备条件。'
+            elif passed and may_prepare and not preflight.pdb:
+                text += '\n请补充这批配体使用的受体 PDB 编号。'
+            elif policy == 'require_all' and len(passed) < len(preflight.rows):
+                text += '\n整批已暂停。'
+            text += '\n尚未提交对接任务。'
+        for frame in (dict(type='agent_result', display_answer=text), dict(type='complete', content=text)):
+            frame.update(status='failed' if policy == 'unavailable' else 'completed',
+                         trace_id=attachment.root_id, turn_id=attachment.origin)
+            await sender.send_text(None, capture=lambda: json.dumps(frame, ensure_ascii=False) if live() else None)
+        return True
+
+    async def _begin(self, sender, attachment, query, history, structure, *, batch=None, prepared=None, skipped=None):
         refresh = getattr(self.runtime.application, '_refresh_llm_config_from_env', None)
         if refresh is not None:
             await refresh()
         if not self._live(sender, attachment):
             return
+        metadata = {'chat_docking': True}
+        if batch is not None:
+            metadata['batch_request_sha256'] = hashlib.sha256(query.encode('utf-8')).hexdigest()
+            query = (f"用配体 {batch['ligands'][0]['smiles']} 与 PDB {batch['pdb_id']} 进行分子对接。"
+                     "使用共晶配体定义口袋。")
         await finish_on_cancel(asyncio.to_thread(self.runtime.store.start_run,
             dict(trace_id=attachment.root_id, session_id=attachment.owner,
-                 status='running', metadata={'chat_docking': True}), exclusive=True))
+                 status='running', metadata=metadata), exclusive=True))
         if not self._live(sender, attachment):
             return
         beginning = self._retain(asyncio.create_task(self.coordinator.begin(
             root_id=attachment.root_id, owner_session_id=attachment.owner,
             origin_turn_id=attachment.origin, query=query, history=history,
-            descriptors=[], enable_tools=True, mode=self.runtime.wire_mode, structure_context=structure)))
+            descriptors=[], enable_tools=True, mode=self.runtime.wire_mode, structure_context=structure,
+            **({'batch': batch} if batch else {}), **({'prepared': prepared, 'skipped': skipped} if prepared else {}))))
         try:
             # begin captures and installs its root before its first suspension.
             await asyncio.sleep(0)
@@ -427,6 +530,7 @@ class DockingChatController:
     async def disconnect(self, sender):
         attachment = getattr(sender, '_chat_docking', None)
         sender._docking_structure = None
+        sender._ligand_preflight = None
         sender._docking_history = ()
         if attachment is None or not attachment.active:
             return

@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Response, Body, Query
 from starlette.concurrency import run_in_threadpool
+from src.system.env import get_int_env as _get_int_env
 
 from src.system.redaction import normalize_warning_strings as _normalize_warning_strings
 from src.web.api_response import api_success
@@ -154,13 +155,6 @@ def _get_pharm3d_timeout(default: float = 25.0) -> float:
     except ValueError:
         return default
     return value if math.isfinite(value) and value >= 0.1 else default
-
-
-def _get_int_env(name: str, default: int, minimum: int = 1) -> int:
-    try:
-        return max(minimum, int(os.getenv(name, str(default))))
-    except ValueError:
-        return default
 
 
 async def _read_upload_limited(upload: UploadFile, label: str) -> bytes:

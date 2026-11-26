@@ -80,7 +80,9 @@
     "reason_code", "persistence_pending", "missing_fields", "preview", "result"];
   function normalize(value) {
     try {
-      if (!fields(value, eventKeys) || value.type !== "docking_event" || value.schema !== "DockingView@1" ||
+      if (!fields(value, [...eventKeys, "batch"], eventKeys) ||
+        Object.hasOwn(value, "batch") && !window.HomeDockingBatch?.validBatch(value.batch, value.task_id) ||
+        value.type !== "docking_event" || value.schema !== "DockingView@1" ||
         !["request_id", "root_trace_id", "task_id", "preparation_id", "origin_turn_id"].every(key => id(value[key])) ||
         value.request_id !== value.root_trace_id || !["revision", "sequence", "send_generation"].every(key => integer(value[key])) ||
         value.send_generation < 1 || !Object.hasOwn(statuses, value.view_status) || value.phase !== statuses[value.view_status][0] ||
@@ -103,6 +105,7 @@
   function create(options) {
     const doc = options.document || document, now = options.now || Date.now;
     const timer = options.setTimer || setTimeout, untimer = options.clearTimer || clearTimeout;
+    const batch = window.HomeDockingBatch?.create(options);
     let socket = null, enabled = false, pending = null;
     const cards = new Map();
     const node = (tag, text, parent) => {const el = doc.createElement(tag); if (text !== undefined) el.textContent = text; if (parent) parent.appendChild(el); return el;};
@@ -148,6 +151,7 @@
       rows.forEach(([label, value]) => {node("dt", label, list); node("dd", Array.isArray(value) ? value.join(", ") : String(value), list);});
     };
     function render(state) {
+      if (state.batchSubmitted) return;
       const event = state.event;
       state.source?.dispose(); state.source = null;
       state.epoch += 1;
@@ -158,10 +162,15 @@
       const showResult = event.view_status === "SUCCEEDED" && !state.stopped && !state.readOnly;
       const header = node("div", undefined, box); header.className = "docking-card-heading";
       if (!showResult) node("span", "分子对接", header).className = "docking-eyebrow";
-      const heading = node("h3", state.stopped ? (state.stopHeading || "结果未确认 / 本次确认已失效") : statuses[event.view_status][1], header);
+      const batchReview = event.batch && event.reason_code === "inputs_confirmed_staging_required";
+      const heading = node("h3", state.stopped ? (state.stopHeading || "结果未确认 / 本次确认已失效") :
+        batchReview ? "批量对接确认单" : statuses[event.view_status][1], header);
       heading.setAttribute("role", "status");
-      if (!showResult) node("p", `任务 ${event.task_id} · 修订 ${event.revision}`, box).className = "docking-identity";
+      if (!showResult && !event.batch) node("p", `任务 ${event.task_id} · 修订 ${event.revision}`, box).className = "docking-identity";
       if (state.notice) node("p", state.notice, box).className = "docking-notice";
+      for (const row of event.batch?.skipped || []) {
+        node("p", `已跳过候选 ${row.ordinal}：${row.reason}`, box);
+      }
       if (state.drainedFailure) return;
       if (event.cleanup_status === "pending" || event.persistence_pending || !event.segment_complete)
         node("p", "后台工作或清理尚未结束；这不是已完成的科学结果。", box);
@@ -191,7 +200,7 @@
         if (state.blocked) action("刷新状态", () => {if (state.epoch === epoch) watch(state);}, state.socket === socket);
         return;
       }
-      if (event.preview?.source && !state.stopped) {
+      if (event.preview?.source && !state.stopped && !batchReview) {
         const source = event.preview.source;
         table(box, [["实验结构", source.pdb_id], ["靶点", source.target.uniprot_id], ["物种 Taxonomy", source.target.taxonomy_id], ["结构 SHA-256", source.source_sha256]]);
         if (event.reason_code === "scientific_selection_required" && !state.pending && window.HomeDockingSourceSelection) {
@@ -211,7 +220,13 @@
         }
       }
       const prepared = event.preview?.prepared;
-      if (prepared && !state.stopped) {
+      if (batchReview && prepared?.confirmed_parameters && !state.stopped) {
+        batch.review(node("div", undefined, box), event, validClick, proof => {
+          state.batchSubmitted = true;
+          state.epoch += 1;
+          return batch.submit(box, event.batch, proof);
+        });
+      } else if (prepared && !state.stopped && !batchReview) {
         table(box, [["口袋参考残基", Object.values(prepared.reference_residue).join(" / ")],
           ["口袋规则", prepared.pocket_rule], ["边距 (Å)", prepared.pocket_margin], ["口袋原子数", prepared.pocket_atom_count],
           ["原始结构 SHA-256", prepared.source_sha256],
@@ -306,7 +321,11 @@
       action("刷新状态", () => {if (state.epoch === epoch) watch(state);}, state.socket === socket);
     }
     return {
-      configure(currentSocket, available) {socket = currentSocket; enabled = available === true; pending = null; notify();},
+      configure(currentSocket, available) {
+        socket = currentSocket; enabled = available === true; pending = null;
+        if (enabled) batch?.restore();
+        notify();
+      },
       begin(currentSocket, mountResponse) {
         if (enabled && currentSocket === socket && mountResponse) {
           for (const state of cards.values()) state.ownsComposer = false;
@@ -345,7 +364,8 @@
           }
           const failure = message.code === "docking_unavailable" && typeof message.docking_segment_complete === "boolean" && (attached || awaiting);
           if (rejected) {
-            pending.mountResponse("p").textContent = "对接请求未完成；未获得新的执行授权。请检查状态后重新发起。";
+            pending.mountResponse("p").textContent = message.docking_batch_clarification === true && typeof message.message === "string"
+              ? message.message : "对接请求未完成；未获得新的执行授权。请检查状态后重新发起。";
             pending = null;
             options.onRejected?.();
             notify();

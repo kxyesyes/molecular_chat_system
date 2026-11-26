@@ -201,6 +201,7 @@ class DockingExecution:
         consent_guard: Callable[..., None] | None = None,
         command_scope: CommandOwnershipScope | None = None,
         ownership_observer: Callable[[str], None] | None = None,
+        batch_receptor=None,
     ) -> dict[str, Any]:
         """Return a redacted verified result, never an unvalidated tool payload."""
 
@@ -255,6 +256,7 @@ class DockingExecution:
                             cancel_event=cancel_event,
                             **({"consent_guard": consent_guard} if consent_guard is not None else {}),
                             **({"command_gate": command_gate} if command_gate is not None else {}),
+                            **({"batch_receptor": batch_receptor} if batch_receptor is not None else {}),
                         )
                         if isinstance(outcome, PreparedDockingCompletion):
                             prepared = outcome
@@ -400,6 +402,7 @@ class DockingExecution:
         cancel_event: Any,
         consent_guard: Callable[..., None] | None = None,
         command_gate: _CommandLeaseGate | None = None,
+        batch_receptor=None,
     ) -> dict[str, Any] | PreparedDockingCompletion:
         inputs.verify_integrity()
         input_hash = _input_hash(inputs)
@@ -476,6 +479,8 @@ class DockingExecution:
                                                allowed_output_root=self._allowed_output_root)
                     if toolchain is not None:
                         adapter_binding["chat_toolchain"] = toolchain
+                        if batch_receptor is not None:
+                            adapter_binding["batch_receptor"] = batch_receptor
                     tool_result = execute_tool_compat(
                         MolecularDocking(**adapter_binding), payload, **control,
                     )
