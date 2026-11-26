@@ -46,6 +46,19 @@ def test_finish_replan_does_not_skip_required_dependency():
     assert next_required_web_step(steps, dependencies, completed=set()) is None
 
 
+def test_failed_observation_blocks_its_consumer_but_allows_independent_work():
+    steps = [_step("lookup", "target_database_search"), _step("interpret", "candidate_ranker"),
+             _step("properties", "property_calculator")]
+    steps[0].output_key = "target"
+    steps[1].metadata = {}
+    dependencies = {"lookup": (), "interpret": ("lookup",), "properties": ()}
+    def next_step():
+        return next_required_web_step(steps, dependencies, completed={"lookup"}, unusable={"lookup"})
+    assert next_step().name == "properties"
+    steps[1].metadata["workflow_optional_output_keys"] = ["target"]
+    assert next_step().name == "interpret"
+
+
 def test_web_plan_can_publish_partial_terminal_when_no_required_tool_is_missing():
     steps = [_step("baseline_properties", "property_calculator"),
              _step("baseline_admet", "admet_predictor", required=False),

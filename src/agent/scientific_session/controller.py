@@ -67,7 +67,7 @@ from .binding_policy import get_binding_policy
 _now = time.monotonic
 
 
-def next_required_web_step(steps, dependencies, *, completed):
+def next_required_web_step(steps, dependencies, *, completed, unusable=(), include_optional=False):
     """Return the next plan step that is ready after an early finish.
 
     This is a narrow recovery path for the Web binding: it advances only a
@@ -78,11 +78,14 @@ def next_required_web_step(steps, dependencies, *, completed):
     by_name = {step.name: step for step in steps}
     completed = set(completed)
     for step in steps:
-        if not step.required or step.name in completed:
+        if (not step.required and not include_optional) or step.name in completed:
             continue
-        if all(dependency in completed
-               or (dependency in by_name and not by_name[dependency].required)
-               for dependency in dependencies.get(step.name, ())):
+        needs = dependencies.get(step.name, ())
+        if any(dependency in unusable and by_name[dependency].output_key not in
+               step.metadata.get('workflow_optional_output_keys', ()) for dependency in needs):
+            continue
+        if all(dependency in completed or (not include_optional and dependency in by_name
+               and not by_name[dependency].required) for dependency in needs):
             return step
     return None
 
@@ -1062,18 +1065,23 @@ class ScientificSession:
                 # optional; resolver dependency checks still authorize the
                 # actual action and evidence closure remains unchanged.
                 from .web_requirements import workflow_steps
+                from .web_bindings import has_web_workflow_output
                 records = resolver.export_records()
-                completed_refs = set()
+                completed_refs, unusable = set(), set()
                 for result in resolver._observations().values():
                     step_ref = web_result_step_ref(result, records)
                     if step_ref is not None:
                         completed_refs.add(step_ref)
-                next_step = next_required_web_step(
-                    workflow_steps(requirements), requirements.dependencies,
-                    completed=completed_refs)
+                        if not has_web_workflow_output(result):
+                            unusable.add(step_ref)
+                steps = workflow_steps(requirements)
+                next_step = None
                 if repeat_evaluation or supplied_target:
-                    next_step = next((s for s in requirements.steps if s.name not in completed_refs
-                                     and set(requirements.dependencies[s.name]) <= completed_refs), next_step)
+                    next_step = next_required_web_step(steps, requirements.dependencies,
+                        completed=completed_refs, unusable=unusable, include_optional=True)
+                if next_step is None:
+                    next_step = next_required_web_step(steps, requirements.dependencies,
+                        completed=completed_refs, unusable=unusable)
                 if next_step is not None:
                     decision = ToolDecision(
                         version='1', action='tool', tool_name=next_step.tool_name,
