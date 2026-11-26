@@ -15,6 +15,13 @@ _PDB = re.compile(r"(?<![A-Za-z0-9])([1-9][A-Za-z0-9]{3})(?![A-Za-z0-9])")
 _TOKEN = re.compile(r"(?:(?=[!-~])[^,;])+")
 _JOIN = re.compile(r"\s*(?:、|，|,|以及|和|\band\b)\s*", re.I)
 _SEPARATOR = re.compile(_JOIN.pattern + r"|\s+", re.I)
+_LIST_LABEL = re.compile(r"(?:配体(?:清单|列表)?|\bligands?\b)\s*[:：]?\s*", re.I)
+_TRAILING_INSTRUCTION = re.compile(
+    r"[,，；;。]\s*(?:先|请|全部|都|只|检查|预检|开始|不要|暂不|分别|"
+    r"please\b|check\b|preflight\b)[^,，、；;。]*[。.!！]?\s*$", re.I)
+_TRAILING_RECEPTOR = re.compile(
+    r"(?:\s*[,，]?\s*(?:与|和|针对)|\s+(?:for|against|with)\b)\s*"
+    r"(?:PDB\s*[:：]?\s*)?[1-9][a-z0-9]{3}(?:\s*(?:进行)?(?:分子)?对接)?$", re.I)
 _SMILES = re.compile(r"(?:\[[^\[\]]+\]|Br|Cl|[BCNOPSFIHbcnops0-9@+\-()=#\\/%.*:$])+")
 _DOMAIN = re.compile(r"配体|受体|对接|预检|dock|ligand|preflight|receptor|PDB", re.I)
 _STAGES = {
@@ -53,12 +60,21 @@ def read_turn(query, owner, previous, max_ligands):
     if len(query) > 16384 or contains_secret_material(query):
         return None
     pdbs = set(match.upper() for match in _PDB.findall(query))
+    label = _LIST_LABEL.search(query)
+    explicit = ""
+    if label:
+        clause = _TRAILING_INSTRUCTION.sub("", query[label.end():]).strip().rstrip("。.!！")
+        explicit = _TRAILING_RECEPTOR.sub("", clause).strip()
     tokens = [token for token in _TOKEN.finditer(query) if token[0].casefold() != "and"]
     structures = [i for i, token in enumerate(tokens)
                   if _SMILES.fullmatch(token[0].rstrip(".")) and re.search("[A-Za-z]", token[0])
                   and token[0].upper() not in pdbs]
     inputs = ()
-    if structures and (_DOMAIN.search(query) or pdbs):
+    if _JOIN.search(explicit):
+        # An explicitly introduced list owns all its positions, including a
+        # replacement in which no entry looks like a valid structure.
+        inputs = tuple(_SEPARATOR.split(explicit))
+    elif structures and (_DOMAIN.search(query) or pdbs):
         first, last = structures[0], structures[-1]
         # Include neighbouring list entries, even when their
         # spelling would prevent them from being recognized as structures.
@@ -72,16 +88,15 @@ def read_turn(query, owner, previous, max_ligands):
         if query[:start].rstrip().endswith("、") or query[end:].lstrip().startswith("、"):
             raise ValueError("清单中有无法识别的配体，请核对后重新提交完整清单。")
         if last > first:
-            entries = _SEPARATOR.split(query[start:end].rstrip("."))
-            for ordinal, entry in enumerate(entries, 1):
-                if not _SMILES.fullmatch(entry):
-                    raise ValueError(f"第 {ordinal} 项不是完整的 SMILES，请核对后重新提交清单。")
-            inputs = tuple(entries)
+            inputs = tuple(_SEPARATOR.split(query[start:end].rstrip(".")))
     if len(inputs) >= 2 and (_DOMAIN.search(query) or pdbs):
         if len(inputs) > max_ligands:
             raise ValueError(f"本次最多可预检 {max_ligands} 个配体。")
         if len(pdbs) > 1:
             raise ValueError("请为这批配体指定一个受体。")
+        for ordinal, entry in enumerate(inputs, 1):
+            if not _SMILES.fullmatch(entry):
+                raise ValueError(f"第 {ordinal} 项不是完整的 SMILES，请核对后重新提交清单。")
         pdb = next(iter(pdbs), "")
         if previous and previous.owner == owner and (pdb, inputs) == (previous.pdb, previous.inputs):
             return previous

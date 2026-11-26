@@ -12,12 +12,14 @@ from tests.agent.test_web_docking_coordinator import Rig
 
 @pytest.mark.parametrize("items,ordinal", [
     ("bad_smiles、CCO、CCN", 1), ("CCO、bad_smiles、CCN", 2), ("CCO、CCN、bad_smiles", 3),
+    ("未知，CCO，CCN", 1), ("CCO，CCN，未知", 3), ("bad_smiles、bad_smiles_2", 1),
 ])
 def test_preflight_rejects_incomplete_ligand_list(items, ordinal):
     from src.web.docking_preflight import read_turn
 
+    previous = read_turn("PDB 6SAM，配体 CCO、CCN，先预检。", "owner", None, 100)
     with pytest.raises(ValueError, match=f"第 {ordinal} 项"):
-        read_turn(f"PDB 6SAM，配体 {items}，全部都要通过预检。", "owner", None, 100)
+        read_turn(f"PDB 6SAM，配体 {items}，全部都要通过预检。", "owner", previous, 100)
 
 
 def test_explicit_single_docking_replaces_previous_preflight(tmp_path, monkeypatch):
@@ -41,6 +43,17 @@ def test_explicit_single_docking_replaces_previous_preflight(tmp_path, monkeypat
             assert received == [(query, {})]
             assert sender._ligand_preflight is None
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("text", [
+    "请预检配体 CCO、CCN，与 PDB 6SAM 对接。",
+    "Preflight ligands CCO and CCN against PDB 6SAM.",
+])
+def test_preflight_accepts_receptor_after_complete_list(text):
+    from src.web.docking_preflight import read_turn
+
+    batch = read_turn(text, "owner", None, 100)
+    assert (batch.inputs, batch.pdb) == (("CCO", "CCN"), "6SAM")
 
 
 def test_unavailable_model_never_starts_a_preparation(tmp_path):
