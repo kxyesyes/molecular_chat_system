@@ -56,6 +56,16 @@ def test_preflight_accepts_receptor_after_complete_list(text):
     assert (batch.inputs, batch.pdb) == (("CCO", "CCN"), "6SAM")
 
 
+def test_preflight_separates_trailing_instructions_from_ligands():
+    from src.web.docking_preflight import read_turn
+
+    query = "PDB 6SAM，配体 CCO、CCN，先预检，暂时别开始。"
+    batch = read_turn(query, "owner", None, 100)
+    assert (batch.inputs, batch.pdb) == (("CCO", "CCN"), "6SAM")
+    with pytest.raises(ValueError, match="第 2 项"):
+        read_turn(query.replace("CCN", "bad_smiles、CCN"), "owner", batch, 100)
+
+
 def test_unavailable_model_never_starts_a_preparation(tmp_path):
     async def unavailable(*args, **kwargs):
         raise ConnectionError("private provider diagnostic")
