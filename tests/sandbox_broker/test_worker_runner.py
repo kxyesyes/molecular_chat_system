@@ -9,6 +9,7 @@ import ssl
 import stat
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -1089,6 +1090,9 @@ def test_real_uds_slow_header_is_cut_off_at_absolute_deadline(
 ) -> None:
     payload, _, _ = _inputs(tmp_path)
     socket_path = tmp_path / "broker.sock"
+    # Keep CA bundle loading outside the short response-header deadline.
+    transport = partial(httpx.HTTPTransport, verify=httpx.create_ssl_context())
+    monkeypatch.setattr(httpx, "HTTPTransport", transport)
     before_threads = {thread.ident for thread in threading.enumerate()}
     before_fds = _fd_count()
     server = _ScriptedUnixServer(socket_path, [_send_slow_header])
@@ -1102,6 +1106,8 @@ def test_real_uds_slow_header_is_cut_off_at_absolute_deadline(
     server.join()
 
     assert result.success is False
+    assert result.error.code == AgentErrorCode.TOOL_TIMEOUT
+    assert server.requests == [b"POST /v1/docking/jobs HTTP/1.1"]
     assert elapsed <= 0.3
     assert server.peer_closed.is_set()
     assert {thread.ident for thread in threading.enumerate()} == before_threads
