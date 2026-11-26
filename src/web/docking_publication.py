@@ -281,7 +281,7 @@ def _capture_guarded(context, *, _grant=None):
                 or runtime._docking_request_digest(manifest) != binding['request_digest']
                 or any(manifest['config'][key] != value for key, value in context._parameters.items())):
             _deny()
-        hashes = dict(input_hash=_manifest_input_hash(manifest), config_hash=_config_hash(manifest['config']))
+        hashes = dict(input_hash=binding['input_hash'], config_hash=binding['config_hash'])
         completion = output.completions.load_verified(root.task_id, **hashes)
         if (type(completion.best_energy) not in (int, float) or not math.isfinite(completion.best_energy)
                 or type(completion.pose_count) is not int or completion.pose_count < 1
