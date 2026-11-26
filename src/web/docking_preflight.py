@@ -16,9 +16,10 @@ _TOKEN = re.compile(r"(?:(?=[!-~])[^,;])+")
 _JOIN = re.compile(r"\s*(?:、|，|,|以及|和|\band\b)\s*", re.I)
 _SEPARATOR = re.compile(_JOIN.pattern + r"|\s+", re.I)
 _LIST_LABEL = re.compile(r"(?:配体(?:清单|列表)?|\bligands?\b)\s*[:：]?\s*", re.I)
-_TRAILING_INSTRUCTION = re.compile(
-    r"[,，；;。]\s*(?:先|请|全部|都|只|检查|预检|开始|不要|暂不|分别|"
-    r"please\b|check\b|preflight\b)[^,，、；;。]*[。.!！]?\s*$", re.I)
+_INSTRUCTION_CLAUSE = re.compile(
+    r"\s*(?:先|请|全部|都|只|检查|预检|开始|不要|暂(?:时)?(?:不|别)|分别|"
+    r"(?:please|check|preflight)(?=\s|$))[^、]*", re.I)
+_PREFLIGHT_COMMAND = re.compile(r"\s*(?:请)?(?:先|只)?(?:检查|预检)(?:一下)?\s*")
 _TRAILING_RECEPTOR = re.compile(
     r"(?:\s*[,，]?\s*(?:与|和|针对)|\s+(?:for|against|with)\b)\s*"
     r"(?:PDB\s*[:：]?\s*)?[1-9][a-z0-9]{3}(?:\s*(?:进行)?(?:分子)?对接)?$", re.I)
@@ -63,7 +64,14 @@ def read_turn(query, owner, previous, max_ligands):
     label = _LIST_LABEL.search(query)
     explicit = ""
     if label:
-        clause = _TRAILING_INSTRUCTION.sub("", query[label.end():]).strip().rstrip("。.!！")
+        parts = re.split(r"([,，；;。])", query[label.end():].strip().rstrip("。.!！"))
+        if len(parts) > 1 and _INSTRUCTION_CLAUSE.fullmatch(parts[-1]):
+            del parts[-2:]
+            # Earlier fields still belong to the ligand list unless the entire
+            # field is a preflight command (e.g. “先预检，暂时别开始”).
+            while len(parts) > 1 and _PREFLIGHT_COMMAND.fullmatch(parts[-1]):
+                del parts[-2:]
+        clause = "".join(parts).rstrip().rstrip("。.!！")
         explicit = _TRAILING_RECEPTOR.sub("", clause).strip()
     tokens = [token for token in _TOKEN.finditer(query) if token[0].casefold() != "and"]
     structures = [i for i, token in enumerate(tokens)
