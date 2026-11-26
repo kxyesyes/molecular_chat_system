@@ -31,6 +31,8 @@ class _DockingAssembly:
                     await finish_on_cancel(asyncio.gather(
                         *tuple(self.coordinator._http_control_tasks.values()),
                         return_exceptions=True))
+                if self.coordinator.batch_execution is not None:
+                    await finish_on_cancel(self.coordinator.batch_execution.shutdown())
                 # A completed wrapper or observation timeout is not proof of
                 # physical cleanup, nor of a successful durable revocation.
                 for root in self.coordinator._roots.values():
@@ -66,6 +68,7 @@ def assemble_docking_app(application, docking_service, *, logger=None):
     from .decision_runtime import WebDecisionRuntime
     from .docking_coordinator import DockingRequestCoordinator
     from .docking_chat_controller import DockingChatController
+    from .docking_batch_execution import HomeDockingBatchExecution
     from .routes.docking_consent_routes import setup_docking_consent_routes
 
     routes = list(application.app.router.routes)
@@ -122,6 +125,7 @@ def assemble_docking_app(application, docking_service, *, logger=None):
         coordinator = DockingRequestCoordinator(task_store=task_runtime.store,
             state_store=state, gate=application.model_request_gate,
             capture_current=capture_current, enabled=True)
+        coordinator.batch_execution = HomeDockingBatchExecution(task_runtime)
         controller = DockingChatController(runtime, coordinator, enabled=True)
         assembly = _DockingAssembly(task_runtime=task_runtime, runtime=runtime,
             coordinator=coordinator, controller=controller, toolchain=toolchain)

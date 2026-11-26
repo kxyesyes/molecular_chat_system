@@ -92,6 +92,12 @@ def test_scientific_failures_do_not_fallback_or_leak(monkeypatch, seam):
     result = module.build_ligand_sdf(ASPIRIN)
     assert not result["ok"] and "sdf_bytes" not in result
     assert result["code"] == "LIGAND_PREPARATION_FAILED"
+    if seam != "exception":
+        assert result["stage"] == {
+            "embed": "embedding", "mmff_missing": "force_field_parameters",
+            "mmff_nonconverged": "optimization", "changed_topology": "sdf_readback",
+            "degenerate": "geometry",
+        }[seam]
     assert len(calls) <= 1 and all(seed == 20261015 for seed, _ in calls)
     assert "private-path-secret-marker" not in repr(result)
 

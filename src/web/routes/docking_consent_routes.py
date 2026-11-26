@@ -369,6 +369,10 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
             raise HTTPException(503, "Preparation unavailable")
         return owner
 
+    if getattr(coordinator, 'batch_execution', None) is not None:
+        from .docking_batch_routes import setup_batch_routes
+        setup_batch_routes(app, coordinator, coordinator.batch_execution, authenticate)
+
     async def input_control(task_id, request, control):
         deadline = request_deadline(request, _INVENTORY_SECONDS if control == 'source-inventory' else _CONTROL_SECONDS)
         owner = authenticate(request)
@@ -534,7 +538,7 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
         root = coordinator._owned(value["root"], owner)
         if root is None:
             raise HTTPException(404, "Preparation not found")
-        if (root.closed or value["revision"] != root.accepted_revision
+        if (root.closed or root.batch is not None or value["revision"] != root.accepted_revision
                 or any(root.accepted_slots[key] != dict(state="fixed", value=value[key])
                        for key in ("receptor_ref", "ligand_ref"))):
             raise HTTPException(409, "Preparation changed")

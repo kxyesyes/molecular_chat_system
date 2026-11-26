@@ -12,6 +12,7 @@ import re
 import hashlib
 import json
 import tempfile
+import threading
 from collections import Counter
 from typing import Dict, List, Any, Tuple, Optional
 import shutil
@@ -43,6 +44,33 @@ _DOCKING_PHASES = (
 
 class _ProgressCallbackError(RuntimeError):
     pass
+
+
+class SharedBatchReceptor:
+    """Reuse one checked ADFR conversion for one confirmed PDB in a batch."""
+    def __init__(self, receptor_sha256):
+        self.receptor_sha256 = receptor_sha256
+        self.lock = threading.Lock()
+        self.attempted = False
+        self.prepared = None
+
+    def prepare(self, convert, source, destination, **control):
+        if hashlib.sha256(Path(source).read_bytes()).hexdigest() != self.receptor_sha256:
+            raise ReceptorPreservationError()
+        with self.lock:
+            if not self.attempted:
+                self.attempted = True
+                if convert(source, destination, **control):
+                    self.prepared = Path(destination).read_bytes()
+                return self.prepared is not None
+            if self.prepared is None:
+                return False
+            with open(destination, "xb") as output:
+                output.write(self.prepared)
+            if control.get("trace") is not None:
+                control["trace"]["receptor_method"] = "shared_verified_adfr_receptor"
+            return True
+
 
 @dataclass
 class DockingResult:
@@ -99,7 +127,8 @@ class MolecularDockingService:
     """分子对接服务类"""
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, *,
-                 command_scope=None, allowed_output_root=None, chat_toolchain=None):
+                 command_scope=None, allowed_output_root=None, chat_toolchain=None, batch_receptor=None):
+        self._batch_receptor = batch_receptor
         self._chat_toolchain = chat_toolchain
         self._chat_toolchain_at_construction = chat_toolchain
         self._chat_command_scope_at_construction = command_scope
@@ -2019,7 +2048,8 @@ class MolecularDockingService:
 
             try:
                 receptor_suffix = Path(receptor_file).suffix.lower()
-                if receptor_suffix in {".pdb", ".cif", ".mmcif"} and os.path.isfile(receptor_file):
+                if (self._batch_receptor is None and receptor_suffix in {".pdb", ".cif", ".mmcif"}
+                        and os.path.isfile(receptor_file)):
                     self.prepare_analysis_receptor(
                         receptor_file,
                         os.path.join(job_dir, f"analysis_receptor{receptor_suffix}"),
@@ -2126,7 +2156,12 @@ class MolecularDockingService:
                 job_dir,
                 preprocessing_state={"status": "in_progress"},
             )
-            if not run_preparation(self.prepare_protein, receptor_file, receptor_pdbqt):
+            if self._batch_receptor is None:
+                prepared = run_preparation(self.prepare_protein, receptor_file, receptor_pdbqt)
+            else:
+                prepared = self._batch_receptor.prepare(self.prepare_protein, receptor_file,
+                    receptor_pdbqt, trace=preparation_trace, **command_control)
+            if not prepared:
                 self._update_run_manifest(
                     job_dir,
                     preprocessing_state={

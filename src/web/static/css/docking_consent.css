@@ -47,6 +47,13 @@
 .docking-consent-card :focus-visible {outline: 2px solid #47718b; outline-offset: 3px;}
 .docking-consent-card details {margin: 12px 0; font-size: 12px;}
 .docking-consent-card pre {white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto;}
+.docking-batch-table {max-width: 100%; overflow-x: auto; margin: 12px 0;}
+.docking-batch-table table {width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums;}
+.docking-batch-table th, .docking-batch-table td {padding: 7px 9px; text-align: left; vertical-align: top; border-bottom: 1px solid #e1e6e9;}
+.docking-batch-table thead {background: #f5f6f7;}
+.docking-batch-table th {font-weight: 600;}
+.docking-batch-smiles {min-width: 8ch; max-width: 32ch; font-family: Consolas, monospace; overflow-wrap: anywhere;}
+.docking-batch-table a {margin: 0; padding: 3px 8px; white-space: nowrap;}
 @media (max-width: 600px) {
   .docking-consent-card {padding: 15px;}
   .docking-consent-card .docking-facts {grid-template-columns: 1fr;}

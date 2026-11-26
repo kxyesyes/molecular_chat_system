@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Request, Response
 from src.web.api_response import api_error
+from src.system.env import get_int_env
+from src.system.model_lifecycle import finish_on_cancel
 from src.system.redaction import normalize_warning_strings as _normalize_warning_strings
 from src.system.scientific_status import normalize_observation_status, summarize_completion
 
@@ -81,11 +83,6 @@ async def _run_batch_docking_jobs(
 ) -> dict:
     """Run batch docking through a bounded, physically cancellable queue."""
 
-    concurrency = max(1, int(os.environ.get("MEDCHAT_DOCKING_BATCH_CONCURRENCY", "1")))
-    overall_timeout = _positive_float_env("MEDCHAT_DOCKING_BATCH_TIMEOUT_SECONDS", 1800.0)
-    item_timeout = _positive_float_env("MEDCHAT_DOCKING_ITEM_TIMEOUT_SECONDS", 300.0)
-    queue = asyncio.Semaphore(concurrency)
-    cancel_events = [threading.Event() for _ in jobs]
     if invoke_in_threadpool is None:
         invoke_in_threadpool = lazy_dependency(
             None,
@@ -94,19 +91,36 @@ async def _run_batch_docking_jobs(
             label="docking threadpool",
         )()
 
-    async def run_one(index: int, job: dict) -> dict:
-        async with queue:
-            cancel_event = cancel_events[index - 1]
-            config = copy.deepcopy(base_config)
-            call = asyncio.create_task(invoke_in_threadpool(
+    async def invoke(index, job, cancel_event):
+        return await invoke_in_threadpool(
                 docking_service.perform_docking,
                 receptor_file=receptor_file,
                 ligand_input=job["ligand_input"],
-                config=config,
+                config=copy.deepcopy(base_config),
                 input_type=job["input_type"],
                 owner_session_id=owner_session_id,
                 cancel_event=cancel_event,
-            ))
+            )
+
+    return await run_bounded_docking_batch(jobs, invoke)
+
+
+async def run_bounded_docking_batch(jobs, invoke, *, semaphore=None, on_row=None,
+                                    max_item_seconds=None, max_batch_seconds=None):
+    """Schedule both docking entry points with the same deadlines and cancellation drain."""
+    queue = semaphore or asyncio.Semaphore(get_int_env("MEDCHAT_DOCKING_BATCH_CONCURRENCY", 1))
+    overall_timeout = _positive_float_env("MEDCHAT_DOCKING_BATCH_TIMEOUT_SECONDS", 1800.0)
+    if max_batch_seconds is not None:
+        overall_timeout = min(overall_timeout, max_batch_seconds)
+    item_timeout = _positive_float_env("MEDCHAT_DOCKING_ITEM_TIMEOUT_SECONDS", 300.0)
+    if max_item_seconds is not None:
+        item_timeout = min(item_timeout, max_item_seconds)
+    cancel_events = [threading.Event() for _ in jobs]
+
+    async def run_one(index: int, job: dict) -> dict:
+        async with queue:
+            cancel_event = cancel_events[index - 1]
+            call = asyncio.create_task(invoke(index, job, cancel_event))
             try:
                 result = await asyncio.wait_for(asyncio.shield(call), timeout=item_timeout)
                 return _batch_result(index, job, result)
@@ -133,7 +147,13 @@ async def _run_batch_docking_jobs(
             except Exception as exc:
                 return _batch_result(index, job, {}, error=str(exc))
 
-    tasks = [asyncio.create_task(run_one(index, job)) for index, job in enumerate(jobs, 1)]
+    async def run_and_record(index, job):
+        row = await run_one(index, job)
+        if on_row is not None:
+            await on_row(index, row)
+        return row
+
+    tasks = [asyncio.create_task(run_and_record(index, job)) for index, job in enumerate(jobs, 1)]
     gathered = asyncio.gather(*tasks, return_exceptions=True)
     timed_out = False
     try:
@@ -145,7 +165,7 @@ async def _run_batch_docking_jobs(
         for task in tasks:
             if not task.done():
                 task.cancel()
-        rows = await gathered
+        rows = await finish_on_cancel(gathered)
     except asyncio.CancelledError:
         # A disconnected request cancels this coroutine, but the shielded
         # gather would otherwise leave worker tasks and threadpool docking
@@ -155,7 +175,7 @@ async def _run_batch_docking_jobs(
         for task in tasks:
             if not task.done():
                 task.cancel()
-        await gathered
+        await finish_on_cancel(gathered)
         raise
 
     results = []

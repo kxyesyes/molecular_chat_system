@@ -46,25 +46,29 @@ function success(patch = {}) { return view({sequence: 10, send_generation: 10, t
     pose: {artifact_id: "pose", size_bytes: 100, sha256: hash,
       download_path: `/api/agent/docking/tasks/${task}/artifacts/pose`}}, ...patch}); }
 const template = fs.readFileSync(path.join(__dirname, "../src/web/templates/index.html"), "utf8");
-assert(template.includes("/static/js/home/docking_consent.js?v=20261113-vina-score-v2"),
+assert(template.includes("/static/js/home/docking_consent.js?v=20261124-batch"),
   "the changed docking feedback script needs its own cache version");
 const filename = path.join(__dirname, "../src/web/static/js/home/docking_consent.js");
 assert(fs.existsSync(filename), "D6 docking consent lifecycle module is absent");
 const source = fs.readFileSync(filename, "utf8");
-function rig() {
+function rig(batchOptions = null) {
   const document = {createElement: tag => {const el = new Element(tag); el.ownerDocument = document; return el;}};
   const window = {document};
   Object.defineProperty(window, "localStorage", {get() { throw new Error("No consent persistence"); }});
   Object.defineProperty(window, "sessionStorage", {get() { throw new Error("No consent persistence"); }});
   vm.runInNewContext(source, {window, document, console, TextEncoder, URL, setTimeout, clearTimeout});
+  const batchFile = path.join(__dirname, "../src/web/static/js/home/docking_batch.js");
+  if (batchOptions && fs.existsSync(batchFile))
+    vm.runInNewContext(fs.readFileSync(batchFile, "utf8"), {window, document, console, setTimeout, clearTimeout});
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../src/web/static/js/home/docking_source_selection.js"), "utf8"), {window, document, console});
   let now = 1000;
   const host = new Element("div"), socket = {}, sent = [], requests = [], segments = [], busy = [], timers = new Map();
-  let nextTimer = 0, responder = async () => ({});
+  let nextTimer = 0, responder = batchOptions?.respond || (async () => ({}));
   const ui = window.HomeDockingConsent.create({document, now: () => now,
     setTimer: fn => {timers.set(++nextTimer, fn); return nextTimer;}, clearTimer: key => timers.delete(key),
     send: (sock, payload) => {sent.push({sock, payload: JSON.parse(JSON.stringify(payload))}); return true;},
     request: async (url, body) => {requests.push({url, body: body === undefined ? undefined : JSON.parse(JSON.stringify(body))}); return responder(url, body);},
+    storage: batchOptions?.storage, mountRestoredBatch: () => host.appendChild(document.createElement("section")),
     onSegment: event => segments.push(event), onBusy: value => busy.push(value)});
   ui.configure(socket, true);
   ui.begin(socket, tag => host.appendChild(document.createElement(tag)));
@@ -73,6 +77,129 @@ function rig() {
     setNow: value => {now = value;}, respond: fn => {responder = fn;}};
 }
 async function run() {
+  const batch = {task_id: task, pdb_id: "6SAM", ligands: [{ordinal: 3, smiles: "CCO"}, {ordinal: 1, smiles: "CCN"}]};
+  const batchView = () => view({batch, preview: {prepared: prepared()}, reason_code: "inputs_confirmed_staging_required"});
+  const proof = () => ({...batch, receptor_sha256: hash, reference_residue: prepared().reference_residue,
+    parameters, approval_nonce: "b".repeat(64), binding_digest: hash});
+  const summary = {task_id: task, pdb_id: "6SAM", status: "partial", rows: [
+    {...batch.ligands[0], status: "completed", best_energy: -4.2, total_poses: 2,
+      download_path: `/api/agent/docking/tasks/${task}/batch-poses/3`},
+    {...batch.ligands[1], status: "failed", error: "配体转换失败"}]};
+  const stored = new Map();
+  const batchOptions = {storage: {getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value),
+    removeItem: key => stored.delete(key)}};
+  {
+    const r = rig();
+    r.ui.begin(r.socket, tag => r.host.appendChild(new Element(tag)));
+    const message = "第 2 行的 SMILES 无效，请更正后重新提交。";
+    assert(r.ui.handle({type: "error", code: "docking_unavailable", docking_request_rejected: true,
+      docking_batch_clarification: true, message}, r.socket));
+    assert(r.host.textContent.includes(message));
+    assert(!r.ui.blocked());
+  }
+  {
+    const r = rig(batchOptions); r.ui.handle(batchView(), r.socket);
+    assert(button(r.host, "生成批量确认单"), "a batch event must mount the batch review instead of single-ligand staging");
+    assert(!button(r.host, "生成本次确认单"));
+    assert(r.host.textContent.indexOf("候选 3") < r.host.textContent.indexOf("候选 1"));
+    assert.equal(r.requests.length, 0);
+    r.respond(async () => proof());
+    await button(r.host, "生成批量确认单").click();
+    assert.deepStrictEqual(r.requests[0], {url: `/api/agent/docking/tasks/${task}/batch-preview`, body: {revision: 0}});
+    assert.equal(stored.size, 0);
+    for (const fragment of ["CCO", "CCN", "6SAM", "ASP", "每个配体", "1, 2, 3", "20, 20, 20"]) assert(r.host.textContent.includes(fragment), fragment);
+    assert(!r.host.textContent.includes(proof().approval_nonce));
+    const approve = button(r.host, "确认并运行批量对接");
+    r.respond(async () => summary);
+    await Promise.all([approve.click(), approve.click()]);
+    assert.deepStrictEqual(r.requests[1], {url: `/api/agent/docking/tasks/${task}/batch-approve`,
+      body: {approval_nonce: proof().approval_nonce, binding_digest: hash, confirm: true}});
+    assert.equal(r.requests.length, 2);
+    assert.deepStrictEqual([...stored.values()], [task]);
+    for (const fragment of ["部分完成", "成功 1", "失败 1", "-4.2", "配体转换失败"]) assert(r.host.textContent.includes(fragment), fragment);
+    assert.deepStrictEqual(all(r.host).filter(el => el.tagName === "a").map(el => el.attributes.href), [summary.rows[0].download_path]);
+    r.ui.disconnect(r.socket);
+    assert(r.host.textContent.includes("-4.2"), "a closed preparation socket must preserve the submitted batch");
+  }
+  {
+    const r = rig({storage: null});
+    r.ui.handle(batchView(), r.socket);
+    r.respond(async () => ({...proof(), ligands: [...batch.ligands].reverse()}));
+    await button(r.host, "生成批量确认单").click();
+    assert(!button(r.host, "确认并运行批量对接"), "a changed ligand order cannot authorize execution");
+  }
+  for (const action of ["cancel", "revise", "disconnect"]) {
+    const r = rig({storage: null}); r.ui.handle(batchView(), r.socket);
+    r.respond(async () => proof());
+    await button(r.host, "生成批量确认单").click();
+    const approve = button(r.host, "确认并运行批量对接");
+    if (action === "cancel") await button(r.host, "取消本次请求").click();
+    if (action === "revise") r.ui.handle({...batchView(), revision: 1, sequence: 2, send_generation: 2}, r.socket);
+    if (action === "disconnect") r.ui.disconnect(r.socket);
+    await approve.click();
+    assert(!r.requests.some(item => item.url.endsWith("/batch-approve")), action);
+  }
+  {
+    const r = rig({...batchOptions, respond: async () => ({...summary, status: "running",
+      rows: batch.ligands.map(ligand => ({...ligand, status: "queued"}))})});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepStrictEqual(r.requests, [{url: `/api/agent/docking/tasks/${task}/batch-status`, body: undefined}]);
+    assert(r.host.textContent.includes("排队中"));
+    assert(!button(r.host, "确认并运行批量对接"));
+    assert(!button(r.host, "取消批量对接"));
+    r.respond(async () => summary);
+    assert.equal(r.timers.size, 1, "a restored in-progress batch must poll");
+    await [...r.timers.values()][0]();
+    assert(r.host.textContent.includes("部分完成"));
+    assert(r.requests.every(item => item.url.endsWith("/batch-status")));
+  }
+  {
+    const r = rig({...batchOptions, respond: async () => ({...summary, rows: [
+      {...summary.rows[0], download_path: "javascript:alert(1)"}, summary.rows[1]]})});
+    await new Promise(resolve => setImmediate(resolve));
+    assert(!all(r.host).some(el => el.tagName === "a"));
+  }
+  {
+    const r = rig({...batchOptions, respond: async () => {throw Object.assign(new Error(), {status: 404});}});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepStrictEqual([...stored.values()], [task], "reload may reach the status route before approval commits");
+    r.respond(async () => summary);
+    await button(r.host, "重新读取状态").click();
+    assert(r.host.textContent.includes("部分完成"));
+    assert(r.requests.every(item => item.url.endsWith("/batch-status")));
+  }
+  {
+    const r = rig({storage: null}); r.ui.handle(batchView(), r.socket);
+    r.respond(async () => proof());
+    await button(r.host, "生成批量确认单").click();
+    const running = {...summary, status: "running", rows: [summary.rows[0], {...batch.ligands[1], status: "running"}]};
+    r.respond(async () => running);
+    await button(r.host, "确认并运行批量对接").click();
+    const cancel = button(r.host, "取消批量对接");
+    assert(cancel, "the authoring card can cancel a running batch");
+    let late;
+    r.respond(() => new Promise(resolve => {late = resolve;}));
+    const oldPoll = [...r.timers.values()][0]();
+    const cancelled = {...running, status: "cancelled", rows: [summary.rows[0], {...batch.ligands[1], status: "cancelled"}]};
+    r.respond(async url => url.endsWith("/batch-cancel") ? {} : {...running, status: "cancel_requested"});
+    await Promise.all([cancel.click(), cancel.click()]);
+    late(running); await oldPoll;
+    assert(r.host.textContent.includes("正在取消"));
+    r.respond(async () => cancelled);
+    await [...r.timers.values()].at(-1)();
+    assert(r.host.textContent.includes("批量对接 · 已取消"));
+    assert(!button(r.host, "取消批量对接"));
+    assert(r.host.textContent.includes("-4.2"));
+    assert.deepStrictEqual(r.requests.filter(item => item.url.endsWith("/batch-cancel")),
+      [{url: `/api/agent/docking/tasks/${task}/batch-cancel`, body: {}}]);
+  }
+  {
+    const r = rig({...batchOptions, respond: async () => ({...summary, rows: [summary.rows[0],
+      {...batch.ligands[1], status: "timeout", error: "超过时间限制"}]})});
+    await new Promise(resolve => setImmediate(resolve));
+    assert(r.host.textContent.includes("失败 1") && r.host.textContent.includes("已超时"));
+    assert(r.host.textContent.includes("-4.2"));
+  }
   {
     const r = rig();
     r.ui.handle(view(), r.socket);

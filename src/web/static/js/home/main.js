@@ -161,6 +161,11 @@
 
   const dockingUI = window.HomeDockingConsent?.create({
     document,
+    storage: tabStorage,
+    mountRestoredBatch: () => {
+      enterChatMode();
+      return elements.chatContainer.appendChild(document.createElement("section"));
+    },
     send: (socket, payload) => {
       if (socket !== ws || decisionAwaitingReady || !socket || socket.readyState !== WebSocket.OPEN || protocolDesyncedSocket === socket) return false;
       try {socket.send(JSON.stringify(payload)); return true;}
@@ -168,9 +173,11 @@
     },
     request: async (path, body) => {
       const abort = new AbortController();
-      const deadline = setTimeout(() => abort.abort(), path === "/api/agent/docking/preparations" || path.endsWith("/source-inventory") ? 32000 : 6000);
+      const deadline = setTimeout(() => abort.abort(), path === "/api/agent/docking/preparations" ||
+        path.endsWith("/source-inventory") || path.endsWith("/batch-preview") ? 32000 : 6000);
       try {
-        const response = await fetch(path, {method: "POST", credentials: "same-origin", cache: "no-store", signal: abort.signal,
+        const response = await fetch(path, {method: path.endsWith("/batch-status") ? "GET" : "POST",
+          credentials: "same-origin", cache: "no-store", signal: abort.signal, keepalive: path.endsWith("/batch-approve"),
           ...(body === undefined ? {} : {headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})});
         if (!response.ok) throw new Error("Docking request unavailable");
         return await response.json();

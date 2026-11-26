@@ -131,17 +131,19 @@ def build_ligand_sdf(smiles: str) -> dict:
             params = AllChem.ETKDGv3()
             params.randomSeed = 20261015
             if AllChem.EmbedMolecule(molecule, params) != 0:
-                return _failure("LIGAND_PREPARATION_FAILED")
+                return dict(_failure("LIGAND_PREPARATION_FAILED"), stage="embedding")
             if not AllChem.MMFFHasAllMoleculeParams(molecule):
-                return _failure("LIGAND_PREPARATION_FAILED")
+                return dict(_failure("LIGAND_PREPARATION_FAILED"), stage="force_field_parameters")
             if AllChem.MMFFOptimizeMolecule(molecule, mmffVariant="MMFF94", maxIters=200) != 0:
-                return _failure("LIGAND_PREPARATION_FAILED")
-            if not _valid_geometry(molecule) or not _equivalent(reference, molecule, Chem):
-                return _failure("LIGAND_PREPARATION_FAILED")
+                return dict(_failure("LIGAND_PREPARATION_FAILED"), stage="optimization")
+            if not _valid_geometry(molecule):
+                return dict(_failure("LIGAND_PREPARATION_FAILED"), stage="geometry")
+            if not _equivalent(reference, molecule, Chem):
+                return dict(_failure("LIGAND_PREPARATION_FAILED"), stage="structure_check")
             block = Chem.MolToMolBlock(molecule, includeStereo=True)
             readback = Chem.MolFromMolBlock(block, sanitize=True, removeHs=False, strictParsing=True)
             if not _equivalent(reference, readback, Chem) or not _valid_geometry(readback):
-                return _failure("LIGAND_PREPARATION_FAILED")
+                return dict(_failure("LIGAND_PREPARATION_FAILED"), stage="sdf_readback")
             sdf = (block.rstrip("\r\n") + "\n$$$$\n").encode("utf-8")
             return dict(ok=True, sdf_bytes=sdf, sha256=hashlib.sha256(sdf).hexdigest(),
                 rule_version="modeled-ligand-v1", atom_count=readback.GetNumAtoms(),

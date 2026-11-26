@@ -122,6 +122,18 @@ def _initialize_once(path: Path) -> None:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {declaration}")
 
         statements = (
+            """CREATE TABLE IF NOT EXISTS home_docking_batches (
+                task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE,
+                pdb_id TEXT NOT NULL, runtime_generation TEXT NOT NULL,
+                manifest_json TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS home_docking_batch_rows (
+                task_id TEXT NOT NULL REFERENCES home_docking_batches(task_id) ON DELETE CASCADE,
+                position INTEGER NOT NULL, ordinal INTEGER NOT NULL, smiles TEXT NOT NULL,
+                child_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'queued',
+                error TEXT, best_energy REAL, total_poses INTEGER, receipt_json TEXT,
+                PRIMARY KEY(task_id, ordinal), UNIQUE(task_id, position)
+            )""",
             # Private candidate evidence only. No task FK: consent ownership
             # exists independently of scientific task-row reservation.
             """CREATE TABLE IF NOT EXISTS docking_publications (
