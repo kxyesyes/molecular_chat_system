@@ -4,6 +4,20 @@ from src.web.web_business import WebTurnProjection
 from src.web.web_request import prepare_web_request
 from tests.agent.test_pi_web_activity_context import activity_evidence
 from tests.agent.test_pi_web_candidate_context import candidate_evidence
+from tests.agent.test_pi_web_target_context import target_evidence
+
+
+@pytest.mark.parametrize("greeting", ["你好", "hello!"])
+def test_greeting_carries_no_scientific_records_into_model_request(greeting):
+    history = [{"target_structure_evidence": target_evidence("owner"),
+                "activity_evidence": activity_evidence("owner"),
+                "candidate_evidence": candidate_evidence("owner")}]
+    projection = WebTurnProjection(greeting, "owner", history)
+    request = prepare_web_request({"message": greeting}, session_id="owner", trace_id="next",
+        **projection.readback_contexts, implicit_records=projection.implicit_records)
+    assert request.request_kind == "chat" and not request.required_tools
+    assert not {"prior_target_context", "prior_activity_context", "prior_candidate_context"}.intersection(
+        request.context.metadata)
 
 
 def descriptors(owner):

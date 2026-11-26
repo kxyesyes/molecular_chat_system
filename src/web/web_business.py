@@ -430,7 +430,7 @@ class WebTurnProjection:
     @cached_property
     def readback_contexts(self):
         """Accepted facts available to both intent classification and the answer for this turn."""
-        if self.concept_history is not None:
+        if self.concept_history is not None or SOCIAL_TURN.fullmatch(self.query):
             return {}
         contexts = {'prior_target_context': self.model_target_context(),
                     'prior_candidate_context': self.model_candidate_context(),
