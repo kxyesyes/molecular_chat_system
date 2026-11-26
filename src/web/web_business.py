@@ -14,6 +14,7 @@ import re
 from src.agent import evidence_followup
 from src.agent.contracts import RunOutcome
 from . import property_comparison
+from .decision_request import SOCIAL_TURN
 from .property_constraints import generation_constraint_report
 from .ranked_target_structures import rank_followup_kind, ranked_structure_followup
 from .scientific_obligations import OPTIMIZATION_INTERPRETATION
@@ -458,7 +459,8 @@ class WebTurnProjection:
     def implicit_records(self):
         """Offer current verified records for a free-form discussion without resolving its subject."""
         from src.agent.contracts.concept_request import is_concept_explanation
-        if self.acknowledgement or self.concept_history or is_concept_explanation(self.query):
+        if (self.acknowledgement or SOCIAL_TURN.fullmatch(self.query)
+                or self.concept_history or is_concept_explanation(self.query)):
             return {}
         candidate = self.model_candidate_context(implicit=True)
         if candidate is None:

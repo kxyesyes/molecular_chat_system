@@ -21,6 +21,7 @@ from src.agent.scientific_session.decision_requirements import prepare_requireme
 from src.agent.persistence.redaction import contains_secret_material
 
 
+SOCIAL_TURN = re.compile(r'\s*(?:你好|您好|谢谢|再见|hi|hello|thanks|thank\s+you)[!！。.\s]*', re.I)
 _FIELDS = frozenset({'type', 'message', 'enable_tools', 'enable_rag', 'mol_count',
     'rag_count', 'temperature', 'timestamp', 'client_id', 'reference', 'selection'})
 _EXPLAIN = re.compile(r'^\s*(?:请)?(?:解释|介绍|什么是|讲解)|^\s*(?:please\s+)?'
@@ -188,7 +189,7 @@ def _classify(query):
         if not target_lookup_purpose:
             _require_complete_coverage(query, tools, metrics)
         return 'scientific', frozenset(tools), metrics
-    if re.fullmatch(r'\s*(?:你好|您好|谢谢|再见|hi|hello|thanks|thank\s+you)[!！。.\s]*', query, re.I):
+    if SOCIAL_TURN.fullmatch(query):
         return 'chat', frozenset(), ()
     # A1 has no reliable general intent classifier. Unknown does not mean chat.
     raise DecisionAdmissionError('request_clarification_required')
