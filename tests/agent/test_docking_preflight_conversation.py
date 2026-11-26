@@ -87,6 +87,62 @@ def test_unavailable_model_never_starts_a_preparation(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("question", [
+    "刚刚这批配体中，哪些通过了预检？只解释，不要运行对接。",
+    "这批配体里哪些通过了预检，只解释一下。",
+])
+def test_current_batch_question_is_not_a_replacement_list(question):
+    from src.web.docking_preflight import read_turn
+
+    previous = read_turn("PDB 6SAM，配体 CO、CCC，先预检。", "owner", None, 100)
+    assert read_turn(question, "owner", previous, 100) is previous
+    assert read_turn(question, "another-owner", previous, 100) is None
+
+
+def test_rejected_replacement_keeps_previous_report_read_only(tmp_path, monkeypatch):
+    from src.web import docking_preflight
+
+    calls = []
+    policies = iter(["inspect", "explain", "previous_report", "require_all", "inspect", "explain"])
+
+    async def choose(*_):
+        return next(policies)
+
+    async def check(batch, live):
+        assert live()
+        calls.append(batch.inputs)
+        batch.rows = [(i, raw, {"ok": True, "canonical_smiles": raw})
+                      for i, raw in enumerate(batch.inputs, 1)]
+
+    async def run():
+        rig = Rig(tmp_path)
+        runtime, sender = runtime_sender(socket_for())
+        runtime.application.model = object()
+        monkeypatch.setattr(docking_preflight, "choose_policy", choose)
+        monkeypatch.setattr(docking_preflight, "check_ligands", check)
+        async with rig.client() as client:
+            c = controller(runtime, rig.coordinator(client), enabled=True)
+            async def turn(query):
+                offset = len(frames(sender.websocket))
+                assert await c.handle(sender, {"message": query})
+                await settle(runtime)
+                last = frames(sender.websocket)[offset:][-1]
+                return last.get("content") or last["message"]
+            assert "CO · 通过" in await turn("PDB 6SAM，配体 CO、CCC，先预检。")
+            assert "第 2 项" in await turn("换一批。PDB 1CRN，配体 C、bad_smiles，先预检。")
+            answer = await turn("刚换的这批，哪些通过了预检？")
+            assert "第 2 项" in answer and "CCC" not in answer
+            old = await turn("请只回顾上一批的预检结果。")
+            assert "上一批" in old and "6SAM" in old and "候选 2 · CCC · 通过" in old
+            assert "第 2 项" in await turn("把这批都拿去对接。")
+            assert not rig.calls and not c.coordinator._roots
+            assert "候选 2 · CC · 通过" in await turn("PDB 1CRN，配体 C、CC，先预检。")
+            new = await turn("哪些通过了预检？")
+            assert "候选 2 · CC · 通过" in new and "CCC" not in new
+            assert calls == [("CO", "CCC"), ("C", "CC")]
+    asyncio.run(run())
+
+
 def test_preflight_followups_reuse_actual_rows_and_only_offer_requested_subset(tmp_path, monkeypatch):
     from src.docking import chat_preparation
 

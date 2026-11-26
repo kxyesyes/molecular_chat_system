@@ -288,6 +288,11 @@ class DockingChatController:
         # Detach the caller's bounded plain history before the first await. The
         # coordinator remains the sole owner of the actual source snapshot.
         if clarification is not None:
+            from .docking_preflight import LigandPreflight
+            previous = getattr(sender, '_ligand_preflight', None)
+            prior = previous.last_checked_report() if previous and previous.owner == owner else ''
+            sender._ligand_preflight = LigandPreflight(owner, '', (), input_error=clarification,
+                                                      previous_report=prior)
             await self._error(sender, 'docking_unavailable', rejected=True,
                               batch_clarification=True, message=clarification)
             return True
@@ -341,10 +346,15 @@ class DockingChatController:
         if not live():
             return True
         text = None
-        if policy == 'clarify':
-            text = '请说明要预检哪些配体、解释哪项结果，或是否允许跳过未通过的配体。'
+        if policy == 'previous_report':
+            text = ('上一批已完成的预检记录：\n' + preflight.previous_report if preflight.previous_report
+                    else '当前会话没有上一批已完成的预检记录。')
         elif policy == 'unavailable':
             text = '未能确认本次请求的意思，请重试。本次没有启动对接。'
+        elif preflight.input_error:
+            text = '本批清单尚未完成预检。' + preflight.input_error
+        elif policy == 'clarify':
+            text = '请说明要预检哪些配体、解释哪项结果，或是否允许跳过未通过的配体。'
         elif policy in {'explain', 'compare_history'} and not preflight.rows:
             text = '当前会话还没有这批配体的预检记录。可以先检查这批配体。'
         else:
