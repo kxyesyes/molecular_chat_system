@@ -9,6 +9,7 @@ import sqlite3
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -40,12 +41,18 @@ async def capture(case, **kwargs):
 
 
 def test_capture_verified_private_candidate_without_publication(tmp_path, target_case, monkeypatch):
-    publication_api()
+    api = publication_api()
     async def run():
         async with execution_case(tmp_path, target_case, monkeypatch) as case:
             await settle(case)
             before = case.rig.tasks.get_docking_consent(case.root.preparation_id)
+            input_hash = Mock(wraps=api._manifest_input_hash)
+            config_hash = Mock(wraps=api._config_hash)
+            monkeypatch.setattr(api, '_manifest_input_hash', input_hash)
+            monkeypatch.setattr(api, '_config_hash', config_hash)
             candidate = await capture(case)
+            input_hash.assert_called_once()
+            config_hash.assert_called_once()
             projection = candidate.projection
             assert projection.energy_kcal_mol == -7.2
             assert projection.pose_count == 1
@@ -66,6 +73,7 @@ def test_capture_verified_private_candidate_without_publication(tmp_path, target
             assert projection.pose_size == len(pose['content'])
             assert projection.pose_artifact_id == 'pose'
             assert (await capture(case)).projection == projection
+            assert (input_hash.call_count, config_hash.call_count) == (2, 2)
             assert case.raw == [True]
             assert case.rig.tasks.get_docking_consent(case.root.preparation_id) == before
             assert case.root.phase != 'SUCCEEDED'
@@ -120,7 +128,8 @@ def test_capture_rejects_reconstructed_owner(tmp_path, target_case, monkeypatch,
     'stager', 'completion_store', 'pending', 'uncertain', 'cleanup', 'context',
     'accepted_input', 'descriptor', 'parameters', 'runtime_closed', 'generation',
     'execution_replaced', 'runtime_replaced', 'origin_model_replaced', 'origin_generation_replaced',
-    'root_cancel_requested', 'input_stager_root', 'preparation_pending'])
+    'root_cancel_requested', 'input_stager_root', 'preparation_pending',
+    'input_digest_mismatch', 'config_digest_mismatch'])
 def test_capture_denies_changed_live_authority_before_artifact_reads(
         tmp_path, target_case, monkeypatch, mutation):
     api = publication_api()
@@ -132,6 +141,8 @@ def test_capture_denies_changed_live_authority_before_artifact_reads(
                 if mutation in {'source', 'root', 'model'}:
                     invalidate_source(case.rig, mutation)
                 elif mutation == 'no_execution': patch.setattr(case.context, '_execution', None)
+                elif mutation == 'input_digest_mismatch': patch.setattr(api, '_manifest_input_hash', lambda _: '0' * 64)
+                elif mutation == 'config_digest_mismatch': patch.setattr(api, '_config_hash', lambda _: '0' * 64)
                 elif mutation == 'unsettled': patch.setattr(operation, 'settled', False)
                 elif mutation == 'failed': patch.setattr(operation, 'status', 'FAILED')
                 elif mutation == 'cancelled':
