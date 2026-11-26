@@ -3746,8 +3746,9 @@ async def _run_hung_create_case(
     finally:
         sdk.release_create.set()
         try:
-            await service.stop(timeout=0.5)
-            await asyncio.sleep(0)
+            # The create deadline was observed above. Let the released fixture
+            # finish its normal bounded shutdown before inspecting pending tasks.
+            await service.stop()
         except BaseException as exc:
             cleanup_error = exc
     if first is not None:

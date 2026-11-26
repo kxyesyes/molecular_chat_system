@@ -8,7 +8,7 @@
     "src/docking/molecular_docking_service.py": "036e4febd950c0c789be793d9c5730a55c3948ac9adcf33829d39e2e885710c3",
     "src/task_runtime/backends/local.py": "c0826225dbd8b639af4ed27bf1891335fab3398e82bc621b86913d4abe114720",
     "src/task_runtime/docking_consent.py": "8d678cde3a2e37ec43f33d0ab87957c5a72566f09f41e075d3cf972a5d2be466",
-    "src/task_runtime/docking_execution.py": "b07407bc1fc9ae28c6f48486201a8d9bdfccc07054a052408f0d48e171912d72",
+    "src/task_runtime/docking_execution.py": "0d6cf5da7696160c665d0e9b06ebdd474ec4ae9fa3f1f4b05b2b860dda2b2c53",
     "src/task_runtime/runtime.py": "eead423c6577bdd2637f344c602ce28c2bc792745d44c920c724aa20acceef0f",
     "src/task_runtime/staging.py": "e399d9323e5d54db61ffdc10e7721a242f634436debd663199259145887005a1",
     "src/task_runtime/store.py": "f277d3641ec7a5b48e8a3a835fd6e08ea9168a79e307544de30ce884830a3a3a",
